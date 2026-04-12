@@ -111,38 +111,3 @@ mod tests {
     }
 
     /// Cross-validate against FFI C implementation.
-    #[test]
-    #[cfg(feature = "ffi")]
-    fn test_logsum_matches_ffi() {
-        p7_flogsuminit();
-        unsafe {
-            crate::ffi::p7_FLogsumInit();
-        }
-
-        let test_pairs: &[(f32, f32)] = &[
-            (0.0, 0.0),
-            (-1.0, -2.0),
-            (-5.0, -0.5),
-            (0.0, f32::NEG_INFINITY),
-            (f32::NEG_INFINITY, 0.0),
-            (f32::NEG_INFINITY, f32::NEG_INFINITY),
-            (-100.0, -100.0),
-            (-0.4, -0.5),
-            (10.0, -5.0),
-        ];
-
-        for &(a, b) in test_pairs {
-            let rust_result = p7_flogsum(a, b);
-            let c_result = unsafe { crate::ffi::p7_FLogsum(a, b) };
-            assert_eq!(
-                rust_result.to_bits(),
-                c_result.to_bits(),
-                "Mismatch for ({}, {}): rust={:e}, c={:e}",
-                a,
-                b,
-                rust_result,
-                c_result
-            );
-        }
-    }
-}

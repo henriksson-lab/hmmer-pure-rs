@@ -45,11 +45,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-/// FFI bindings to the C HMMER library (for testing and gradual migration).
-#[cfg(feature = "ffi")]
-pub mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
 
 pub mod alphabet;
 pub mod bg;

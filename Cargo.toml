@@ -25,22 +25,9 @@ thiserror = "2"
 rayon = "1"
 divsufsort = "2"
 
-[features]
-default = []
-ffi = ["cc", "bindgen"]
-
-[build-dependencies]
-cc = { version = "1", optional = true }
-bindgen = { version = "0.71", optional = true }
-
 [[bin]]
 name = "hmmsearch"
 path = "src/bin/hmmsearch_rust.rs"
-
-[[bin]]
-name = "hmmsearch_ffi"
-path = "src/bin/hmmsearch.rs"
-required-features = ["ffi"]
 
 [[bin]]
 name = "hmmstat"
@@ -104,7 +91,6 @@ path = "src/bin/hmmalign.rs"
 
 [dev-dependencies]
 tempfile = "3"
-libc = "0.2"
 
 [profile.release]
 opt-level = 3

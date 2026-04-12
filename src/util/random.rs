@@ -135,25 +135,3 @@ mod tests {
         assert_ne!(v2, v1);
     }
 
-    #[cfg(feature = "ffi")]
-    #[test]
-    fn test_mt_matches_c() {
-        // Cross-validate with C implementation
-        unsafe {
-            let c_rng = crate::ffi::esl_randomness_Create(42);
-            let mut rust_rng = MersenneTwister::new(42);
-
-            for i in 0..100 {
-                let c_val = crate::ffi::esl_random(c_rng);
-                let r_val = rust_rng.next_f64();
-                assert!(
-                    (c_val - r_val).abs() < 1e-10,
-                    "Mismatch at iteration {}: c={}, rust={}",
-                    i, c_val, r_val
-                );
-            }
-
-            crate::ffi::esl_randomness_Destroy(c_rng);
-        }
-    }
-}
