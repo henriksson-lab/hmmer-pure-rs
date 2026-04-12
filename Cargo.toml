@@ -12,7 +12,6 @@ keywords = ["bioinformatics", "hmm", "hmmer", "sequence-analysis", "profile-hmm"
 categories = ["science", "command-line-utilities"]
 include = [
     "src/**/*.rs",
-    "build.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",
@@ -26,68 +25,8 @@ rayon = "1"
 divsufsort = "2"
 
 [[bin]]
-name = "hmmsearch"
-path = "src/bin/hmmsearch_rust.rs"
-
-[[bin]]
-name = "hmmstat"
-path = "src/bin/hmmstat.rs"
-
-[[bin]]
-name = "hmmemit"
-path = "src/bin/hmmemit.rs"
-
-[[bin]]
-name = "hmmconvert"
-path = "src/bin/hmmconvert.rs"
-
-[[bin]]
-name = "phmmer"
-path = "src/bin/phmmer.rs"
-
-[[bin]]
-name = "hmmbuild"
-path = "src/bin/hmmbuild.rs"
-
-[[bin]]
-name = "jackhmmer"
-path = "src/bin/jackhmmer.rs"
-
-[[bin]]
-name = "nhmmer"
-path = "src/bin/nhmmer.rs"
-
-[[bin]]
-name = "hmmpress"
-path = "src/bin/hmmpress.rs"
-
-[[bin]]
-name = "hmmscan"
-path = "src/bin/hmmscan.rs"
-
-[[bin]]
-name = "hmmlogo"
-path = "src/bin/hmmlogo.rs"
-
-[[bin]]
-name = "nhmmscan"
-path = "src/bin/nhmmscan.rs"
-
-[[bin]]
-name = "alimask"
-path = "src/bin/alimask.rs"
-
-[[bin]]
-name = "makehmmerdb"
-path = "src/bin/makehmmerdb.rs"
-
-[[bin]]
-name = "hmmfetch"
-path = "src/bin/hmmfetch.rs"
-
-[[bin]]
-name = "hmmalign"
-path = "src/bin/hmmalign.rs"
+name = "hmmer"
+path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"

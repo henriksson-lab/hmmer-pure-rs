@@ -390,6 +390,32 @@ impl OProfile {
             (3.0_f32 / (l as f32 + 3.0)).ln(),
         );
     }
+
+    /// Access a transition score from the underlying profile data.
+    pub fn tsc_at(&self, node: usize, tsc_type: usize) -> f32 {
+        // Look up from the generic profile's transition score
+        // This requires the profile data stored in word-precision twv
+        // For restriping, we approximate from the word value
+        let nq = nqw(self.m);
+        let q = (node) % nq;
+        let z = (node) / nq;
+        if z < 8 && q < self.twv.len() / 8 {
+            // Map back: twv layout is [q*7+t] for t=0..6, then DD at 7*nq+q
+            let idx = if tsc_type == P7P_DD { 7 * nq + q } else { q * 7 + tsc_type };
+            if idx < self.twv.len() && z < 8 {
+                return self.twv[idx][z] as f32 / self.scale_w;
+            }
+        }
+        f32::NEG_INFINITY
+    }
+}
+
+/// Public wordify for use by AVX2/NEON restriping.
+pub fn wordify_pub(scale_w: f32, sc: f32) -> i16 {
+    let sc = (scale_w * sc).round();
+    if sc >= 32767.0 { 32767 }
+    else if sc <= -32768.0 { -32768 }
+    else { sc as i16 }
 }
 
 #[cfg(test)]

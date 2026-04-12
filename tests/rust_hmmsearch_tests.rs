@@ -51,8 +51,8 @@ fn extract_hit_names(output: &str) -> Vec<String> {
 
 #[test]
 fn rust_hmmsearch_finds_20aa_hits() {
-    let output = Command::new(binary_path("hmmsearch"))
-        .args(&[
+    let output = Command::new(binary_path("hmmer"))
+        .args(&["search",
             &test_path("hmmer/testsuite/20aa.hmm"),
             &test_path("hmmer/testsuite/20aa-alitest.fa"),
         ])
@@ -68,8 +68,8 @@ fn rust_hmmsearch_finds_20aa_hits() {
 
 #[test]
 fn rust_hmmsearch_finds_globin_hits() {
-    let output = Command::new(binary_path("hmmsearch"))
-        .args(&[
+    let output = Command::new(binary_path("hmmer"))
+        .args(&["search",
             &test_path("hmmer/tutorial/globins4.hmm"),
             &test_path("hmmer/tutorial/globins45.fa"),
         ])
@@ -87,8 +87,8 @@ fn rust_hmmsearch_finds_globin_hits() {
 fn rust_hmmsearch_tblout_works() {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
-    let output = Command::new(binary_path("hmmsearch"))
-        .args(&[
+    let output = Command::new(binary_path("hmmer"))
+        .args(&["search",
             "--tblout", tblout.to_str().unwrap(),
             &test_path("hmmer/testsuite/20aa.hmm"),
             &test_path("hmmer/testsuite/20aa-alitest.fa"),
@@ -105,8 +105,8 @@ fn rust_hmmsearch_tblout_works() {
 
 #[test]
 fn rust_hmmsearch_no_hits_for_unrelated() {
-    let output = Command::new(binary_path("hmmsearch"))
-        .args(&[
+    let output = Command::new(binary_path("hmmer"))
+        .args(&["search",
             &test_path("hmmer/testsuite/Caudal_act.hmm"),
             &test_path("hmmer/testsuite/20aa-alitest.fa"),
         ])
@@ -119,8 +119,8 @@ fn rust_hmmsearch_no_hits_for_unrelated() {
 
 #[test]
 fn rust_hmmsearch_max_flag_works() {
-    let output = Command::new(binary_path("hmmsearch"))
-        .args(&[
+    let output = Command::new(binary_path("hmmer"))
+        .args(&["search",
             "--max",
             &test_path("hmmer/testsuite/20aa.hmm"),
             &test_path("hmmer/testsuite/20aa-alitest.fa"),

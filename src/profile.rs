@@ -223,15 +223,15 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
             .map(|k| occ[k] * (hmm.m - k + 1) as f32)
             .sum();
         for k in 1..=hmm.m {
-            gm.set_tsc(k - 1, P7P_BM, (occ[k] / z).ln()); // off-by-one: entry at Mk stored as [k-1][BM]
+            gm.set_tsc(k - 1, P7P_BM, ((occ[k] / z) as f64).ln() as f32);
         }
     } else {
         // Glocal mode: left wing retraction
-        let mut z = hmm.t[0][MD].ln();
-        gm.set_tsc(0, P7P_BM, (1.0 - hmm.t[0][MD]).ln());
+        let mut z = (hmm.t[0][MD] as f64).ln();
+        gm.set_tsc(0, P7P_BM, ((1.0 - hmm.t[0][MD]) as f64).ln() as f32);
         for k in 1..hmm.m {
-            gm.set_tsc(k, P7P_BM, z + hmm.t[k][DM].ln());
-            z += hmm.t[k][DD].ln();
+            gm.set_tsc(k, P7P_BM, (z + (hmm.t[k][DM] as f64).ln()) as f32);
+            z += (hmm.t[k][DD] as f64).ln();
         }
     }
 
@@ -246,15 +246,15 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
         gm.nj = 0.0;
     }
 
-    // Transition scores (nodes 1..M-1)
+    // Transition scores (nodes 1..M-1) — use f64 log to match C's log()
     for k in 1..gm.m {
-        gm.set_tsc(k, P7P_MM, hmm.t[k][MM].ln());
-        gm.set_tsc(k, P7P_MI, hmm.t[k][MI].ln());
-        gm.set_tsc(k, P7P_MD, hmm.t[k][MD].ln());
-        gm.set_tsc(k, P7P_IM, hmm.t[k][IM].ln());
-        gm.set_tsc(k, P7P_II, hmm.t[k][II].ln());
-        gm.set_tsc(k, P7P_DM, hmm.t[k][DM].ln());
-        gm.set_tsc(k, P7P_DD, hmm.t[k][DD].ln());
+        gm.set_tsc(k, P7P_MM, (hmm.t[k][MM] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_MI, (hmm.t[k][MI] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_MD, (hmm.t[k][MD] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_IM, (hmm.t[k][IM] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_II, (hmm.t[k][II] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_DM, (hmm.t[k][DM] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_DD, (hmm.t[k][DD] as f64).ln() as f32);
     }
 
     // Match emission scores
@@ -265,7 +265,8 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
 
     for k in 1..=hmm.m {
         for x in 0..abc.k {
-            sc[x] = (hmm.mat[k][x] / bg.f[x]).ln();
+            // Match C: log((double)mat[k][x] / bg->f[x]) — double precision division + log
+            sc[x] = ((hmm.mat[k][x] as f64) / (bg.f[x] as f64)).ln() as f32;
         }
         f_expect_sc_vec(&abc, &mut sc, &bg.f);
 

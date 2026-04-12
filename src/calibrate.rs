@@ -29,23 +29,25 @@ fn random_seq(rng: &mut MersenneTwister, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
 /// This is the expected entropy per match position.
 pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
     let k = hmm.abc_k;
-    let mut h = 0.0_f32; // mean relative entropy
+    // Use f64 precision for entropy computation in bits (log2), matching C's double
+    let mut h = 0.0_f64;
 
     for node in 1..=hmm.m {
-        let mut node_h = 0.0_f32;
+        let mut node_h = 0.0_f64;
         for x in 0..k {
-            let p = hmm.mat[node][x];
-            if p > 0.0 && bg.f[x] > 0.0 {
-                node_h += p * (p / bg.f[x]).ln();
+            let p = hmm.mat[node][x] as f64;
+            let f = bg.f[x] as f64;
+            if p > 0.0 && f > 0.0 {
+                node_h += p * (p / f).log2();
             }
         }
         h += node_h;
     }
-    h /= hmm.m as f32;
+    h /= hmm.m as f64;
 
-    // lambda with edge-correction
-    let log2 = 2.0_f32.ln();
-    log2 + 1.44 / (hmm.m as f32 * h.max(0.01))
+    // lambda with edge-correction: log(2) + 1.44 / (M * H)
+    let log2 = std::f64::consts::LN_2;
+    (log2 + 1.44 / (hmm.m as f64 * h.max(0.01))) as f32
 }
 
 /// Calibrate E-value parameters for an HMM.
@@ -212,13 +214,15 @@ fn calibrate_forward(
     // Fit Gumbel to Forward scores
     let (gmu, glam) = stats::gumbel::fit_complete(&scores).unwrap_or((-3.0, lambda as f64));
 
-    // Convert to exponential tail tau (matching C: just the Gumbel inverse CDF)
-    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam);
+    // C code: tau = esl_gumbel_invcdf(1.0-tailp, gmu, glam) + (log(tailp) / lambda)
+    // First find x where Gumbel tail mass = tailp, then back up by log(tailp)/lambda
+    // to set the origin of the exponential tail to 1.0 instead of tailp.
+    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam)
+        + (tailp.ln() / lambda as f64);
 
     let tau = if tau.is_finite() { tau as f32 } else { -3.0 };
-    // Use fitted Gumbel lambda (glam), not HMM-derived lambda
-    let flambda = if glam.is_finite() && glam > 0.0 { glam as f32 } else { lambda };
-    (tau, flambda)
+    // C stores the HMM-derived lambda for all three: MLAMBDA = VLAMBDA = FLAMBDA = lambda
+    (tau, lambda)
 }
 
 #[cfg(test)]
@@ -259,5 +263,41 @@ mod tests {
             hmm.evparam[P7_MMU],
             orig_mmu
         );
+    }
+}
+
+#[cfg(test)]
+mod lambda_test {
+    use super::*;
+    use crate::alphabet::Alphabet;
+    use crate::bg::Bg;
+    use std::path::Path;
+
+    #[test]
+    fn check_lambda_directly() {
+        let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/hmmer/testsuite/20aa.hmm"
+        ))).unwrap().into_iter().next().unwrap();
+        let abc = Alphabet::new(hmm.abc_type);
+        let bg = Bg::new(&abc);
+
+        // Compute H (mean relative entropy) in bits (log2) to match C
+        let mut h = 0.0_f64;
+        for node in 1..=hmm.m {
+            for x in 0..hmm.abc_k {
+                let p = hmm.mat[node][x] as f64;
+                let f = bg.f[x] as f64;
+                if p > 0.0 && f > 0.0 {
+                    h += p * (p / f).log2();
+                }
+            }
+        }
+        h /= hmm.m as f64;
+        let lambda = std::f64::consts::LN_2 + 1.44 / (hmm.m as f64 * h);
+        eprintln!("H={:.6} bits, lambda={:.5} (C expects 0.72049)", h, lambda);
+
+        // Lambda should be close to C's 0.72049
+        assert!((lambda - 0.72049).abs() < 0.001,
+            "lambda={} too far from C's 0.72049", lambda);
     }
 }

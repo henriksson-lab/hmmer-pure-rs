@@ -19,8 +19,8 @@ struct Args {
     hmmfile: PathBuf,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
@@ -81,6 +81,7 @@ fn main() {
     writeln!(err, "  {}", h3f_path).unwrap();
     writeln!(err, "  {}", h3p_path).unwrap();
     writeln!(err, "  {}", h3i_path).unwrap();
+    std::process::ExitCode::SUCCESS
 }
 
 fn write_binary_hmm<W: Write>(w: &mut W, hmm: &hmmer_pure_rs::Hmm, abc: &Alphabet) {

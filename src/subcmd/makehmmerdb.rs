@@ -20,8 +20,8 @@ struct Args {
     outfile: Option<PathBuf>,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     let abc = Alphabet::dna();
 
@@ -94,4 +94,5 @@ fn main() {
     }
 
     writeln!(err, "Database written to: {}", outpath.display()).unwrap();
+    std::process::ExitCode::SUCCESS
 }

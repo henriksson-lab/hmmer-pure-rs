@@ -86,13 +86,21 @@ pub fn score_domain_envelope(
     let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
     let lnp = crate::stats::exponential::surv(bitscore as f64, tau, lambda).ln();
 
-    // Viterbi traceback for alignment (much cheaper than Forward+Backward+Decoding)
+    // Viterbi traceback for alignment
     let mut gx_vit = Gmx::new(gm.m, env_len);
     g_viterbi(&sub_dsq, env_len, &env_gm, &mut gx_vit);
     let tr = crate::trace::g_trace(&sub_dsq, env_len, &env_gm, &gx_vit);
 
+    // Compute posterior probabilities for PP annotation
+    let mut gx_fwd = Gmx::new(gm.m, env_len);
+    g_forward(&sub_dsq, env_len, &env_gm, &mut gx_fwd);
+    let mut gx_bck = Gmx::new(gm.m, env_len);
+    g_backward(&sub_dsq, env_len, &env_gm, &mut gx_bck);
+    let mut env_pp = Gmx::new(gm.m, env_len);
+    crate::dp::generic_decoding::g_decoding(&env_gm, &gx_fwd, &gx_bck, &mut env_pp);
+
     let abc = Alphabet::new(hmm.abc_type);
-    let ad = crate::trace::alignment_display(&tr, &sub_dsq, hmm, &abc).map(|mut ad| {
+    let ad = crate::trace::alignment_display_with_pp(&tr, &sub_dsq, hmm, &abc, Some(&env_pp)).map(|mut ad| {
         ad.sqfrom += ienv - 1;
         ad.sqto += ienv - 1;
         AliDisplay {
@@ -113,8 +121,10 @@ pub fn score_domain_envelope(
         (ienv as i64, jenv as i64)
     };
 
-    // Simplified null2 bias from match emission composition (no Backward needed)
-    let dom_bias = estimate_bias_fast(hmm, &sub_dsq, env_len);
+    // Null2 bias from envelope posterior
+    let env_null2 = generic_null2::null2_by_expectation(&env_gm, hmm, &env_pp, &crate::bg::AMINO_FREQUENCIES);
+    let dom_bias_nats = generic_null2::null2_score(&env_null2, &sub_dsq, 1, env_len);
+    let dom_bias = (dom_bias_nats / std::f32::consts::LN_2).max(0.0);
 
     Domain {
         iali,
@@ -126,7 +136,7 @@ pub fn score_domain_envelope(
         dombias: dom_bias,
         oasc: 0.0,
         envsc: env_fwd_sc,
-        domcorrection: dom_bias * std::f32::consts::LN_2,
+        domcorrection: dom_bias_nats,
         is_reported: false,
         is_included: false,
         ad,

@@ -36,8 +36,8 @@ struct Args {
     symfrac: f32,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     let abc = if args.dna {
         Alphabet::dna()
@@ -95,4 +95,5 @@ fn main() {
 
     writeln!(err, "#").unwrap();
     writeln!(err, "# [ok]").unwrap();
+    std::process::ExitCode::SUCCESS
 }

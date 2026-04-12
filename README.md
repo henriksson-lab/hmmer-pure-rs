@@ -33,35 +33,45 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ## CLI Usage
 
-### Search HMM(s) against a sequence database
+All tools are accessed as subcommands of the `hmmer` binary:
 
 ```bash
-# Basic search
-hmmsearch query.hmm sequences.fa
+# Search HMM(s) against a sequence database
+hmmer search query.hmm sequences.fa
+hmmer search --tblout hits.tbl query.hmm sequences.fa
+hmmer search --cpu 4 -E 0.001 query.hmm sequences.fa
 
-# Save tabular output
-hmmsearch --tblout hits.tbl query.hmm sequences.fa
+# Build HMM from alignment
+hmmer build output.hmm alignment.sto
 
-# Save domain tabular output
-hmmsearch --domtblout domains.tbl query.hmm sequences.fa
+# Search sequence against HMM database
+hmmer scan query.fa hmm_database.hmm
 
-# Skip all filters (slower, but finds weaker hits)
-hmmsearch --max query.hmm sequences.fa
+# Protein sequence vs database (builds HMM on the fly)
+hmmer phmmer query.fa database.fa
 
-# Set E-value threshold
-hmmsearch -E 0.001 query.hmm sequences.fa
+# Iterative search
+hmmer jackhmmer -N 3 query.fa database.fa
 
-# Adjust filter thresholds
-hmmsearch --F1 0.05 --F2 0.01 --F3 0.001 query.hmm sequences.fa
+# DNA/RNA search
+hmmer nhmmer query.hmm dna_target.fa
+
+# Utility commands
+hmmer stat model.hmm
+hmmer emit -c model.hmm
+hmmer convert model.hmm
+hmmer fetch database.hmm "model_name"
+hmmer align model.hmm sequences.fa
+hmmer logo model.hmm
 ```
 
 ## Library Usage
 
 ```rust
-use hmmer::{Alphabet, Bg, Pipeline, Profile, OProfile, TopHits};
-use hmmer::hmmfile;
-use hmmer::profile::{profile_config, reconfig_length, P7_LOCAL};
-use hmmer::sequence::Sequence;
+use hmmer_pure_rs::{Alphabet, Bg, Pipeline, Profile, OProfile, TopHits};
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::profile::{profile_config, reconfig_length, P7_LOCAL};
+use hmmer_pure_rs::sequence::Sequence;
 use std::path::Path;
 
 // Load an HMM

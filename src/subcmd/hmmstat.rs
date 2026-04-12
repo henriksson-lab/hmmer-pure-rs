@@ -17,8 +17,8 @@ struct Args {
     hmmfile: PathBuf,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
@@ -73,6 +73,7 @@ fn main() {
 
     writeln!(out, "#").unwrap();
     writeln!(out, "# [ok]").unwrap();
+    std::process::ExitCode::SUCCESS
 }
 
 /// Mean relative entropy per match emission.

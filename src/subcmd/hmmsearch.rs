@@ -77,8 +77,8 @@ struct Args {
     cpu: usize,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     // Configure thread pool
     rayon::ThreadPoolBuilder::new()
@@ -160,19 +160,28 @@ fn main() {
         }
 
         // Score sequences in parallel using rayon
+        // Share base profile/oprofile via Arc to avoid expensive clones
         use rayon::prelude::*;
+        use std::sync::Arc;
+        let shared_gm = Arc::new(gm.clone());
+        let shared_om = Arc::new(om.clone());
+        let f1 = args.f1;
+        let f2 = args.f2;
+        let f3 = args.f3;
+        let do_max = args.max;
+
         let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = sequences
             .par_iter()
             .filter_map(|sq| {
                 let mut local_bg = bg.clone();
-                let mut local_gm = gm.clone();
-                let mut local_om = om.clone();
+                let mut local_gm = (*shared_gm).clone();
+                let mut local_om = (*shared_om).clone();
                 let mut local_pli = Pipeline::new();
                 local_pli.new_model(&local_gm);
-                local_pli.f1 = args.f1;
-                local_pli.f2 = args.f2;
-                local_pli.f3 = args.f3;
-                local_pli.do_max = args.max;
+                local_pli.f1 = f1;
+                local_pli.f2 = f2;
+                local_pli.f3 = f3;
+                local_pli.do_max = do_max;
 
                 local_bg.set_length(sq.n);
                 profile::reconfig_length(&mut local_gm, sq.n as i32);
@@ -375,6 +384,7 @@ fn main() {
 
     writeln!(out, "//").unwrap();
     writeln!(out, "[ok]").unwrap();
+    std::process::ExitCode::SUCCESS
 }
 
 fn write_tblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {

@@ -21,8 +21,8 @@ struct Args {
     index: Option<usize>,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     if let Some(idx) = args.index {
         // Fetch by index: need to read all HMMs
@@ -70,4 +70,5 @@ fn main() {
         eprintln!("Usage: hmmfetch <hmmfile> <key>");
         std::process::exit(1);
     }
+    std::process::ExitCode::SUCCESS
 }

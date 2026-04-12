@@ -49,8 +49,8 @@ struct Args {
     tblout: Option<PathBuf>,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     logsum::p7_flogsuminit();
 
@@ -196,4 +196,5 @@ fn main() {
     }
 
     writeln!(out, "[ok]").unwrap();
+    std::process::ExitCode::SUCCESS
 }

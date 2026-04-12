@@ -284,12 +284,23 @@ pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
 }
 
 /// Generate alignment display strings from a trace.
-/// Returns (model_line, match_line, seq_line, hmmfrom, hmmto, sqfrom, sqto).
+/// If `pp` (posterior probability matrix) is provided, use real PP values.
 pub fn alignment_display(
     tr: &Trace,
     dsq: &[Dsq],
     hmm: &crate::hmm::Hmm,
     abc: &Alphabet,
+) -> Option<AlignmentDisplay> {
+    alignment_display_with_pp(tr, dsq, hmm, abc, None)
+}
+
+/// Generate alignment display with optional posterior probabilities.
+pub fn alignment_display_with_pp(
+    tr: &Trace,
+    dsq: &[Dsq],
+    hmm: &crate::hmm::Hmm,
+    abc: &Alphabet,
+    pp: Option<&crate::dp::gmx::Gmx>,
 ) -> Option<AlignmentDisplay> {
     // Find first and last M states (domain boundaries)
     let mut z1 = None;
@@ -358,8 +369,13 @@ pub fn alignment_display(
                         mline.push(' ');
                     }
                 }
-                // PP for match: high confidence placeholder (will be replaced by OA)
-                ppline.push('*');
+                // PP for match state
+                if let Some(pp_mx) = pp {
+                    let pp_val = pp_mx.mmx(i, k) + pp_mx.imx(i, k);
+                    ppline.push(crate::dp::generic_optacc::pp_to_char(pp_val.min(1.0)));
+                } else {
+                    ppline.push('*');
+                }
             }
             State::I => {
                 let i = tr.i[z];

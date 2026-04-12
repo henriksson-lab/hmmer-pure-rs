@@ -21,8 +21,8 @@ struct Args {
     modelmask: Option<String>,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let args = Args::parse_from(&args);
 
     let msas = msa::read_stockholm(&args.msafile).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
@@ -61,4 +61,5 @@ fn main() {
     }
 
     eprintln!("Wrote {} alignment(s) to {}", msas.len(), args.outfile.display());
+    std::process::ExitCode::SUCCESS
 }

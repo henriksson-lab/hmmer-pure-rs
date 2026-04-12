@@ -285,7 +285,12 @@ pub fn build_hmm_from_msa(
         hmm.flags |= P7H_RF;
     }
 
-    // E-value calibration by simulation
+    // Apply Dirichlet priors to emission/transition counts
+    crate::prior::apply_priors(&mut hmm);
+
+    // Effective sequence number estimation
+    crate::eweight::entropy_weight(&mut hmm, bg, None);
+
     // E-value calibration by simulation
     crate::calibrate::calibrate(&mut hmm, abc, bg);
 
