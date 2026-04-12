@@ -687,3 +687,4 @@ mod tests {
         .unwrap();
         assert!(hmms.len() > 1, "Expected multiple HMMs in minipfam");
     }
+}

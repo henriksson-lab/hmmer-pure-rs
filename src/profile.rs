@@ -353,3 +353,4 @@ mod tests {
         assert_eq!(gm.l, 400);
         assert_eq!(gm.name, "test");
     }
+}

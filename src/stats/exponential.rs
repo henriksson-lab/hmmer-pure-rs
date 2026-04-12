@@ -64,3 +64,4 @@ mod tests {
         assert_eq!(logsurv(0.0, 0.0, 1.0), 0.0);
         assert!((logsurv(5.0, 0.0, 1.0) - (-5.0)).abs() < 1e-15);
     }
+}

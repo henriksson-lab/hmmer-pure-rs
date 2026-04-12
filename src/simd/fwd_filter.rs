@@ -218,3 +218,4 @@ mod tests {
         let sc = unsafe { forward_parser(&dsq, 20, &om) };
         assert!(sc.is_finite(), "Forward score should be finite, got {}", sc);
     }
+}

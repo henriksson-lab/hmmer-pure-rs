@@ -110,4 +110,4 @@ mod tests {
         }
     }
 
-    /// Cross-validate against FFI C implementation.
+}

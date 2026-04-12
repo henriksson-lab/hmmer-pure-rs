@@ -207,3 +207,4 @@ mod tests {
         let expected = 100.0 * bg.p1.ln() + (1.0 - bg.p1).ln();
         assert!((sc - expected).abs() < 1e-6);
     }
+}

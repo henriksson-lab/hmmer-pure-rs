@@ -137,3 +137,4 @@ mod tests {
         // Score should be positive for a matching sequence
         assert!(sc > 0.0, "Viterbi score {} should be positive for matching seq", sc);
     }
+}

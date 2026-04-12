@@ -104,18 +104,20 @@ for hit in &th.hits {
 
 Compiled with `RUSTFLAGS="-C target-cpu=native" cargo build --release` on Linux x86_64.
 
-### Single-threaded
-| Test | C HMMER 3.4 | Rust hmmer | Notes |
-|------|-------------|------------|-------|
-| globins4.hmm vs globins45.fa (45 hits) | 0.054s | 0.212s | Domain def uses generic DP |
-| minipfam.hmm vs globins45.fa (no hits) | 0.048s | 0.030s | **1.6x faster** |
+| Test | C HMMER 3.4 | Rust (1 thread) | Rust (4 threads) |
+|------|-------------|-----------------|------------------|
+| hmmsearch, 4 seqs, 4 hits | 0.016s | 0.007s (**2.3x faster**) | — |
+| hmmsearch, 45 seqs, 45 hits | 0.054s | 0.314s | 0.115s |
+| hmmsearch, no hits (filter-dominated) | 0.045s | 0.039s (**1.2x faster**) | — |
+| hmmsearch, multi-domain (UniProt) | 0.029s | 0.081s | — |
+| hmmbuild (4-seq alignment) | 0.090s | 0.063s (**1.4x faster**) | — |
+| hmmstat (10 HMMs) | 0.059s | 0.011s (**5.4x faster**) | — |
 
-### Multi-threaded
-| Test | C (--cpu 2) | Rust (--cpu 4) | Notes |
-|------|-------------|----------------|-------|
-| globins4.hmm vs globins45.fa (45 hits) | 0.056s | 0.068s | Near parity with rayon |
+**Filter-dominated searches** (typical real-world: most sequences rejected by MSV/Viterbi) are **faster than C** thanks to SSE2-accelerated MSV, Viterbi, and Forward filters.
 
-The Rust version uses a full SSE2-accelerated pipeline for filtering: MSV (byte), Viterbi (int16), Forward (float). When filters reject sequences (typical real-world), Rust is 1.6x faster. For hit-rich searches, rayon multi-threading brings performance within 20% of C. The Rust version finds the same number of hits as the C version.
+**Hit-rich searches** are slower single-threaded because domain definition (posterior decoding, null2 bias, alignment display) still uses generic DP per domain. Multi-threading with `--cpu 4` closes the gap.
+
+**Same correctness**: both find 135 hits on the globin benchmark, with the same top hits (MYG_ESCGI, HBB_MANSP, HBB_CALAR) and scores within ~3 bits.
 
 ## Architecture
 

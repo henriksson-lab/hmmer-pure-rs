@@ -451,3 +451,4 @@ mod tests {
         assert!(abc.degen[b_code][d_code]);
         assert_eq!(abc.ndegen[b_code], 2);
     }
+}

@@ -195,3 +195,4 @@ mod tests {
         let x = invsurv(p, mu, lambda);
         assert!((x - 15.0).abs() < 1e-6, "x={}, expected 15.0", x);
     }
+}

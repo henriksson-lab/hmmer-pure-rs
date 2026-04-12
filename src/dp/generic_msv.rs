@@ -94,3 +94,4 @@ mod tests {
 
         assert!(sc > 0.0, "MSV score {} should be positive", sc);
     }
+}

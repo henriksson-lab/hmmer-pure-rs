@@ -223,3 +223,4 @@ mod tests {
             VitResult::Overflow => {}
         }
     }
+}

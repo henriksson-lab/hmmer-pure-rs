@@ -66,25 +66,40 @@ pub fn score_domain_envelope(
     let mut env_gm = gm.clone();
     reconfig_unihit(&mut env_gm, env_len as i32);
 
-    let mut gx = Gmx::new(gm.m, env_len);
-
     // Create a sub-sequence view (still 1-based)
     let mut sub_dsq = vec![crate::alphabet::DSQ_SENTINEL];
     sub_dsq.extend_from_slice(&dsq[ienv..=jenv]);
     sub_dsq.push(crate::alphabet::DSQ_SENTINEL);
 
-    let env_fwd_sc = g_forward(&sub_dsq, env_len, &env_gm, &mut gx);
+    // Use SIMD Forward when available for speed
+    let env_fwd_sc;
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse2") {
+            let env_om = crate::simd::oprofile::OProfile::convert(&env_gm);
+            env_fwd_sc = unsafe { crate::simd::fwd_filter::forward_parser(&sub_dsq, env_len, &env_om) };
+        } else {
+            let mut gx = Gmx::new(gm.m, env_len);
+            env_fwd_sc = g_forward(&sub_dsq, env_len, &env_gm, &mut gx);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut gx = Gmx::new(gm.m, env_len);
+        env_fwd_sc = g_forward(&sub_dsq, env_len, &env_gm, &mut gx);
+    }
 
-    // Null score for envelope length
     // Null score: geometric model with p1 = L/(L+1) where L = envelope length
     let p1 = env_len as f32 / (env_len as f32 + 1.0);
     let env_null = env_len as f32 * p1.ln() + (1.0 - p1).ln();
 
-    // Compute per-domain null2 bias from envelope-local posteriors
+    // Generic Forward + Backward for posterior decoding (needed for null2)
+    let mut gx_fwd = Gmx::new(gm.m, env_len);
+    g_forward(&sub_dsq, env_len, &env_gm, &mut gx_fwd);
     let mut env_bck = Gmx::new(gm.m, env_len);
     g_backward(&sub_dsq, env_len, &env_gm, &mut env_bck);
     let mut env_pp = Gmx::new(gm.m, env_len);
-    crate::dp::generic_decoding::g_decoding(&env_gm, &gx, &env_bck, &mut env_pp);
+    crate::dp::generic_decoding::g_decoding(&env_gm, &gx_fwd, &env_bck, &mut env_pp);
     let env_null2 = generic_null2::null2_by_expectation(&env_gm, hmm, &env_pp, &crate::bg::AMINO_FREQUENCIES);
     let dom_bias = generic_null2::null2_score(&env_null2, &sub_dsq, 1, env_len);
     let dom_bias_bits = (dom_bias / std::f32::consts::LN_2).max(0.0);
