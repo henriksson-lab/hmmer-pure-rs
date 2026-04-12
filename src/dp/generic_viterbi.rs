@@ -139,6 +139,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_viterbi_matches_ffi() {
         let (_, abc, _, gm) = setup();
         let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");

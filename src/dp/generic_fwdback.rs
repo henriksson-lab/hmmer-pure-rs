@@ -172,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_forward_matches_ffi() {
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

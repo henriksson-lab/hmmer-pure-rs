@@ -6,14 +6,14 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::dp::generic_viterbi::g_viterbi;
-use hmmer::dp::gmx::Gmx;
-use hmmer::hmmfile;
-use hmmer::logsum;
-use hmmer::profile::{self, Profile, P7_LOCAL};
-use hmmer::sequence::{self, Sequence};
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::dp::generic_viterbi::g_viterbi;
+use hmmer_pure_rs::dp::gmx::Gmx;
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::logsum;
+use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
+use hmmer_pure_rs::sequence::{self, Sequence};
 
 #[derive(Parser)]
 #[command(name = "hmmalign", about = "Align sequences to a profile HMM")]

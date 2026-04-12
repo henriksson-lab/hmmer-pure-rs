@@ -1,4 +1,4 @@
-//! hmmscan — search sequence(s) against an HMM database.
+//! nhmmscan — search sequence(s) against an HMM database.
 //! Reverses hmmsearch: query=sequences, targets=HMMs.
 
 use std::io::Write;
@@ -17,7 +17,7 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
-#[command(name = "hmmscan", about = "Search sequence(s) against a profile HMM database")]
+#[command(name = "nhmmscan", about = "Search nucleotide sequence(s) against a DNA HMM database")]
 struct Args {
     /// Query sequence file (FASTA)
     seqfile: PathBuf,
@@ -60,13 +60,13 @@ fn main() {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "# hmmscan :: search sequence(s) against a profile database").unwrap();
+    writeln!(out, "# nhmmscan :: search nucleotide sequence(s) against a DNA profile database").unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
     writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
     writeln!(out).unwrap();
 
     // For each query sequence, search all HMMs
-    let abc = Alphabet::amino(); // assume amino for now
+    let abc = Alphabet::dna(); // assume amino for now
     let bg = Bg::new(&abc);
 
     let mut sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
@@ -96,9 +96,9 @@ fn main() {
 
                 let mut th = TopHits::new();
                 if pli.run(&gm, &om, &local_bg, hmm, &sq, &mut th) {
-                    // Use the HMM name for the hit (in hmmscan, targets are HMMs)
+                    // Use the HMM name for the hit (in nhmmscan, targets are HMMs)
                     th.hits.into_iter().next().map(|mut hit| {
-                        // Swap: in hmmscan output, "target" is the HMM name
+                        // Swap: in nhmmscan output, "target" is the HMM name
                         hit.name = hmm.name.clone();
                         hit.acc = hmm.acc.clone().unwrap_or_default();
                         hit.desc = hmm.desc.clone().unwrap_or_default();

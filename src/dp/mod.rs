@@ -5,3 +5,5 @@ pub mod generic_backward;
 pub mod generic_msv;
 pub mod generic_decoding;
 pub mod generic_null2;
+pub mod generic_optacc;
+pub mod generic_stotrace;

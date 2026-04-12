@@ -209,6 +209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_bg_null_one_matches_ffi() {
         let abc = Alphabet::amino();
         let mut bg = Bg::new(&abc);
@@ -236,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_bg_frequencies_match_ffi() {
         unsafe {
             let c_abc = crate::ffi::esl_alphabet_Create(3); // eslAMINO

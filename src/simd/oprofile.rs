@@ -227,7 +227,7 @@ impl OProfile {
                     } else {
                         -32768
                     };
-                    tmp[z] = if val <= maxval { val } else { maxval };
+                    tmp[z] = if val >= maxval { maxval } else { val };
                 }
                 twv[j] = tmp;
                 j += 1;

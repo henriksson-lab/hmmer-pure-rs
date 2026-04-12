@@ -225,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_viterbi_filter_matches_ffi() {
         if !is_x86_feature_detected!("sse2") {
             return;

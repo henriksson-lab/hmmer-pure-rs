@@ -6,10 +6,10 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use hmmer::{Alphabet, Bg, Hmm, Profile, Pipeline, TopHits, OProfile};
-//! use hmmer::hmmfile;
-//! use hmmer::profile::{profile_config, reconfig_length, P7_LOCAL};
-//! use hmmer::sequence::Sequence;
+//! use hmmer_pure_rs::{Alphabet, Bg, Hmm, Profile, Pipeline, TopHits, OProfile};
+//! use hmmer_pure_rs::hmmfile;
+//! use hmmer_pure_rs::profile::{profile_config, reconfig_length, P7_LOCAL};
+//! use hmmer_pure_rs::sequence::Sequence;
 //! use std::path::Path;
 //!
 //! // Load an HMM
@@ -40,11 +40,10 @@
 //! }
 //! ```
 
+// FFI bindings use non-Rust naming conventions
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
-#![allow(dead_code)]
-#![allow(clippy::all)]
 
 /// FFI bindings to the C HMMER library (for testing and gradual migration).
 #[cfg(feature = "ffi")]
@@ -59,16 +58,21 @@ pub mod calibrate;
 pub mod domaindef;
 pub mod dp;
 pub mod errors;
+pub mod fm_index;
 pub mod hmm;
 pub mod hmmfile;
+pub mod hmmfile_binary;
 pub mod logsum;
 pub mod msa;
 pub mod output;
 pub mod pipeline;
+pub mod prior;
 pub mod profile;
 pub mod seqmodel;
 pub mod sequence;
 pub mod simd;
+pub mod spensemble;
+pub mod ssi;
 pub mod stats;
 pub mod tophits;
 pub mod trace;

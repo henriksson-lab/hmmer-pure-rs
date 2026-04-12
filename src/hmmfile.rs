@@ -57,7 +57,7 @@ fn read_one_hmm<B: BufRead>(
     };
 
     // Determine format version
-    let _format_version = if header.starts_with("HMMER3/f") {
+    let format_version = if header.starts_with("HMMER3/f") {
         "3f"
     } else if header.starts_with("HMMER3/e") {
         "3e"
@@ -146,7 +146,7 @@ fn read_one_hmm<B: BufRead>(
                 };
             }
             "RF" => rf_flag = value == "yes",
-            "MM" => mm_flag = value == "yes",
+            "MM" => mm_flag = value == "yes" && format_version == "3f",
             "CONS" => cons_flag = value == "yes",
             "CS" => cs_flag = value == "yes",
             "MAP" => map_flag = value == "yes",
@@ -262,7 +262,8 @@ fn read_one_hmm<B: BufRead>(
     let k = abc.k;
 
     // Skip the transition label line ("m->m m->i ...")
-    let _label_line = lines
+    // Skip the transition label line ("m->m m->i ...")
+    lines
         .next()
         .ok_or_else(|| HmmerError::Format("Missing transition label line".to_string()))?
         .map_err(HmmerError::Io)?;
@@ -688,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_hmm_matches_ffi() {
         use std::ffi::CStr;
 

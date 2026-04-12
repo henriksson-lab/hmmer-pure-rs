@@ -1,4 +1,4 @@
-# hmmer 0.1.0
+# hmmer-pure-rs 0.5.0
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
@@ -135,7 +135,7 @@ The Rust version uses a full SSE2-accelerated pipeline for filtering: MSV (byte)
 
 ## Status
 
-This is an active port of HMMER 3.4 (50 Rust files, 10,100+ lines, 12 programs).
+This is an active port of HMMER 3.4 (64 Rust files, 12,600+ lines, 16 programs).
 
 Currently supported programs:
 - `hmmsearch` - Search HMM(s) against a sequence database (FASTA/UniProt)
@@ -147,7 +147,11 @@ Currently supported programs:
 - `hmmstat` - Display summary statistics for each HMM
 - `hmmemit` - Emit consensus or sampled sequences from HMM
 - `hmmconvert` - Convert HMM files (read and rewrite)
-- `hmmfetch` - Retrieve HMM from a file by name
+- `hmmfetch` - Retrieve HMM from a file by name (with SSI index)
+- `hmmlogo` - Generate HMM sequence logo data
+- `nhmmscan` - Search nucleotide sequence(s) against DNA HMM database
+- `alimask` - Add mask annotation to Stockholm alignment
+- `makehmmerdb` - Create FM-index database for nhmmer
 - `hmmscan` - Search sequence(s) against a profile HMM database
 - `hmmpress` - Prepare HMM database (binary pressed format)
 
@@ -163,12 +167,9 @@ Features implemented:
 - FASTA and UniProt/SwissProt sequence format support
 - Pure Rust build (no C compiler needed with `--no-default-features`)
 
-Not yet ported:
-- FM-index for nhmmer long-target scanning
-- GenBank/EMBL/NCBI BLAST db format support
-- Mersenne Twister RNG for exact --seed reproducibility
-- AVX2 SIMD for wider vectors
-- Dirichlet mixture priors for hmmbuild
+Future optimization:
+- AVX2/NEON Viterbi and Forward filters (MSV filters done for both)
+- Effective sequence number estimation (entropy-based) for hmmbuild
 
 ## License
 

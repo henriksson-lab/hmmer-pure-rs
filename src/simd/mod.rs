@@ -8,6 +8,10 @@ pub mod vit_filter;
 pub mod fwd_filter;
 #[cfg(target_arch = "x86_64")]
 pub mod bck_filter;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_msv;
+
+pub mod neon_msv;
 
 /// Helper to create shuffle mask constant for _mm_shuffle_epi32 / _mm_shufflelo_epi16.
 pub const fn shuffle_mask(z: u32, y: u32, x: u32, w: u32) -> i32 {

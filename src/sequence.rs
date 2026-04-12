@@ -84,7 +84,10 @@ impl<R: Read> SeqFile<R> {
                     return Ok(false);
                 }
                 let trimmed = line.trim();
-                if trimmed.starts_with('>') || trimmed.starts_with("ID ") || trimmed.starts_with("LOCUS ") {
+                if trimmed.starts_with('>')
+                    || trimmed.starts_with("ID ")
+                    || trimmed.starts_with("LOCUS ")
+                {
                     break;
                 }
             }

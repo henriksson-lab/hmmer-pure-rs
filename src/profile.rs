@@ -355,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_profile_config_matches_ffi() {
         let hmm = load_test_hmm();
         let abc = Alphabet::new(hmm.abc_type);

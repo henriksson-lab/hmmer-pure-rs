@@ -453,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_digitize_matches_ffi() {
         let abc = Alphabet::amino();
         // Cross-validate with C: create a C alphabet and compare inmap
@@ -489,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_digitize_dna_matches_ffi() {
         let abc = Alphabet::dna();
         unsafe {

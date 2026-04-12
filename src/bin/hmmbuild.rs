@@ -5,11 +5,11 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::builder;
-use hmmer::hmmfile;
-use hmmer::msa;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder;
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::msa;
 
 #[derive(Parser)]
 #[command(name = "hmmbuild", about = "Build profile HMM(s) from multiple sequence alignment(s)")]

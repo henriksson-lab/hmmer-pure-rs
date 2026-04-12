@@ -148,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_msv_filter_matches_ffi() {
         if !is_x86_feature_detected!("sse2") {
             return;

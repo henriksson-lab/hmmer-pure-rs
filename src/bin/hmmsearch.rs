@@ -2,8 +2,8 @@ use std::env;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
-// Force linking the hmmer library crate which triggers build.rs
-use hmmer as _;
+// Force linking the library crate which triggers build.rs
+use hmmer_pure_rs as _;
 
 extern "C" {
     fn hmmsearch_main(argc: c_int, argv: *mut *mut c_char) -> c_int;

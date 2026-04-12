@@ -66,6 +66,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_surv_matches_ffi() {
         let cases = [
             (0.0, 0.0, 1.0),
@@ -85,6 +86,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_logsurv_matches_ffi() {
         let cases = [
             (0.0, 0.0, 1.0),

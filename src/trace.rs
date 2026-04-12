@@ -44,7 +44,7 @@ impl Trace {
         }
     }
 
-    fn append(&mut self, state: State, k: usize, i: usize) {
+    pub fn append(&mut self, state: State, k: usize, i: usize) {
         self.st.push(state);
         self.k.push(k);
         self.i.push(i);
@@ -139,9 +139,17 @@ pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
                         cur_state = State::M;
                         tr.append(State::M, found_k, i);
                     } else {
-                        // Fallback: use M at last position
+                        // Fallback: find best-scoring M_k
+                        let mut best_k = m;
+                        let mut best_sc = f32::NEG_INFINITY;
+                        for k in 1..=m {
+                            if gx.mmx(i, k) > best_sc {
+                                best_sc = gx.mmx(i, k);
+                                best_k = k;
+                            }
+                        }
                         cur_state = State::M;
-                        tr.append(State::M, m, i);
+                        tr.append(State::M, best_k, i);
                     }
                 }
             }
@@ -301,6 +309,7 @@ pub fn alignment_display(
     let mut model = String::new();
     let mut mline = String::new();
     let mut aseq = String::new();
+    let mut ppline = String::new();
     let mut hmmfrom = 0;
     let mut hmmto = 0;
     let mut sqfrom = 0;
@@ -338,7 +347,6 @@ pub fn alignment_display(
                 if cons_ch.to_ascii_uppercase() == seq_ch.to_ascii_uppercase() {
                     mline.push(seq_ch.to_ascii_uppercase());
                 } else {
-                    // Check if positive score (favorable substitution)
                     let sc = hmm.mat[k][dsq[i] as usize];
                     let bg = crate::bg::AMINO_FREQUENCIES
                         .get(dsq[i] as usize)
@@ -350,6 +358,8 @@ pub fn alignment_display(
                         mline.push(' ');
                     }
                 }
+                // PP for match: high confidence placeholder (will be replaced by OA)
+                ppline.push('*');
             }
             State::I => {
                 let i = tr.i[z];
@@ -361,6 +371,7 @@ pub fn alignment_display(
                 };
                 aseq.push(seq_ch);
                 mline.push(' ');
+                ppline.push('.');
                 if sqto == 0 && sqfrom == 0 {
                     sqfrom = i;
                 }
@@ -381,6 +392,7 @@ pub fn alignment_display(
                 model.push(cons_ch);
                 aseq.push('-');
                 mline.push(' ');
+                ppline.push('.');
             }
             _ => {}
         }
@@ -390,6 +402,7 @@ pub fn alignment_display(
         model,
         mline,
         aseq,
+        ppline,
         hmmfrom,
         hmmto,
         sqfrom,
@@ -401,6 +414,7 @@ pub fn alignment_display(
 pub struct AlignmentDisplay {
     pub model: String,
     pub mline: String,
+    pub ppline: String,
     pub aseq: String,
     pub hmmfrom: usize,
     pub hmmto: usize,

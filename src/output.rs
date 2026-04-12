@@ -75,3 +75,52 @@ mod tests {
         assert_eq!(fmt_evalue(0.5), "      0.5");
     }
 }
+
+use std::io::Write;
+use crate::tophits::{TopHits, P7_IS_REPORTED};
+
+/// Write per-sequence tabular output (--tblout format).
+pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
+    writeln!(f, "#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----").unwrap();
+    writeln!(f, "# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target").unwrap();
+    writeln!(f, "#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------").unwrap();
+
+    for hit in &th.hits {
+        if hit.flags & P7_IS_REPORTED == 0 { continue; }
+        let evalue = z * hit.lnp.exp();
+        let dom_evalue = if !hit.dcl.is_empty() { z * hit.dcl[0].lnp.exp() } else { evalue };
+        let dom_score = if !hit.dcl.is_empty() { hit.dcl[0].bitscore } else { hit.score };
+        writeln!(f,
+            "{:<20}{:<11}{:<21}{:<11}{:9.2e} {:6.1} {:5.1} {:9.2e} {:6.1} {:5.1} {:5.1} {:3} {:3} {:3} {:3} {:3} {:3} {:3} {}",
+            hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc },
+            qname, qacc.unwrap_or("-"),
+            evalue, hit.score, hit.bias, dom_evalue, dom_score, hit.bias,
+            hit.nexpected, hit.ndom, 0, 0, hit.ndom, hit.ndom, hit.nreported, hit.nincluded,
+            if hit.desc.is_empty() { "-" } else { &hit.desc },
+        ).unwrap();
+    }
+}
+
+/// Write per-domain tabular output (--domtblout format).
+pub fn write_domtblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64, domz: f64) {
+    writeln!(f, "#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord").unwrap();
+    writeln!(f, "# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target").unwrap();
+    writeln!(f, "#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------").unwrap();
+
+    for hit in &th.hits {
+        if hit.flags & P7_IS_REPORTED == 0 { continue; }
+        let evalue = z * hit.lnp.exp();
+        for (di, dom) in hit.dcl.iter().enumerate() {
+            let dom_evalue = domz * dom.lnp.exp();
+            writeln!(f,
+                "{:<20}{:<11}{:>5} {:<21}{:<11}{:>5} {:9.2e} {:6.1} {:5.1} {:3} {:3} {:9.2e} {:9.2e} {:6.1} {:5.1} {:5} {:5} {:5} {:5} {:5} {:5} {:.2} {}",
+                hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc }, 0,
+                qname, qacc.unwrap_or("-"), 0,
+                evalue, hit.score, hit.bias, di + 1, hit.ndom,
+                dom_evalue / z.max(1.0), dom_evalue, dom.bitscore, dom.dombias,
+                1, 0, dom.iali, dom.jali, dom.ienv, dom.jenv, 0.95_f32,
+                if hit.desc.is_empty() { "-" } else { &hit.desc },
+            ).unwrap();
+        }
+    }
+}

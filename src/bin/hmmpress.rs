@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::hmmfile;
-use hmmer::profile::{self, Profile, P7_LOCAL};
-use hmmer::simd::oprofile::OProfile;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
+use hmmer_pure_rs::simd::oprofile::OProfile;
 
 #[derive(Parser)]
 #[command(name = "hmmpress", about = "Prepare an HMM database for hmmscan")]
@@ -83,7 +83,7 @@ fn main() {
     writeln!(err, "  {}", h3i_path).unwrap();
 }
 
-fn write_binary_hmm<W: Write>(w: &mut W, hmm: &hmmer::Hmm, abc: &Alphabet) {
+fn write_binary_hmm<W: Write>(w: &mut W, hmm: &hmmer_pure_rs::Hmm, abc: &Alphabet) {
     // Simplified binary format: just write key fields
     let m = hmm.m as u32;
     let k = abc.k as u32;

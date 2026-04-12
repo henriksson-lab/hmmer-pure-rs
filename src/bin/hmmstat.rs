@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::hmmfile;
-use hmmer::hmm;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::hmm;
 
 #[derive(Parser)]
 #[command(name = "hmmstat", about = "Display summary statistics for each HMM")]
@@ -76,7 +76,7 @@ fn main() {
 }
 
 /// Mean relative entropy per match emission.
-fn mean_match_relative_entropy(h: &hmmer::Hmm, bg: &Bg) -> f32 {
+fn mean_match_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     let k = h.abc_k;
     let mut sum = 0.0_f32;
     for node in 1..=h.m {
@@ -91,7 +91,7 @@ fn mean_match_relative_entropy(h: &hmmer::Hmm, bg: &Bg) -> f32 {
 }
 
 /// Mean information content per match emission.
-fn mean_match_info(h: &hmmer::Hmm, bg: &Bg) -> f32 {
+fn mean_match_info(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     let k = h.abc_k;
     let mut sum = 0.0_f32;
     for node in 1..=h.m {
@@ -114,12 +114,12 @@ fn mean_match_info(h: &hmmer::Hmm, bg: &Bg) -> f32 {
 }
 
 /// Mean position-wise relative entropy.
-fn mean_position_relative_entropy(h: &hmmer::Hmm, bg: &Bg) -> f32 {
+fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     mean_match_relative_entropy(h, bg) // simplified: same as relent for now
 }
 
 /// KL divergence between model composition and background.
-fn composition_kld(h: &hmmer::Hmm, bg: &Bg) -> f32 {
+fn composition_kld(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     let k = h.abc_k;
     if h.flags & hmm::P7H_COMPO == 0 {
         return 0.0;

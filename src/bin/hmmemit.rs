@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::hmmfile;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::hmmfile;
 
 #[derive(Parser)]
 #[command(name = "hmmemit", about = "Sample or emit sequences from a profile HMM")]

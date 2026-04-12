@@ -12,49 +12,17 @@ use crate::profile::*;
 use crate::simd::oprofile::OProfile;
 use crate::stats;
 
-/// Simple LCG-based random number generator for reproducible calibration.
-/// Produces uniform doubles in [0,1).
-struct Rng {
-    state: u64,
-}
+use crate::util::random::MersenneTwister;
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng {
-            state: if seed == 0 { 42 } else { seed },
-        }
+/// Generate a random digital sequence of given length using MT RNG.
+fn random_seq(rng: &mut MersenneTwister, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
+    let mut dsq = Vec::with_capacity(l + 2);
+    dsq.push(DSQ_SENTINEL);
+    for _ in 0..l {
+        dsq.push(rng.sample_residue(bg_f));
     }
-
-    fn next_f64(&mut self) -> f64 {
-        self.state = self.state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.state >> 11) as f64) / ((1u64 << 53) as f64)
-    }
-
-    /// Generate a random digital residue according to background frequencies.
-    fn sample_residue(&mut self, bg_f: &[f32]) -> Dsq {
-        let r = self.next_f64() as f32;
-        let mut cumsum = 0.0_f32;
-        for (i, &f) in bg_f.iter().enumerate() {
-            cumsum += f;
-            if r < cumsum {
-                return i as Dsq;
-            }
-        }
-        (bg_f.len() - 1) as Dsq
-    }
-
-    /// Generate a random digital sequence of given length.
-    fn random_seq(&mut self, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
-        let mut dsq = Vec::with_capacity(l + 2);
-        dsq.push(DSQ_SENTINEL);
-        for _ in 0..l {
-            dsq.push(self.sample_residue(bg_f));
-        }
-        dsq.push(DSQ_SENTINEL);
-        dsq
-    }
+    dsq.push(DSQ_SENTINEL);
+    dsq
 }
 
 /// Compute the lambda parameter for the model.
@@ -86,7 +54,7 @@ pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
     crate::logsum::p7_flogsuminit();
 
     let lambda = p7_lambda(hmm, bg);
-    let mut rng = Rng::new(42);
+    let mut rng = MersenneTwister::new(42);
 
     // MSV calibration
     let mmu = calibrate_msv(hmm, abc, bg, lambda, &mut rng);
@@ -106,7 +74,7 @@ pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
     hmm.flags |= P7H_STATS;
 }
 
-fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut Rng) -> f32 {
+fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut MersenneTwister) -> f32 {
     let n = 200;
     let l = 200;
 
@@ -117,7 +85,7 @@ fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f3
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let dsq = rng.random_seq(l, &bg.f);
+        let dsq = random_seq(rng, l, &bg.f);
         let sc;
         #[cfg(target_arch = "x86_64")]
         {
@@ -151,7 +119,7 @@ fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f3
     mu as f32
 }
 
-fn calibrate_viterbi(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut Rng) -> f32 {
+fn calibrate_viterbi(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut MersenneTwister) -> f32 {
     let n = 200;
     let l = 200;
 
@@ -162,7 +130,7 @@ fn calibrate_viterbi(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let dsq = rng.random_seq(l, &bg.f);
+        let dsq = random_seq(rng, l, &bg.f);
         let sc;
         #[cfg(target_arch = "x86_64")]
         {
@@ -200,7 +168,7 @@ fn calibrate_forward(
     abc: &crate::alphabet::Alphabet,
     bg: &Bg,
     lambda: f32,
-    rng: &mut Rng,
+    rng: &mut MersenneTwister,
 ) -> (f32, f32) {
     let n = 200;  // EfN
     let l = 100;  // EfL
@@ -213,7 +181,7 @@ fn calibrate_forward(
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let dsq = rng.random_seq(l, &bg.f);
+        let dsq = random_seq(rng, l, &bg.f);
         // Use SIMD Forward when available for speed
         let sc;
         #[cfg(target_arch = "x86_64")]
@@ -244,12 +212,13 @@ fn calibrate_forward(
     // Fit Gumbel to Forward scores
     let (gmu, glam) = stats::gumbel::fit_complete(&scores).unwrap_or((-3.0, lambda as f64));
 
-    // Convert to exponential tail tau
-    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam)
-        + (tailp.ln() / lambda as f64);
+    // Convert to exponential tail tau (matching C: just the Gumbel inverse CDF)
+    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam);
 
     let tau = if tau.is_finite() { tau as f32 } else { -3.0 };
-    (tau, lambda)
+    // Use fitted Gumbel lambda (glam), not HMM-derived lambda
+    let flambda = if glam.is_finite() && glam > 0.0 { glam as f32 } else { lambda };
+    (tau, flambda)
 }
 
 #[cfg(test)]

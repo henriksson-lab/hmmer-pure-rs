@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::hmmfile;
+use hmmer_pure_rs::hmmfile;
 
 #[derive(Parser)]
 #[command(name = "hmmconvert", about = "Convert profile HMM file to HMMER3 format")]

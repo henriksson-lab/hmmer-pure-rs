@@ -186,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_backward_matches_ffi() {
         crate::logsum::p7_flogsuminit();
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(

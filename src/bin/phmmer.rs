@@ -6,15 +6,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::logsum;
-use hmmer::pipeline::Pipeline;
-use hmmer::profile::{self, Profile, P7_LOCAL};
-use hmmer::seqmodel;
-use hmmer::sequence::{self, Sequence};
-use hmmer::simd::oprofile::OProfile;
-use hmmer::tophits::TopHits;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::logsum;
+use hmmer_pure_rs::pipeline::Pipeline;
+use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
+use hmmer_pure_rs::seqmodel;
+use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::simd::oprofile::OProfile;
+use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
 #[command(name = "phmmer", about = "Search a protein sequence against a protein database")]
@@ -119,7 +119,7 @@ fn main() {
 
         // Search in parallel
         use rayon::prelude::*;
-        let all_hits: Vec<hmmer::tophits::Hit> = sequences
+        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = sequences
             .par_iter()
             .filter_map(|sq| {
                 let mut lb = local_bg.clone();
@@ -155,7 +155,7 @@ fn main() {
         writeln!(out, "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------").unwrap();
 
         for hit in &th.hits {
-            if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
             }
             let evalue = z * hit.lnp.exp();
@@ -172,10 +172,10 @@ fn main() {
             writeln!(
                 out,
                 "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
-                hmmer::output::fmt_evalue(evalue),
+                hmmer_pure_rs::output::fmt_evalue(evalue),
                 hit.score,
                 hit.bias,
-                hmmer::output::fmt_evalue(dom_evalue),
+                hmmer_pure_rs::output::fmt_evalue(dom_evalue),
                 dom_score,
                 hit.bias,
                 hit.nexpected,

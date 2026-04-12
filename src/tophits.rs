@@ -7,6 +7,7 @@ pub struct AliDisplay {
     pub model: String,   // consensus model line
     pub mline: String,   // match/identity line
     pub aseq: String,    // aligned target sequence
+    pub ppline: String,  // posterior probability annotation
     pub hmmfrom: usize,
     pub hmmto: usize,
     pub sqfrom: usize,

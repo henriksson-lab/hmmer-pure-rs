@@ -6,15 +6,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use hmmer::alphabet::Alphabet;
-use hmmer::bg::Bg;
-use hmmer::hmmfile;
-use hmmer::logsum;
-use hmmer::pipeline::Pipeline;
-use hmmer::profile::{self, Profile, P7_LOCAL};
-use hmmer::sequence::{self, Sequence};
-use hmmer::simd::oprofile::OProfile;
-use hmmer::tophits::TopHits;
+use hmmer_pure_rs::alphabet::Alphabet;
+use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::logsum;
+use hmmer_pure_rs::pipeline::Pipeline;
+use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
+use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::simd::oprofile::OProfile;
+use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
 #[command(name = "hmmsearch", about = "Search profile(s) against a sequence database")]
@@ -161,7 +161,7 @@ fn main() {
 
         // Score sequences in parallel using rayon
         use rayon::prelude::*;
-        let all_hits: Vec<hmmer::tophits::Hit> = sequences
+        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = sequences
             .par_iter()
             .filter_map(|sq| {
                 let mut local_bg = bg.clone();
@@ -221,7 +221,7 @@ fn main() {
 
         let mut any_reported = false;
         for hit in &th.hits {
-            if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
             }
             any_reported = true;
@@ -240,10 +240,10 @@ fn main() {
             writeln!(
                 out,
                 "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
-                hmmer::output::fmt_evalue(evalue),
+                hmmer_pure_rs::output::fmt_evalue(evalue),
                 hit.score,
                 hit.bias,
-                hmmer::output::fmt_evalue(dom_evalue),
+                hmmer_pure_rs::output::fmt_evalue(dom_evalue),
                 dom_score,
                 hit.bias,
                 hit.nexpected,
@@ -264,7 +264,7 @@ fn main() {
             writeln!(out, "Domain annotation for each sequence (and alignments):").unwrap();
 
             for hit in &th.hits {
-                if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+                if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                     continue;
                 }
 
@@ -288,21 +288,27 @@ fn main() {
                     } else {
                         (1, hmm.m)
                     };
+                    // Boundary indicators
+                    let hmm_left = if hf == 1 { '[' } else { '.' };
+                    let hmm_right = if ht == hmm.m { ']' } else { '.' };
+                    let seq_left = if dom.iali == dom.ienv { hmm_left } else { '.' };
+                    let seq_right = if dom.jali == dom.jenv { hmm_right } else { '.' };
+
                     writeln!(
                         out,
-                        " {:3} {} {:6.1} {:5.1} {} {} {:7} {:7} .. {:7} {:7} .. {:7} {:7} .. {:.2}",
+                        " {:3} {} {:6.1} {:5.1} {} {} {:7} {:7} {}{} {:7} {:7} {}{} {:7} {:7} {}{} {:.2}",
                         di + 1,
                         indicator,
                         dom.bitscore,
                         dom.dombias,
-                        hmmer::output::fmt_evalue(c_evalue),
-                        hmmer::output::fmt_evalue(dom_evalue),
-                        hf,
-                        ht,
-                        dom.iali,
-                        dom.jali,
-                        dom.ienv,
-                        dom.jenv,
+                        hmmer_pure_rs::output::fmt_evalue(c_evalue),
+                        hmmer_pure_rs::output::fmt_evalue(dom_evalue),
+                        hf, ht,
+                        hmm_left, hmm_right,
+                        dom.iali, dom.jali,
+                        seq_left, seq_right,
+                        dom.ienv, dom.jenv,
+                        seq_left, seq_right,
                         0.95_f32,
                     ).unwrap();
                 }
@@ -314,7 +320,7 @@ fn main() {
                     writeln!(out, "  Alignments for each domain:").unwrap();
                     for (di, dom) in hit.dcl.iter().enumerate() {
                         writeln!(out, "  == domain {}  score: {:.1} bits;  conditional E-value: {}",
-                            di + 1, dom.bitscore, hmmer::output::fmt_evalue(dom.lnp.exp()).trim()).unwrap();
+                            di + 1, dom.bitscore, hmmer_pure_rs::output::fmt_evalue(dom.lnp.exp()).trim()).unwrap();
 
                         if let Some(ref ad) = dom.ad {
                             let name_width = hmm.name.len().max(hit.name.len()).max(5);
@@ -327,6 +333,9 @@ fn main() {
                             // Target sequence line
                             writeln!(out, "  {:>width$} {:>3} {} {:>3}",
                                 hit.name, ad.sqfrom, ad.aseq, ad.sqto, width = name_width).unwrap();
+                            // PP annotation line
+                            writeln!(out, "  {:>width$}     {} PP",
+                                "", ad.ppline, width = name_width).unwrap();
                         }
                         writeln!(out).unwrap();
                     }
@@ -374,7 +383,7 @@ fn write_tblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &Top
     writeln!(f, "#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------").unwrap();
 
     for hit in &th.hits {
-        if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
         let evalue = z * hit.lnp.exp();
@@ -420,7 +429,7 @@ fn write_domtblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &
     writeln!(f, "#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------").unwrap();
 
     for hit in &th.hits {
-        if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
         let evalue = z * hit.lnp.exp();

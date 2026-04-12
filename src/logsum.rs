@@ -112,6 +112,7 @@ mod tests {
 
     /// Cross-validate against FFI C implementation.
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_logsum_matches_ffi() {
         p7_flogsuminit();
         unsafe {

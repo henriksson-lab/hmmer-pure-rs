@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ffi")]
     fn test_forward_parser_matches_ffi() {
         if !is_x86_feature_detected!("sse2") {
             return;

@@ -286,6 +286,7 @@ pub fn build_hmm_from_msa(
     }
 
     // E-value calibration by simulation
+    // E-value calibration by simulation
     crate::calibrate::calibrate(&mut hmm, abc, bg);
 
     hmm
