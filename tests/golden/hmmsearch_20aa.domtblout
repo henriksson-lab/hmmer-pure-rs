@@ -1,0 +1,17 @@
+#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord
+# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target
+#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------
+test1                -             20 test                 -             20   4.2e-24   72.1   0.1   1   1   4.3e-24   4.3e-24   72.1   0.1     1    20     1    20     1    20 0.99 -
+test4                -             26 test                 -             20     1e-23   70.9   0.1   1   1   1.1e-23   1.1e-23   70.8   0.1     1    20     4    23     4    23 0.99 -
+test3                -             28 test                 -             20   7.3e-15   42.6   6.2   1   1     2e-14     2e-14   41.2   6.2     1    20     1    24     1    24 0.98 -
+test2                -             25 test                 -             20   2.9e-14   40.6   6.1   1   1   6.2e-14   6.2e-14   39.6   6.1     1    20     5    25     5    25 0.94 -
+#
+# Program:         hmmsearch
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa.hmm
+# Target file:     /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa-alitest.fa
+# Option settings: hmmer/src/hmmsearch --domtblout /tmp/tmp.UfuYJjF7LX /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa.hmm /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa-alitest.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Fri Apr 10 13:24:09 2026
+# [ok]

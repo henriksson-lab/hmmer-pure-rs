@@ -1,0 +1,160 @@
+//! hmmscan — search sequence(s) against an HMM database.
+//! Reverses hmmsearch: query=sequences, targets=HMMs.
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use clap::Parser;
+
+use hmmer::alphabet::Alphabet;
+use hmmer::bg::Bg;
+use hmmer::hmmfile;
+use hmmer::logsum;
+use hmmer::pipeline::Pipeline;
+use hmmer::profile::{self, Profile, P7_LOCAL};
+use hmmer::sequence::{self, Sequence};
+use hmmer::simd::oprofile::OProfile;
+use hmmer::tophits::TopHits;
+
+#[derive(Parser)]
+#[command(name = "hmmscan", about = "Search sequence(s) against a profile HMM database")]
+struct Args {
+    /// Query sequence file (FASTA)
+    seqfile: PathBuf,
+    /// HMM database file
+    hmmdb: PathBuf,
+
+    /// Report sequences <= this E-value threshold
+    #[arg(short = 'E', default_value = "10.0")]
+    e_value: f64,
+
+    /// Include sequences <= this E-value threshold
+    #[arg(long = "incE", default_value = "0.01")]
+    inc_e: f64,
+
+    /// Number of CPU threads
+    #[arg(long = "cpu", default_value = "2")]
+    cpu: usize,
+
+    /// Save per-sequence hits to tabular file
+    #[arg(long = "tblout")]
+    tblout: Option<PathBuf>,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    logsum::p7_flogsuminit();
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.cpu)
+        .build_global()
+        .ok();
+
+    // Read HMM database
+    let hmms = hmmfile::read_hmm_file(&args.hmmdb).unwrap_or_else(|e| {
+        eprintln!("Error reading HMM database: {}", e);
+        std::process::exit(1);
+    });
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    writeln!(out, "# hmmscan :: search sequence(s) against a profile database").unwrap();
+    writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
+    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(out).unwrap();
+
+    // For each query sequence, search all HMMs
+    let abc = Alphabet::amino(); // assume amino for now
+    let bg = Bg::new(&abc);
+
+    let mut sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+
+    let mut sq = Sequence::new();
+    while sqf.read(&mut sq).unwrap() {
+        writeln!(out, "Query:       {}  [L={}]", sq.name, sq.n).unwrap();
+
+        // Pre-build profiles for all HMMs (could be cached)
+        use rayon::prelude::*;
+        let all_hits: Vec<hmmer::tophits::Hit> = hmms
+            .par_iter()
+            .filter_map(|hmm| {
+                let mut local_bg = bg.clone();
+                local_bg.set_filter(hmm.m, &hmm.compo);
+                local_bg.set_length(sq.n);
+
+                let mut gm = Profile::new(hmm.m, &abc);
+                profile::profile_config(hmm, &local_bg, &mut gm, sq.n as i32, P7_LOCAL);
+                let om = OProfile::convert(&gm);
+
+                let mut pli = Pipeline::new();
+                pli.new_model(&gm);
+
+                let mut th = TopHits::new();
+                if pli.run(&gm, &om, &local_bg, hmm, &sq, &mut th) {
+                    // Use the HMM name for the hit (in hmmscan, targets are HMMs)
+                    th.hits.into_iter().next().map(|mut hit| {
+                        // Swap: in hmmscan output, "target" is the HMM name
+                        hit.name = hmm.name.clone();
+                        hit.acc = hmm.acc.clone().unwrap_or_default();
+                        hit.desc = hmm.desc.clone().unwrap_or_default();
+                        hit
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut th = TopHits::new();
+        th.hits = all_hits;
+        let z = hmms.len() as f64;
+        th.sort_by_sortkey();
+        th.threshold(args.e_value, args.inc_e, args.e_value, args.inc_e, z, z);
+
+        writeln!(out, "Scores for complete sequence (score includes all domains):").unwrap();
+        writeln!(out, "   --- full sequence ---   --- best 1 domain ---    -#dom-").unwrap();
+        writeln!(out, "    E-value  score  bias    E-value  score  bias    exp  N  Model    Description").unwrap();
+        writeln!(out, "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------").unwrap();
+
+        for hit in &th.hits {
+            if hit.flags & hmmer::tophits::P7_IS_REPORTED == 0 {
+                continue;
+            }
+            let evalue = z * hit.lnp.exp();
+            let dom_evalue = if !hit.dcl.is_empty() {
+                z * hit.dcl[0].lnp.exp()
+            } else {
+                evalue
+            };
+            let dom_score = if !hit.dcl.is_empty() {
+                hit.dcl[0].bitscore
+            } else {
+                hit.score
+            };
+            writeln!(
+                out,
+                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
+                hmmer::output::fmt_evalue(evalue),
+                hit.score, hit.bias,
+                hmmer::output::fmt_evalue(dom_evalue),
+                dom_score, hit.bias,
+                hit.nexpected, hit.ndom,
+                hit.name, hit.desc,
+            ).unwrap();
+        }
+
+        if th.nreported == 0 {
+            writeln!(out, "   [No targets detected that satisfy reporting thresholds]").unwrap();
+        }
+        writeln!(out, "\n//").unwrap();
+
+        sq.reuse();
+    }
+
+    writeln!(out, "[ok]").unwrap();
+}

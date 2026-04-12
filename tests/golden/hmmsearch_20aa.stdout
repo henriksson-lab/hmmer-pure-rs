@@ -1,0 +1,89 @@
+# hmmsearch :: search profile(s) against a sequence database
+# HMMER 3.4 (Aug 2023); http://hmmer.org/
+# Copyright (C) 2023 Howard Hughes Medical Institute.
+# Freely distributed under the BSD open source license.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# query HMM file:                  /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa.hmm
+# target sequence database:        /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa-alitest.fa
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Query:       test  [M=20]
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description
+    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------
+    4.2e-24   72.1   0.1    4.3e-24   72.1   0.1    1.0  1  test1     
+      1e-23   70.9   0.1    1.1e-23   70.8   0.1    1.0  1  test4     
+    7.3e-15   42.6   6.2      2e-14   41.2   6.2    1.7  1  test3     
+    2.9e-14   40.6   6.1    6.2e-14   39.6   6.1    1.5  1  test2     
+
+
+Domain annotation for each sequence (and alignments):
+>> test1  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   72.1   0.1   4.3e-24   4.3e-24       1      20 []       1      20 []       1      20 [] 0.99
+
+  Alignments for each domain:
+  == domain 1  score: 72.1 bits;  conditional E-value: 4.3e-24
+           xxxxxxxxxxxxxxxxxxxx RF
+   test  1 ACDEFGHIKLMNPQRSTVWY 20
+           ACDEFGHIKLMNPQRSTVWY
+  test1  1 ACDEFGHIKLMNPQRSTVWY 20
+           9******************* PP
+
+>> test4  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   70.8   0.1   1.1e-23   1.1e-23       1      20 []       4      23 ..       4      23 .. 0.99
+
+  Alignments for each domain:
+  == domain 1  score: 70.8 bits;  conditional E-value: 1.1e-23
+           xxxxxxxxxxxxxxxxxxxx RF
+   test  1 ACDEFGHIKLMNPQRSTVWY 20
+           ACDEFGHIKLMNPQRSTVWY
+  test4  4 ACDEFGHIKLMNPQRSTVWY 23
+           9******************* PP
+
+>> test3  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   41.2   6.2     2e-14     2e-14       1      20 []       1      24 [.       1      24 [. 0.98
+
+  Alignments for each domain:
+  == domain 1  score: 41.2 bits;  conditional E-value: 2e-14
+           xxxxxxxxxxxx.....xxxxxxxx RF
+   test  1 ACDEFGHIKLMN.....PQRSTVWY 20
+           ACDEFGHI LMN     PQRSTVWY
+  test3  1 ACDEFGHI-LMNxxxxxPQRSTVWY 24
+           9*******.**************** PP
+
+>> test2  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   39.6   6.1   6.2e-14   6.2e-14       1      20 []       5      25 .]       5      25 .] 0.94
+
+  Alignments for each domain:
+  == domain 1  score: 39.6 bits;  conditional E-value: 6.2e-14
+           xxxxxxxxxxxx...xxxxxxxx RF
+   test  1 ACDEFGHIKLMN...PQRSTVWY 20
+           ACDEFGHI  MN   PQRSTVWY
+  test2  5 ACDEFGHI--MNxxxPQRSTVWY 25
+           9******9..88888******** PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (20 nodes)
+Target sequences:                          4  (99 residues searched)
+Passed MSV filter:                         4  (1); expected 0.1 (0.02)
+Passed bias filter:                        4  (1); expected 0.1 (0.02)
+Passed Vit filter:                         4  (1); expected 0.0 (0.001)
+Passed Fwd filter:                         4  (1); expected 0.0 (1e-05)
+Initial search space (Z):                  4  [actual number of targets]
+Domain search space  (domZ):               4  [number of targets reported over threshold]
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.00
+# Mc/sec: 0.48
+//
+[ok]

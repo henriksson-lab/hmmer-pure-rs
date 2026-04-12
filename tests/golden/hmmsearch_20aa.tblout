@@ -1,0 +1,17 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+test1                -          test                 -            4.2e-24   72.1   0.1   4.3e-24   72.1   0.1   1.0   1   0   0   1   1   1   1 -
+test4                -          test                 -              1e-23   70.9   0.1   1.1e-23   70.8   0.1   1.0   1   0   0   1   1   1   1 -
+test3                -          test                 -            7.3e-15   42.6   6.2     2e-14   41.2   6.2   1.7   1   1   0   1   1   1   1 -
+test2                -          test                 -            2.9e-14   40.6   6.1   6.2e-14   39.6   6.1   1.5   1   1   0   1   1   1   1 -
+#
+# Program:         hmmsearch
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa.hmm
+# Target file:     /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa-alitest.fa
+# Option settings: hmmer/src/hmmsearch --tblout /tmp/tmp.UfuYJjF7LX /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa.hmm /data/henriksson/github/claude/newhmmer/hmmer/testsuite/20aa-alitest.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Fri Apr 10 13:24:09 2026
+# [ok]

@@ -1,0 +1,100 @@
+# target name        accession  query name           accession   hmmfrom hmm to alifrom  ali to envfrom  env to  sq len strand   E-value  score  bias  description of target
+#------------------- ---------- --------------------  ---------- ------- ------- ------- ------- ------- ------- ------- ------ --------- ------ ----- ---------------------
+humanchr1_frag       -          MADE1                DF0000629.2       4      80  302390  302466  302387  302466  330000    +     9.6e-11   38.8   7.4  -
+humanchr1_frag       -          MADE1                DF0000629.2       1      43  174456  174498  174456  174518  330000    +     6.5e-08   29.8   8.3  -
+humanchr1_frag       -          MADE1                DF0000629.2       1      77  302466  302390  302466  302387  330000    -       1e-07   29.2   6.0  -
+humanchr1_frag       -          MADE1                DF0000629.2      43      80  174493  174456  174513  174456  330000    -     6.2e-06   23.4   7.0  -
+humanchr1_frag       -          MADE1                DF0000629.2      41      72  304073  304104  304053  304109  330000    +         1.4    6.3   7.0  -
+#
+# Program:         nhmmer
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/tutorial/MADE1.hmm
+# Target file:     hmmer/tutorial/dna_target.fa
+# Option settings: hmmer/src/nhmmer --tblout /dev/stdout hmmer/tutorial/MADE1.hmm hmmer/tutorial/dna_target.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Fri Apr 10 13:21:18 2026
+# [ok]
+   4        80 .]    302390    302466 ..    302387    302466 ..    330000    0.87
+
+  Alignment:
+  score: 38.8 bits
+                        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx....xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx RF
+           MADE1      4 ggttggtgcaaaagtaattgcggtttttgccattacttttaatggc....aaaaaccgcaattacttttgcaccaacctaa 80    
+                        ggt ggtgcaaaa  aattg ggtttttgccatt cttttaat gc    a aaa  g a  t ctttt caccaa ctaa
+  humanchr1_frag 302390 GGTCGGTGCAAAATCAATTGTGGTTTTTGCCATTGCTTTTAATTGCttttA-AAA--GTA-ATGCTTTTACACCAATCTAA 302466
+                        899******************************************955533.443..334.4689************9986 PP
+
+>> humanchr1_frag  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ !   29.8   8.3   6.5e-08         1        43 [.    174456    174498 ..    174456    174518 ..    330000    0.92
+
+  Alignment:
+  score: 29.8 bits
+                        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx RF
+           MADE1      1 ttaggttggtgcaaaagtaattgcggtttttgccattactttt 43    
+                        ttaggtt gtgcaaaagtaattg ggtttttg cattactttt
+  humanchr1_frag 174456 TTAGGTTAGTGCAAAAGTAATTGTGGTTTTTGTCATTACTTTT 174498
+                        589************************************9975 PP
+
+>> humanchr1_frag  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ !   29.2   6.0     1e-07         1        77 [.    302466    302390 ..    302466    302387 ..    330000    0.75
+
+  Alignment:
+  score: 29.2 bits
+                        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx................xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx RF
+           MADE1      1 ttaggttggtgcaaaagtaattgcggtttttgccattactttt................aatggcaaaaaccgcaattacttttgcacc 73    
+                        ttag ttggtg aaaag                cattactttt                aatggcaaaaacc caatt  ttttgcacc
+  humanchr1_frag 302466 TTAGATTGGTGTAAAAG----------------CATTACTTTTaaaagcaattaaaagcAATGGCAAAAACCACAATTGATTTTGCACC 302394
+                        68999999999999998................5666777776222222222222222268**************************** PP
+
+                        xxxx RF
+           MADE1     74 aacc 77    
+                         acc
+  humanchr1_frag 302393 GACC 302390
+                        9998 PP
+
+>> humanchr1_frag  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ !   23.4   7.0   6.2e-06        43        80 .]    174493    174456 ..    174513    174456 ..    330000    0.91
+
+  Alignment:
+  score: 23.4 bits
+                        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx RF
+           MADE1     43 taatggcaaaaaccgcaattacttttgcaccaacctaa 80    
+                        taatg caaaaacc caattacttttgcac aacctaa
+  humanchr1_frag 174493 TAATGACAAAAACCACAATTACTTTTGCACTAACCTAA 174456
+                        689********************************986 PP
+
+>> humanchr1_frag  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ ?    6.3   7.0       1.4        41        72 ..    304073    304104 ..    304053    304109 ..    330000    0.85
+
+  Alignment:
+  score: 6.3 bits
+                        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx RF
+           MADE1     41 tttaatggcaaaaaccgcaattacttttgcac 72    
+                        tt a tgg aaaaa   ca tta ttttgca 
+  humanchr1_frag 304073 TTAAGTGGGAAAAAATACACTTATTTTTGCAT 304104
+                        455779************************86 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (80 nodes)
+Target sequences:                          1  (660000 residues searched)
+Residues passing SSV filter:           62313  (0.0944); expected (0.02)
+Residues passing bias filter:          46668  (0.0707); expected (0.02)
+Residues passing Vit filter:            3832  (0.00581); expected (0.003)
+Residues passing Fwd filter:            2222  (0.00337); expected (3e-05)
+Total number of hits:                      5  (0.000405)
+# CPU time: 0.04u 0.00s 00:00:00.04 Elapsed: 00:00:00.02
+# Mc/sec: 2016.16
+//
+[ok]

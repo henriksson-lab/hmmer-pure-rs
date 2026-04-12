@@ -1,0 +1,82 @@
+[package]
+name = "hmmer"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of HMMER 3.4 - biological sequence analysis using profile HMMs"
+license = "BSD-3-Clause"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+rayon = "1"
+
+[features]
+default = ["ffi"]
+ffi = ["cc", "bindgen"]
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+bindgen = { version = "0.71", optional = true }
+
+[[bin]]
+name = "hmmsearch"
+path = "src/bin/hmmsearch_rust.rs"
+
+[[bin]]
+name = "hmmsearch_ffi"
+path = "src/bin/hmmsearch.rs"
+required-features = ["ffi"]
+
+[[bin]]
+name = "hmmstat"
+path = "src/bin/hmmstat.rs"
+
+[[bin]]
+name = "hmmemit"
+path = "src/bin/hmmemit.rs"
+
+[[bin]]
+name = "hmmconvert"
+path = "src/bin/hmmconvert.rs"
+
+[[bin]]
+name = "phmmer"
+path = "src/bin/phmmer.rs"
+
+[[bin]]
+name = "hmmbuild"
+path = "src/bin/hmmbuild.rs"
+
+[[bin]]
+name = "jackhmmer"
+path = "src/bin/jackhmmer.rs"
+
+[[bin]]
+name = "nhmmer"
+path = "src/bin/nhmmer.rs"
+
+[[bin]]
+name = "hmmpress"
+path = "src/bin/hmmpress.rs"
+
+[[bin]]
+name = "hmmscan"
+path = "src/bin/hmmscan.rs"
+
+[[bin]]
+name = "hmmfetch"
+path = "src/bin/hmmfetch.rs"
+
+[[bin]]
+name = "hmmalign"
+path = "src/bin/hmmalign.rs"
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

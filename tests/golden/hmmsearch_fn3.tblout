@@ -1,0 +1,14 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+7LESS_DROME          P13368     fn3                  PF00041.13   1.9e-57  178.0   0.4   1.2e-16   47.2   0.9   9.4   9   1   0   9   9   9   7 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+#
+# Program:         hmmsearch
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      /data/henriksson/github/claude/newhmmer/hmmer/tutorial/fn3.hmm
+# Target file:     /data/henriksson/github/claude/newhmmer/hmmer/tutorial/7LESS_DROME
+# Option settings: hmmer/src/hmmsearch --tblout /tmp/tmp.UfuYJjF7LX /data/henriksson/github/claude/newhmmer/hmmer/tutorial/fn3.hmm /data/henriksson/github/claude/newhmmer/hmmer/tutorial/7LESS_DROME 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Fri Apr 10 13:24:09 2026
+# [ok]

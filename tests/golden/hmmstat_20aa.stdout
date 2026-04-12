@@ -1,0 +1,9 @@
+# hmmstat :: display summary statistics for a profile file
+# HMMER 3.4 (Aug 2023); http://hmmer.org/
+# Copyright (C) 2023 Howard Hughes Medical Institute.
+# Freely distributed under the BSD open source license.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+# idx  name                 accession        nseq eff_nseq      M relent   info p relE compKL
+# ---- -------------------- ------------ -------- -------- ------ ------ ------ ------ ------
+1      test                 -                  10     1.96     20   2.63   2.37   2.60   0.12

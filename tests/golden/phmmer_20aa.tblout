@@ -1,0 +1,276 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+test1                -          test1                -              2e-16   44.3   0.0   2.1e-16   44.3   0.0   1.0   1   0   0   1   1   1   1 -
+test4                -          test1                -            5.1e-16   43.2   0.0   5.7e-16   43.0   0.0   1.1   1   0   0   1   1   1   1 -
+test2                -          test1                -              5e-11   28.8   0.0   6.5e-11   28.5   0.0   1.2   1   0   0   1   1   1   1 -
+test3                -          test1                -            1.8e-10   27.2   0.4   8.7e-10   25.3   0.4   1.8   1   1   0   1   1   1   1 -
+test2                -          test2                -            2.2e-15   41.0   0.0   2.2e-15   41.0   0.0   1.0   1   0   0   1   1   1   1 -
+test4                -          test2                -            9.2e-12   30.7   0.0     1e-11   30.6   0.0   1.1   1   0   0   1   1   1   1 -
+test1                -          test2                -            1.7e-11   29.9   0.0   1.9e-11   29.8   0.0   1.1   1   0   0   1   1   1   1 -
+test3                -          test2                -            3.7e-11   29.0   0.0   5.5e-11   28.5   0.0   1.3   1   0   0   1   1   1   1 -
+test3                -          test3                -            7.8e-16   42.4   0.0   7.8e-16   42.4   0.0   1.0   1   0   0   1   1   1   1 -
+test2                -          test3                -            5.2e-11   28.6   0.0   6.7e-11   28.3   0.0   1.2   1   0   0   1   1   1   1 -
+test4                -          test3                -            8.8e-11   28.0   0.1   1.4e-10   27.4   0.1   1.4   1   1   0   1   1   1   1 -
+test1                -          test3                -            1.7e-10   27.2   0.1   3.1e-10   26.4   0.1   1.4   1   1   0   1   1   1   1 -
+test4                -          test4                -            3.7e-17   46.4   0.0   3.7e-17   46.4   0.0   1.0   1   0   0   1   1   1   1 -
+test1                -          test4                -            3.5e-16   43.6   0.0   3.6e-16   43.6   0.0   1.0   1   0   0   1   1   1   1 -
+test2                -          test4                -              2e-11   30.0   0.0   2.3e-11   29.8   0.0   1.1   1   0   0   1   1   1   1 -
+test3                -          test4                -            8.6e-11   28.2   0.3   2.6e-10   26.8   0.3   1.6   1   1   0   1   1   1   1 -
+#
+# Program:         phmmer
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/testsuite/20aa-alitest.fa
+# Target file:     hmmer/testsuite/20aa-alitest.fa
+# Option settings: hmmer/src/phmmer --tblout /dev/stdout hmmer/testsuite/20aa-alitest.fa hmmer/testsuite/20aa-alitest.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Fri Apr 10 13:21:05 2026
+# [ok]
+ional E-value: 8.7e-10
+  test1  1 acdefghiklmn.....pqrstvwy 20
+           acdefghi + n     pqrstvwy
+  test3  1 ACDEFGHILM-NxxxxxPQRSTVWY 24
+           8******965.323444*******9 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (20 nodes)
+Target sequences:                          4  (99 residues searched)
+Passed MSV filter:                         4  (1); expected 0.1 (0.02)
+Passed bias filter:                        4  (1); expected 0.1 (0.02)
+Passed Vit filter:                         4  (1); expected 0.0 (0.001)
+Passed Fwd filter:                         4  (1); expected 0.0 (1e-05)
+Initial search space (Z):                  4  [actual number of targets]
+Domain search space  (domZ):               4  [number of targets reported over threshold]
+# CPU time: 0.02u 0.00s 00:00:00.02 Elapsed: 00:00:00.01
+# Mc/sec: 0.10
+//
+Query:       test2  [L=25]
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description
+    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------
+    2.2e-15   41.0   0.0    2.2e-15   41.0   0.0    1.0  1  test2     
+    9.2e-12   30.7   0.0      1e-11   30.6   0.0    1.1  1  test4     
+    1.7e-11   29.9   0.0    1.9e-11   29.8   0.0    1.1  1  test1     
+    3.7e-11   29.0   0.0    5.5e-11   28.5   0.0    1.3  1  test3     
+
+
+Domain annotation for each sequence (and alignments):
+>> test2  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   41.0   0.0   2.2e-15   2.2e-15       3      25 .]       3      25 .]       1      25 [] 0.94
+
+  Alignments for each domain:
+  == domain 1  score: 41.0 bits;  conditional E-value: 2.2e-15
+  test2  3 xxacdefghimnxxxpqrstvwy 25
+           xxacdefghimnxxxpqrstvwy
+  test2  3 XXACDEFGHIMNXXXPQRSTVWY 25
+           689*******************9 PP
+
+>> test4  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   30.6   0.0     1e-11     1e-11       4      25 .]       3      23 ..       1      23 [. 0.89
+
+  Alignments for each domain:
+  == domain 1  score: 30.6 bits;  conditional E-value: 1e-11
+  test2  4 xacdefghimnxxxpqrstvwy 25
+           xacdefghi    +pqrstvwy
+  test4  3 XACDEFGHIK-LMNPQRSTVWY 23
+           79******95.789*******9 PP
+
+>> test1  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   29.8   0.0   1.9e-11   1.9e-11       5      25 .]       1      20 []       1      20 [] 0.92
+
+  Alignments for each domain:
+  == domain 1  score: 29.8 bits;  conditional E-value: 1.9e-11
+  test2  5 acdefghimnxxxpqrstvwy 25
+           acdefghi    +pqrstvwy
+  test1  1 ACDEFGHIK-LMNPQRSTVWY 20
+           8******95.789*******9 PP
+
+>> test3  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   28.5   0.0   5.5e-11   5.5e-11       5      25 .]       1      24 [.       1      24 [. 0.79
+
+  Alignments for each domain:
+  == domain 1  score: 28.5 bits;  conditional E-value: 5.5e-11
+  test2  5 acdefghi.mnx..xxpqrstvwy 25
+           acdefghi mnx  xxpqrstvwy
+  test3  1 ACDEFGHIlMNXxxXXPQRSTVWY 24
+           8******834542258*******9 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (25 nodes)
+Target sequences:                          4  (99 residues searched)
+Passed MSV filter:                         4  (1); expected 0.1 (0.02)
+Passed bias filter:                        4  (1); expected 0.1 (0.02)
+Passed Vit filter:                         4  (1); expected 0.0 (0.001)
+Passed Fwd filter:                         4  (1); expected 0.0 (1e-05)
+Initial search space (Z):                  4  [actual number of targets]
+Domain search space  (domZ):               4  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 0.24
+//
+Query:       test3  [L=28]
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description
+    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------
+    7.8e-16   42.4   0.0    7.8e-16   42.4   0.0    1.0  1  test3     
+    5.2e-11   28.6   0.0    6.7e-11   28.3   0.0    1.2  1  test2     
+    8.8e-11   28.0   0.1    1.4e-10   27.4   0.1    1.4  1  test4     
+    1.7e-10   27.2   0.1    3.1e-10   26.4   0.1    1.4  1  test1     
+
+
+Domain annotation for each sequence (and alignments):
+>> test3  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   42.4   0.0   7.8e-16   7.8e-16       1      26 [.       1      26 [.       1      28 [] 0.95
+
+  Alignments for each domain:
+  == domain 1  score: 42.4 bits;  conditional E-value: 7.8e-16
+  test3  1 acdefghilmnxxxxxpqrstvwyxx 26
+           acdefghilmnxxxxxpqrstvwyxx
+  test3  1 ACDEFGHILMNXXXXXPQRSTVWYXX 26
+           8***********************86 PP
+
+>> test2  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   28.3   0.0   6.7e-11   6.7e-11       1      24 [.       5      25 .]       5      25 .] 0.87
+
+  Alignments for each domain:
+  == domain 1  score: 28.3 bits;  conditional E-value: 6.7e-11
+  test3  1 acdefghilmnxxxxxpqrstvwy 24
+           acdefghi+ nx  xxpqrstvwy
+  test2  5 ACDEFGHIM-NX--XXPQRSTVWY 25
+           8******85.54..68*******9 PP
+
+>> test4  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   27.4   0.1   1.4e-10   1.4e-10       1      26 [.       4      25 ..       4      26 .] 0.86
+
+  Alignments for each domain:
+  == domain 1  score: 27.4 bits;  conditional E-value: 1.4e-10
+  test3  1 acdefghilmnxxxxxpqrstvwyxx 26
+           acdefghi +     +pqrstvwyxx
+  test4  4 ACDEFGHIKL----MNPQRSTVWYXX 25
+           8******954....57********75 PP
+
+>> test1  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   26.4   0.1   3.1e-10   3.1e-10       1      24 [.       1      20 []       1      20 [] 0.88
+
+  Alignments for each domain:
+  == domain 1  score: 26.4 bits;  conditional E-value: 3.1e-10
+  test3  1 acdefghilmnxxxxxpqrstvwy 24
+           acdefghi +     +pqrstvwy
+  test1  1 ACDEFGHIKL----MNPQRSTVWY 20
+           8******954....57*******9 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (28 nodes)
+Target sequences:                          4  (99 residues searched)
+Passed MSV filter:                         4  (1); expected 0.1 (0.02)
+Passed bias filter:                        4  (1); expected 0.1 (0.02)
+Passed Vit filter:                         4  (1); expected 0.0 (0.001)
+Passed Fwd filter:                         4  (1); expected 0.0 (1e-05)
+Initial search space (Z):                  4  [actual number of targets]
+Domain search space  (domZ):               4  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 0.24
+//
+Query:       test4  [L=26]
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description
+    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------
+    3.7e-17   46.4   0.0    3.7e-17   46.4   0.0    1.0  1  test4     
+    3.5e-16   43.6   0.0    3.6e-16   43.6   0.0    1.0  1  test1     
+      2e-11   30.0   0.0    2.3e-11   29.8   0.0    1.1  1  test2     
+    8.6e-11   28.2   0.3    2.6e-10   26.8   0.3    1.6  1  test3     
+
+
+Domain annotation for each sequence (and alignments):
+>> test4  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   46.4   0.0   3.7e-17   3.7e-17       3      24 ..       3      24 ..       1      26 [] 0.92
+
+  Alignments for each domain:
+  == domain 1  score: 46.4 bits;  conditional E-value: 3.7e-17
+  test4  3 xacdefghiklmnpqrstvwyx 24
+           xacdefghiklmnpqrstvwyx
+  test4  3 XACDEFGHIKLMNPQRSTVWYX 24
+           79*******************7 PP
+
+>> test1  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   43.6   0.0   3.6e-16   3.6e-16       4      23 ..       1      20 []       1      20 [] 0.98
+
+  Alignments for each domain:
+  == domain 1  score: 43.6 bits;  conditional E-value: 3.6e-16
+  test4  4 acdefghiklmnpqrstvwy 23
+           acdefghiklmnpqrstvwy
+  test1  1 ACDEFGHIKLMNPQRSTVWY 20
+           8******************9 PP
+
+>> test2  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   29.8   0.0   2.3e-11   2.3e-11       3      23 ..       4      25 .]       2      25 .] 0.86
+
+  Alignments for each domain:
+  == domain 1  score: 29.8 bits;  conditional E-value: 2.3e-11
+  test4  3 xacdefghik.lmnpqrstvwy 23
+           xacdefghi     pqrstvwy
+  test2  4 XACDEFGHIMnXXXPQRSTVWY 25
+           79******962678*******9 PP
+
+>> test3  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   26.8   0.3   2.6e-10   2.6e-10       4      24 ..       1      25 [.       1      27 [. 0.76
+
+  Alignments for each domain:
+  == domain 1  score: 26.8 bits;  conditional E-value: 2.6e-10
+  test4  4 acdefghiklmn.....pqrstvwyx 24
+           acdefghi + n     pqrstvwyx
+  test3  1 ACDEFGHILM-NxxxxxPQRSTVWYX 25
+           8******965.323444********7 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (26 nodes)
+Target sequences:                          4  (99 residues searched)
+Passed MSV filter:                         4  (1); expected 0.1 (0.02)
+Passed bias filter:                        4  (1); expected 0.1 (0.02)
+Passed Vit filter:                         4  (1); expected 0.0 (0.001)
+Passed Fwd filter:                         4  (1); expected 0.0 (1e-05)
+Initial search space (Z):                  4  [actual number of targets]
+Domain search space  (domZ):               4  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 0.25
+//
+[ok]
