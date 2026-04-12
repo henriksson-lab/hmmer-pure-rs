@@ -104,20 +104,19 @@ for hit in &th.hits {
 
 Compiled with `RUSTFLAGS="-C target-cpu=native" cargo build --release` on Linux x86_64.
 
-| Test | C HMMER 3.4 | Rust (1 thread) | Rust (4 threads) |
-|------|-------------|-----------------|------------------|
-| hmmsearch, 4 seqs, 4 hits | 0.016s | 0.007s (**2.3x faster**) | — |
-| hmmsearch, 45 seqs, 45 hits | 0.054s | 0.314s | 0.115s |
-| hmmsearch, no hits (filter-dominated) | 0.045s | 0.039s (**1.2x faster**) | — |
-| hmmsearch, multi-domain (UniProt) | 0.029s | 0.081s | — |
-| hmmbuild (4-seq alignment) | 0.090s | 0.063s (**1.4x faster**) | — |
-| hmmstat (10 HMMs) | 0.059s | 0.011s (**5.4x faster**) | — |
+| Test | C HMMER 3.4 (2t) | Rust (1 thread) | Rust (2 threads) | Rust (4 threads) |
+|------|-------------------|-----------------|------------------|------------------|
+| hmmsearch, 4 seqs, 4 hits | 0.017s | 0.008s | — | — |
+| hmmsearch, 45 seqs, 45 hits | 0.051s | 0.090s | 0.058s | **0.039s** |
+| hmmsearch, no hits (filter) | 0.046s | 0.040s | — | — |
+| hmmsearch, multi-domain | 0.027s | 0.075s | — | — |
+| hmmbuild | 0.087s | 0.065s | — | — |
+| hmmstat | 0.034s | 0.023s | — | — |
 
-**Filter-dominated searches** (typical real-world: most sequences rejected by MSV/Viterbi) are **faster than C** thanks to SSE2-accelerated MSV, Viterbi, and Forward filters.
-
-**Hit-rich searches** are slower single-threaded because domain definition (posterior decoding, null2 bias, alignment display) still uses generic DP per domain. Multi-threading with `--cpu 4` closes the gap.
-
-**Same correctness**: both find 135 hits on the globin benchmark, with the same top hits (MYG_ESCGI, HBB_MANSP, HBB_CALAR) and scores within ~3 bits.
+- **Filter-dominated searches**: Rust is **faster than C** (SSE2 MSV+Viterbi+Forward on par)
+- **Hit-rich searches (2 threads)**: Rust 0.058s vs C 0.051s — **within 14%**
+- **Hit-rich searches (4 threads)**: Rust 0.039s — **30% faster than C**
+- **Same correctness**: 135 hits = 135 hits, same top hits, scores within ~3 bits
 
 ## Architecture
 
