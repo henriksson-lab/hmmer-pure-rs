@@ -73,6 +73,40 @@ fn run_p7_timed(
     (domains, elapsed)
 }
 
+/// Run the SSV long-target filter on a sequence and return (windows, elapsed).
+/// This is the approach C Infernal uses for genome-scale search.
+fn run_p7_longtarget_timed(
+    hmm: &hmmer_pure_rs::hmm::Hmm,
+    seq: &[u8],
+) -> (Vec<(usize, usize, f32)>, std::time::Duration) {
+    use hmmer_pure_rs::*;
+
+    let abc = alphabet::Alphabet::new(hmm.abc_type);
+    let bg_obj = bg::Bg::new(&abc);
+
+    let mut gm = profile::Profile::new(hmm.m, &abc);
+    profile::profile_config(hmm, &bg_obj, &mut gm, 200, profile::P7_LOCAL);
+    let mut om = simd::oprofile::OProfile::convert(&gm);
+    let max_length = (hmm.m * 4) as i32;
+
+    let dsq = abc.digitize(seq);
+
+    let start = Instant::now();
+    let windows = unsafe {
+        simd::ssv_longtarget::ssv_filter_longtarget(
+            &dsq, seq.len(), &om, &bg_obj, 0.02, max_length,
+        )
+    };
+    let elapsed = start.elapsed();
+
+    let hits: Vec<(usize, usize, f32)> = windows.iter().map(|w| {
+        let start = if w.n > w.length { w.n - w.length + 1 } else { 1 };
+        (start, w.n, w.score)
+    }).collect();
+
+    (hits, elapsed)
+}
+
 fn infernal_testsuite() -> std::path::PathBuf {
     let paths = [
         "/data/henriksson/github/claude/infernal-rs/infernal/testsuite",
@@ -163,26 +197,25 @@ fn perf_p7_pipeline_10kb() {
 // ============================================================
 
 #[test]
-#[ignore] // hmmsearch is not designed for 100kb+ sequences; use nhmmer for long targets
-fn perf_p7_pipeline_100kb() {
+fn perf_ssv_longtarget_100kb() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     let seq = make_seq_with_trna(100_000, 50_000, 123);
-    let (domains, elapsed) = run_p7_timed(&hmm, &seq);
+    let (windows, elapsed) = run_p7_longtarget_timed(&hmm, &seq);
 
-    println!("P7 pipeline 100kb: {:.3}s, {} domains", elapsed.as_secs_f64(), domains.len());
-    for (i, j, sc) in &domains {
-        println!("  {}-{}: {:.1} bits", i, j, sc);
+    println!("SSV longtarget 100kb: {:.3}s, {} windows", elapsed.as_secs_f64(), windows.len());
+    for (i, j, sc) in &windows {
+        println!("  {}-{}: {:.1} nats", i, j, sc);
     }
 
-    // Should find the tRNA
-    let trna_hit = domains.iter().any(|(i, _, sc)| *i >= 49950 && *i <= 50050 && *sc > 10.0);
-    assert!(trna_hit, "Should find tRNA at ~50000 in 100kb sequence");
+    // Should find a window near the tRNA at position 50000
+    let trna_hit = windows.iter().any(|(i, j, _)| *i <= 50100 && *j >= 50000);
+    assert!(trna_hit, "SSV longtarget should find tRNA at ~50000 in 100kb sequence");
 
-    // Performance: should complete in under 30 seconds
-    assert!(elapsed.as_secs() < 30,
-        "100kb P7 pipeline took {:.1}s, expected <30s", elapsed.as_secs_f64());
+    // Performance: SSV longtarget should be fast (<5s for 100kb)
+    assert!(elapsed.as_secs() < 5,
+        "100kb SSV longtarget took {:.1}s, expected <5s", elapsed.as_secs_f64());
 }
 
 // ============================================================
@@ -190,8 +223,7 @@ fn perf_p7_pipeline_100kb() {
 // ============================================================
 
 #[test]
-#[ignore] // hmmsearch is not designed for genome-scale sequences; use nhmmer for long targets
-fn perf_p7_pipeline_genome() {
+fn perf_ssv_longtarget_genome() {
     let testsuite = infernal_testsuite();
     let tutorial = infernal_tutorial();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -205,33 +237,28 @@ fn perf_p7_pipeline_genome() {
     let seq = read_first_fasta_seq(&genome_path);
     println!("Genome: {} bp", seq.len());
 
-    let (domains, elapsed) = run_p7_timed(&hmm, &seq);
+    let (domains, elapsed) = run_p7_longtarget_timed(&hmm, &seq);
 
-    println!("P7 pipeline genome ({}bp): {:.3}s, {} domains",
+    println!("SSV longtarget genome ({}bp): {:.3}s, {} windows",
         seq.len(), elapsed.as_secs_f64(), domains.len());
     for (i, j, sc) in &domains {
-        println!("  {}-{}: {:.1} bits", i, j, sc);
+        println!("  {}-{}: {:.1} nats", i, j, sc);
     }
 
-    // C HMMER processes this genome in <1 second with SSE.
-    // The scalar Rust implementation will be slower, but should
-    // complete in a reasonable time.
+    // C Infernal processes this genome in ~1 second with SSE.
     // Target: under 60 seconds for the full 2.9 Mbp genome.
     assert!(elapsed.as_secs() < 60,
-        "Genome P7 pipeline took {:.1}s, expected <60s. \
-         C HMMER (SSE) does this in <1s. \
-         If this is >60s, the scalar P7 implementation needs optimization.",
+        "Genome SSV longtarget took {:.1}s, expected <60s. \
+         C Infernal (SSE) does this in ~1s.",
         elapsed.as_secs_f64());
 
     // C Infernal finds 15 tRNAs in this genome.
-    // P7 should find at least some of them (P7 is a prefilter,
-    // may have different sensitivity than full CM search).
-    let significant = domains.iter().filter(|(_, _, sc)| *sc > 15.0).count();
-    println!("Significant domains (>15 bits): {}", significant);
-    assert!(significant >= 5,
-        "Expected at least 5 significant P7 domains in M. ruminantium genome, got {}. \
+    // SSV longtarget is a prefilter — it should find at least as many
+    // windows as there are true hits (may include false positives).
+    assert!(domains.len() >= 5,
+        "Expected at least 5 SSV windows in M. ruminantium genome, got {}. \
          C Infernal finds 15 tRNAs.",
-        significant);
+        domains.len());
 }
 
 // ============================================================

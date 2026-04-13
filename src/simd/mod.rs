@@ -14,6 +14,8 @@ pub mod avx2_msv;
 pub mod avx2_vit;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_fwd;
+#[cfg(target_arch = "x86_64")]
+pub mod ssv_longtarget;
 
 pub mod neon_msv;
 pub mod neon_vit;
