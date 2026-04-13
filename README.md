@@ -8,6 +8,8 @@ equal output to the original. Please report any deviations.
 The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
 The code can also be compiled to be used for webassembly.
 
+**performance is not there yet. fair amount of real data-testing in place. this version is released as-is, but production-ready version is yet to arrive**
+
 
 ## Performance Status
 
