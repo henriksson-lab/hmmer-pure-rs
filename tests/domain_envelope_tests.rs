@@ -406,3 +406,104 @@ fn hit_score_matches_c_hmmer_approximately() {
          C HMMER gives ~30 bits.",
         r.dom_bitscore);
 }
+
+// ============================================================
+// Test 8: No false-positive domains in random flanking regions
+// ============================================================
+
+#[test]
+fn no_false_positive_domains_in_random_flanks() {
+    let testsuite = infernal_testsuite();
+    let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
+
+    // Read first sequence from 1k-tRNA.fa (tRNA at ~860-930 in 1000bp)
+    let fa_path = testsuite.join("1k-tRNA.fa");
+    if !fa_path.exists() { return; }
+
+    let content = std::fs::read_to_string(&fa_path).unwrap();
+    let mut seq = Vec::new();
+    for line in content.lines().skip(1) {
+        if line.starts_with('>') { break; }
+        seq.extend_from_slice(line.trim().as_bytes());
+    }
+
+    let results = run_p7_pipeline_full(&hmm, &seq);
+
+    println!("False-positive test — embedded tRNA ({}bp):", seq.len());
+    for r in &results {
+        println!("  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
+            r.ienv, r.jenv, r.dom_bitscore, r.hit_score);
+    }
+
+    // Only domains overlapping the true tRNA region (~860-930) should have
+    // significant scores. Domains in random flanking regions should NOT be
+    // reported, or if reported, should have very low scores.
+    //
+    // C HMMER does not report false-positive domains in random flanks.
+    // Any domain outside the tRNA region with score > 10 bits is a
+    // false positive that would cause unnecessary (expensive) CM scoring
+    // in the Infernal pipeline.
+    let false_positives: Vec<_> = results.iter()
+        .filter(|r| r.ienv < 800 || r.ienv > 950) // outside tRNA region
+        .filter(|r| r.dom_bitscore > 10.0)          // significant score
+        .collect();
+
+    assert!(false_positives.is_empty(),
+        "BUG: {} false-positive domain(s) with score > 10 bits outside tRNA region. \
+         These cause unnecessary CYK scoring in the Infernal pipeline, making \
+         genome-scale search extremely slow. Domains: {:?}",
+        false_positives.len(),
+        false_positives.iter()
+            .map(|r| format!("{}-{}: {:.1} bits", r.ienv, r.jenv, r.dom_bitscore))
+            .collect::<Vec<_>>());
+}
+
+// ============================================================
+// Test 9: Domain count should match C HMMER — no spurious domains
+// ============================================================
+
+#[test]
+fn embedded_trna_domain_count_matches_c_hmmer() {
+    let testsuite = infernal_testsuite();
+    let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
+
+    // Read first sequence from 1k-tRNA.fa
+    let fa_path = testsuite.join("1k-tRNA.fa");
+    if !fa_path.exists() { return; }
+
+    let content = std::fs::read_to_string(&fa_path).unwrap();
+    let mut seq = Vec::new();
+    for line in content.lines().skip(1) {
+        if line.starts_with('>') { break; }
+        seq.extend_from_slice(line.trim().as_bytes());
+    }
+
+    let results = run_p7_pipeline_full(&hmm, &seq);
+
+    println!("Domain count test ({}bp seq with 1 tRNA):", seq.len());
+    for r in &results {
+        println!("  ienv={} jenv={} dom_score={:.1}", r.ienv, r.jenv, r.dom_bitscore);
+    }
+
+    // C HMMER finds exactly 1 domain for this sequence (the tRNA at ~860-930).
+    // Reporting extra spurious domains wastes time in downstream CM scoring.
+    let significant: Vec<_> = results.iter()
+        .filter(|r| r.dom_bitscore > 10.0)
+        .collect();
+
+    assert_eq!(significant.len(), 1,
+        "BUG: Expected 1 significant domain (the tRNA), got {}. \
+         C HMMER reports exactly 1 domain for this sequence. \
+         Extra domains: {:?}",
+        significant.len(),
+        significant.iter()
+            .map(|r| format!("{}-{}: {:.1} bits", r.ienv, r.jenv, r.dom_bitscore))
+            .collect::<Vec<_>>());
+
+    // The one significant domain should be near 860-930
+    let d = &significant[0];
+    assert!(d.ienv >= 830 && d.ienv <= 890,
+        "Domain start {} should be near 860", d.ienv);
+    assert!(d.jenv >= 900 && d.jenv <= 960,
+        "Domain end {} should be near 930", d.jenv);
+}
