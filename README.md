@@ -9,6 +9,27 @@ The aim of this project is to increase performance, especially by providing this
 The code can also be compiled to be used for webassembly.
 
 
+## Performance Status
+
+The SIMD-accelerated filter pipeline (MSV → bias → Viterbi → Forward) matches C HMMER. The bottleneck is the **domain definition** stage, which currently uses generic (non-SIMD) Forward+Backward DP, making the overall pipeline ~10-20x slower than C for large databases.
+
+**Where time is spent** (profiled on Pkinase vs 20k Swiss-Prot):
+
+| Stage | Time | SIMD? | Notes |
+|-------|------|-------|-------|
+| MSV filter | 1.3% | Yes | Matches C |
+| Viterbi filter | — | Yes | Matches C |
+| Forward filter | 10% | Yes | Matches C |
+| Domain definition: Forward | 30% | **No** | Generic log-space DP |
+| Domain definition: Backward | 34% | **No** | Generic log-space DP |
+| Domain definition: Decoding | 7% | **No** | Posterior probabilities |
+| Null2 bias | 2% | No | Needs per-M-state posteriors |
+
+**Path to C-equivalent speed:**
+1. Port C's full-matrix SIMD Forward/Backward (`p7_Forward`/`p7_Backward` in `impl_sse/fwdback.c`) — stores all L rows instead of parser mode's single row. This eliminates the 64% generic DP bottleneck.
+2. Port C's SIMD posterior decoding (`p7_Decoding` in `impl_sse/decoding.c`) for null2 computation.
+3. Infrastructure is partially built: `forward_parser_with_specials` and `bck_decoding` exist but need per-row scale factor normalization matching C's `scaleproduct` logic.
+
 ## Features
 
 - Pure Rust implementation of the HMMER search pipeline

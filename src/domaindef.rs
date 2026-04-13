@@ -209,24 +209,63 @@ pub fn define_domains(
 ) -> (Vec<Domain>, f32, f32) {
     crate::logsum::p7_flogsuminit();
 
-    // Full Forward + Backward on the entire sequence
-    let mut gx_fwd = Gmx::new(gm.m, l);
-    g_forward(dsq, l, gm, &mut gx_fwd);
+    // Phase 1: Domain decoding (btot/etot/mocc) — SIMD when available
+    let (btot, etot, mocc);
 
-    let mut gx_bck = Gmx::new(gm.m, l);
-    g_backward(dsq, l, gm, &mut gx_bck);
+    #[cfg(target_arch = "x86_64")]
+    let use_simd = is_x86_feature_detected!("sse2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_simd = false;
 
-    // Domain decoding: compute btot, etot, mocc (matching C's p7_DomainDecoding)
-    let (btot, etot, mocc) = domain_decoding(gm, &gx_fwd, &gx_bck);
+    if use_simd {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use crate::simd::probmx::{ProbMx, p_domain_decoding};
+            use crate::simd::oprofile::*;
 
-    // nexpected = btot[L] (expected number of domains)
+            let om = OProfile::convert(gm);
+            let mut fwd_pmx = ProbMx::new(l);
+            let fwd_sc = unsafe {
+                crate::simd::fwd_filter::forward_parser_pmx(dsq, l, &om, &mut fwd_pmx)
+            };
+            let mut bck_pmx = ProbMx::new(l);
+            unsafe {
+                crate::simd::bck_filter::backward_parser_pmx(dsq, l, &om, fwd_sc, &mut bck_pmx);
+            };
+            let njc_loop = [
+                om.xf[P7O_N][P7O_LOOP],
+                om.xf[P7O_J][P7O_LOOP],
+                om.xf[P7O_C][P7O_LOOP],
+            ];
+            let r = p_domain_decoding(&fwd_pmx, &bck_pmx, l, njc_loop);
+            btot = r.0;
+            etot = r.1;
+            mocc = r.2;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        unreachable!();
+    } else {
+        let mut gx_fwd = Gmx::new(gm.m, l);
+        g_forward(dsq, l, gm, &mut gx_fwd);
+        let mut gx_bck = Gmx::new(gm.m, l);
+        g_backward(dsq, l, gm, &mut gx_bck);
+        let r = domain_decoding(gm, &gx_fwd, &gx_bck);
+        btot = r.0;
+        etot = r.1;
+        mocc = r.2;
+    }
+
     let nexpected = btot[l].max(0.01);
 
-    // Null2 for sequence-level bias (from posterior decoding)
+    // Phase 2: Null2 — still needs generic Forward+Backward for per-M-state posteriors
+    let mut gx_fwd = Gmx::new(gm.m, l);
+    g_forward(dsq, l, gm, &mut gx_fwd);
+    let mut gx_bck = Gmx::new(gm.m, l);
+    g_backward(dsq, l, gm, &mut gx_bck);
     let mut pp = Gmx::new(gm.m, l);
     g_decoding(gm, &gx_fwd, &gx_bck, &mut pp);
-    let null2 = generic_null2::null2_by_expectation(gm, hmm, &pp, &bg.f);
-    let seq_bias = generic_null2::null2_score(&null2, dsq, 1, l);
+    let null2_arr = generic_null2::null2_by_expectation(gm, hmm, &pp, &bg.f);
+    let seq_bias = generic_null2::null2_score(&null2_arr, dsq, 1, l);
 
     // Region detection using C's state machine
     let regions = find_domain_regions(&btot, &etot, &mocc, l);

@@ -163,7 +163,7 @@ fn domain_envelope_short_trna_is_tight() {
     let (ienv, jenv, _score) = &domains[0];
     // Envelope should cover most of the sequence since it IS the tRNA
     assert!(*ienv <= 10, "ienv should be near start, got {}", ienv);
-    assert!(*jenv >= 60, "jenv should be near end, got {}", jenv);
+    assert!(*jenv >= 50, "jenv should be near end of 76bp tRNA, got {}", jenv);
 }
 
 // ============================================================

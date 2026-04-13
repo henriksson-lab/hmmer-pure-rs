@@ -176,6 +176,333 @@ pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
 }
 
+/// Forward parser that stores specials and cumulative f64 scale into a ProbMx.
+/// Uses f64 totscale (matching old codebase) for correct domain decoding normalization.
+///
+/// # Safety
+/// Requires SSE2 support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn forward_parser_pmx(
+    dsq: &[Dsq],
+    l: usize,
+    om: &OProfile,
+    pmx: &mut super::probmx::ProbMx,
+) -> f32 {
+    use super::probmx::*;
+    let q_count = nqf(om.m);
+    let nscells = 3;
+    let mut dp: Vec<__m128> = vec![_mm_setzero_ps(); q_count * nscells];
+    let zerov = _mm_setzero_ps();
+
+    let mut xe: f32 = 0.0;
+    let mut xn: f32 = 1.0;
+    let mut xj: f32 = 0.0;
+    let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
+    let mut xc: f32 = 0.0;
+    let mut totscale: f64 = 0.0; // f64 precision for domain decoding
+
+    macro_rules! mmo { ($q:expr) => { dp[$q * nscells + 0] }; }
+    macro_rules! dmo { ($q:expr) => { dp[$q * nscells + 1] }; }
+    macro_rules! imo { ($q:expr) => { dp[$q * nscells + 2] }; }
+
+    // Row 0
+    pmx.set_xmx(0, PXE, 0.0);
+    pmx.set_xmx(0, PXN, xn);
+    pmx.set_xmx(0, PXJ, 0.0);
+    pmx.set_xmx(0, PXB, xb);
+    pmx.set_xmx(0, PXC, 0.0);
+    pmx.scale[0] = 0.0;
+
+    for i in 1..=l {
+        let xi = dsq[i] as usize;
+        if xi >= om.abc_kp {
+            xn *= om.xf[P7O_N][P7O_LOOP];
+            xe = 0.0;
+            xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
+            xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
+            xb = xn * om.xf[P7O_N][P7O_MOVE] + xj * om.xf[P7O_J][P7O_MOVE];
+            pmx.set_xmx(i, PXE, xe); pmx.set_xmx(i, PXN, xn);
+            pmx.set_xmx(i, PXJ, xj); pmx.set_xmx(i, PXB, xb);
+            pmx.set_xmx(i, PXC, xc); pmx.scale[i] = totscale;
+            continue;
+        }
+
+        let rsc = &om.rfv[xi];
+        let xbv = _mm_set1_ps(xb);
+        let mut dcv = zerov;
+        let mut xev = zerov;
+
+        let mut mpv = rightshift_float(mmo!(q_count - 1));
+        let mut dpv = rightshift_float(dmo!(q_count - 1));
+        let mut ipv = rightshift_float(imo!(q_count - 1));
+
+        for q_idx in 0..q_count {
+            let tsc_base = q_idx * 7;
+            let rsc_v = _mm_loadu_ps(rsc[q_idx].as_ptr());
+
+            let tbm = _mm_loadu_ps(om.tfv[tsc_base].as_ptr());
+            let tmm = _mm_loadu_ps(om.tfv[tsc_base + 1].as_ptr());
+            let tim = _mm_loadu_ps(om.tfv[tsc_base + 2].as_ptr());
+            let tdm = _mm_loadu_ps(om.tfv[tsc_base + 3].as_ptr());
+            let tmd = _mm_loadu_ps(om.tfv[tsc_base + 4].as_ptr());
+            let tmi = _mm_loadu_ps(om.tfv[tsc_base + 5].as_ptr());
+            let tii = _mm_loadu_ps(om.tfv[tsc_base + 6].as_ptr());
+
+            // M(i,k) = (B*BM + Mprev*MM + Iprev*IM + Dprev*DM) * emission
+            let mut sv = _mm_mul_ps(xbv, tbm);
+            sv = _mm_add_ps(sv, _mm_mul_ps(mpv, tmm));
+            sv = _mm_add_ps(sv, _mm_mul_ps(ipv, tim));
+            sv = _mm_add_ps(sv, _mm_mul_ps(dpv, tdm));
+            sv = _mm_mul_ps(sv, rsc_v);
+            xev = _mm_add_ps(xev, sv);
+
+            mpv = mmo!(q_idx);
+            dpv = dmo!(q_idx);
+            ipv = imo!(q_idx);
+
+            mmo!(q_idx) = sv;
+            dmo!(q_idx) = dcv;
+
+            dcv = _mm_mul_ps(sv, tmd);
+
+            // I(i,k) = (Mprev*MI + Iprev*II)  (parser mode: insert emission = 1.0)
+            imo!(q_idx) = _mm_add_ps(_mm_mul_ps(mpv, tmi), _mm_mul_ps(ipv, tii));
+        }
+
+        // D->D wing unfolding
+        {
+            let dd_offset = 7 * q_count;
+            dcv = rightshift_float(dcv);
+            dmo!(0) = zerov;
+            for q_idx in 0..q_count {
+                let tdd = _mm_loadu_ps(om.tfv[dd_offset + q_idx].as_ptr());
+                dmo!(q_idx) = _mm_add_ps(dmo!(q_idx), dcv);
+                dcv = _mm_mul_ps(dmo!(q_idx), tdd);
+            }
+            for _ in 0..3 {
+                dcv = rightshift_float(dcv);
+                for q_idx in 0..q_count {
+                    let tdd = _mm_loadu_ps(om.tfv[dd_offset + q_idx].as_ptr());
+                    dmo!(q_idx) = _mm_add_ps(dmo!(q_idx), dcv);
+                    dcv = _mm_mul_ps(dcv, tdd);
+                    let cv = _mm_cmpgt_ps(dcv, zerov);
+                    if _mm_movemask_ps(cv) == 0 { break; }
+                }
+            }
+        }
+
+        // E state = sum(M) + sum(D)
+        for q_idx in 0..q_count {
+            xev = _mm_add_ps(dmo!(q_idx), xev);
+        }
+        xev = _mm_add_ps(xev, _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(xev, xev));
+        xev = _mm_add_ps(xev, _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(xev, xev));
+        _mm_store_ss(&mut xe, xev);
+
+        // Special states
+        xn *= om.xf[P7O_N][P7O_LOOP];
+        xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
+        xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
+        xb = xj * om.xf[P7O_J][P7O_MOVE] + xn * om.xf[P7O_N][P7O_MOVE];
+
+        // Sparse rescaling
+        if xe > 1.0e4 {
+            let inv_xe = 1.0 / xe;
+            let scalev = _mm_set1_ps(inv_xe);
+            xn *= inv_xe;
+            xc *= inv_xe;
+            xj *= inv_xe;
+            xb *= inv_xe;
+            for q_idx in 0..(q_count * nscells) {
+                dp[q_idx] = _mm_mul_ps(dp[q_idx], scalev);
+            }
+            totscale += (xe as f64).ln();
+            xe = 1.0;
+        }
+
+        pmx.set_xmx(i, PXE, xe);
+        pmx.set_xmx(i, PXN, xn);
+        pmx.set_xmx(i, PXJ, xj);
+        pmx.set_xmx(i, PXB, xb);
+        pmx.set_xmx(i, PXC, xc);
+        pmx.scale[i] = totscale;
+    }
+
+    let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
+        f32::NEG_INFINITY
+    } else {
+        (totscale + (xc as f64 * om.xf[P7O_C][P7O_MOVE] as f64).ln()) as f32
+    };
+    score
+}
+
+/// Per-position Forward special states plus cumulative scale.
+#[derive(Clone, Copy, Default)]
+pub struct FwdSpecials {
+    pub xn: f32,
+    pub xj: f32,
+    pub xc: f32,
+    pub xb: f32,
+    pub xe: f32,
+    pub totscale: f32,  // cumulative log-scale at this position
+}
+
+/// SSE Forward parser that also saves per-position special states for domain decoding.
+/// Returns (score, specials_vec).
+///
+/// # Safety
+/// Requires SSE2 support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn forward_parser_with_specials(
+    dsq: &[Dsq],
+    l: usize,
+    om: &OProfile,
+) -> (f32, Vec<FwdSpecials>) {
+    let q_count = nqf(om.m);
+    let nscells = 3;
+    let mut dp: Vec<__m128> = vec![_mm_setzero_ps(); q_count * nscells];
+    let zerov = _mm_setzero_ps();
+
+    let mut xe: f32 = 0.0;
+    let mut xn: f32 = 1.0;
+    let mut xj: f32 = 0.0;
+    let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
+    let mut xc: f32 = 0.0;
+    let mut totscale: f32 = 0.0;
+
+    macro_rules! mmo { ($q:expr) => { dp[$q * nscells + 0] }; }
+    macro_rules! dmo { ($q:expr) => { dp[$q * nscells + 1] }; }
+    macro_rules! imo { ($q:expr) => { dp[$q * nscells + 2] }; }
+
+    let mut specials = vec![FwdSpecials::default(); l + 1];
+    specials[0] = FwdSpecials { xn, xj, xc, xb, xe, totscale };
+
+    for i in 1..=l {
+        let xi = dsq[i] as usize;
+        if xi >= om.abc_kp {
+            specials[i] = FwdSpecials { xn, xj, xc, xb, xe, totscale };
+            continue;
+        }
+
+        let rsc = &om.rfv[xi];
+        let xbv = _mm_set1_ps(xb);
+        let mut dcv = zerov;
+        let mut xev = zerov;
+
+        // Shift previous M row right by 1 float
+        let mut mpv = rightshift_float(mmo!(q_count - 1));
+
+        for q in 0..q_count {
+            let tsc_base = q * 7;
+            let rsc_v = _mm_loadu_ps(rsc[q].as_ptr());
+
+            let tbm = _mm_loadu_ps(om.tfv[tsc_base].as_ptr());
+            let tmm = _mm_loadu_ps(om.tfv[tsc_base + 1].as_ptr());
+            let tim = _mm_loadu_ps(om.tfv[tsc_base + 2].as_ptr());
+            let tdm = _mm_loadu_ps(om.tfv[tsc_base + 3].as_ptr());
+            let tmd = _mm_loadu_ps(om.tfv[tsc_base + 4].as_ptr());
+            let tmi = _mm_loadu_ps(om.tfv[tsc_base + 5].as_ptr());
+            let tii = _mm_loadu_ps(om.tfv[tsc_base + 6].as_ptr());
+
+            // M(i,k) = (M(i-1,k-1)*tMM + I(i-1,k-1)*tIM + D(i-1,k-1)*tDM + B*tBM) * e_M(k,xi)
+            let sv = _mm_mul_ps(
+                _mm_add_ps(
+                    _mm_add_ps(_mm_mul_ps(mpv, tmm), _mm_mul_ps(imo!(q), tim)),
+                    _mm_add_ps(_mm_mul_ps(dmo!(q), tdm), _mm_mul_ps(xbv, tbm)),
+                ),
+                rsc_v,
+            );
+
+            xev = _mm_add_ps(xev, sv);
+
+            // I(i,k) = (M(i-1,k)*tMI + I(i-1,k)*tII) * e_I(k,xi)
+            // Parser mode: insert emissions = 1.0, so no multiply
+            imo!(q) = _mm_add_ps(_mm_mul_ps(mmo!(q), tmi), _mm_mul_ps(imo!(q), tii));
+
+            mpv = mmo!(q);
+            mmo!(q) = sv;
+
+            // D(i,k) = M(i,k-1)*tMD + D(i,k-1)*tDD
+            dcv = _mm_add_ps(_mm_mul_ps(sv, tmd), _mm_mul_ps(dcv, {
+                let dd_offset = 7 * q_count;
+                _mm_loadu_ps(om.tfv[dd_offset + q].as_ptr())
+            }));
+            dmo!(q) = dcv;
+        }
+
+        // DD wing unfolding
+        {
+            let last_val = dmo!(q_count - 1);
+            let last_f = {
+                let mut tmp = [0.0f32; 4];
+                _mm_storeu_ps(tmp.as_mut_ptr(), last_val);
+                tmp[3]
+            };
+            if last_f > 0.0 {
+                for _iter in 0..q_count {
+                    dcv = rightshift_float(dcv);
+                    for q in 0..q_count {
+                        let dd_offset = 7 * q_count;
+                        let tdd = _mm_loadu_ps(om.tfv[dd_offset + q].as_ptr());
+                        dcv = _mm_mul_ps(dcv, tdd);
+                        dmo!(q) = _mm_add_ps(dmo!(q), dcv);
+                        xev = _mm_add_ps(xev, dcv);
+                    }
+                    let cv = _mm_cmpgt_ps(dcv, zerov);
+                    if _mm_movemask_ps(cv) == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Add D's to xEv
+        for q in 0..q_count {
+            xev = _mm_add_ps(dmo!(q), xev);
+        }
+
+        // Horizontal sum
+        xev = _mm_add_ps(xev, _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(xev, xev));
+        xev = _mm_add_ps(xev, _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(xev, xev));
+        _mm_store_ss(&mut xe, xev);
+
+        // Special states
+        xn *= om.xf[P7O_N][P7O_LOOP];
+        xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
+        xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
+        xb = xj * om.xf[P7O_J][P7O_MOVE] + xn * om.xf[P7O_N][P7O_MOVE];
+
+        // Rescaling
+        if xe > 1.0e4 {
+            let scale = 1.0 / xe;
+            xn *= scale;
+            xc *= scale;
+            xj *= scale;
+            xb *= scale;
+            let scale_v = _mm_set1_ps(scale);
+            for q in 0..q_count {
+                mmo!(q) = _mm_mul_ps(mmo!(q), scale_v);
+                dmo!(q) = _mm_mul_ps(dmo!(q), scale_v);
+                imo!(q) = _mm_mul_ps(imo!(q), scale_v);
+            }
+            totscale += xe.ln();
+            xe = 1.0;
+        }
+
+        specials[i] = FwdSpecials { xn, xj, xc, xb, xe, totscale };
+    }
+
+    let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
+        f32::NEG_INFINITY
+    } else {
+        totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
+    };
+
+    (score, specials)
+}
+
 /// Right-shift a __m128 by one float element, zero-filling from the left.
 /// [a, b, c, d] -> [0, a, b, c]
 #[cfg(target_arch = "x86_64")]
