@@ -169,11 +169,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 lpli.new_model(&lgm);
 
                 lb.set_length(sq.n);
-                profile::reconfig_length(&mut lgm, sq.n as i32);
-                lom.reconfig_length(sq.n as i32);
 
                 let mut lth = TopHits::new();
-                if lpli.run(&lgm, &lom, &lb, &hmm, sq, &mut lth) {
+                if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
                     lth.hits.into_iter().next()
                 } else {
                     None

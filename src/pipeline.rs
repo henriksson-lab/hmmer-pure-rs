@@ -165,13 +165,31 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Run the pipeline on a single sequence.
-    /// Uses SIMD MSV filter for the first stage, then SIMD Viterbi and Forward.
-    /// `om` is the SIMD-optimized profile, `hmm` is needed for domain definition.
-    pub fn run(
+    /// Convenience wrapper: run the pipeline without requiring mutable profiles.
+    /// Clones the profile and oprofile internally (~200KB per call).
+    /// For high-throughput use, prefer `run()` with `&mut` profiles.
+    pub fn run_cloned(
         &mut self,
         gm: &Profile,
         om: &OProfile,
+        bg: &Bg,
+        hmm: &crate::hmm::Hmm,
+        sq: &Sequence,
+        th: &mut TopHits,
+    ) -> bool {
+        let mut gm = gm.clone();
+        let mut om = om.clone();
+        self.run(&mut gm, &mut om, bg, hmm, sq, th)
+    }
+
+    /// Run the pipeline on a single sequence.
+    /// Uses SIMD MSV filter for the first stage, then SIMD Viterbi and Forward.
+    /// Reconfigures profile/oprofile length model per sequence (matching C).
+    /// `om` is the SIMD-optimized profile, `hmm` is needed for domain definition.
+    pub fn run(
+        &mut self,
+        gm: &mut Profile,
+        om: &mut OProfile,
         bg: &Bg,
         hmm: &crate::hmm::Hmm,
         sq: &Sequence,
@@ -183,6 +201,10 @@ impl Pipeline {
         }
 
         self.n_targets += 1;
+
+        // Reconfigure length model for this sequence (matching C's p7_Pipeline)
+        reconfig_length(gm, l as i32);
+        om.reconfig_length(l as i32);
 
         // Null model score
         let null_sc = bg.null_one(l);
@@ -383,12 +405,10 @@ mod tests {
         };
 
         bg.set_length(sq.n);
-        reconfig_length(&mut gm, sq.n as i32);
-        om.reconfig_length(sq.n as i32);
 
         // For this short perfectly-matching sequence, use --max to bypass filters
         pli.do_max = true;
-        let hit = pli.run(&gm, &om, &bg, &hmm, &sq, &mut th);
+        let hit = pli.run(&mut gm, &mut om, &bg, &hmm, &sq, &mut th);
         assert!(hit, "Pipeline should find a hit for matching sequence");
         assert_eq!(th.hits.len(), 1);
         assert!(th.hits[0].score > 0.0);

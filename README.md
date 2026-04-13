@@ -139,11 +139,7 @@ cargo test --test domain_envelope     # 9 domain definition tests
 cargo test --test rust_hmmsearch      # 29 integration tests
 ```
 
-The Pfam equivalence tests search 18 diverse Pfam HMMs (model lengths 23-452) against 20k human Swiss-Prot proteins and verify:
-- Hit set overlap with C HMMER (85-100% for most families)
-- Bit score agreement (within 15-60 bits depending on domain complexity)
-- Strong hit recall (>95% of hits with E < 1e-20)
-- Top hit agreement (same #1 protein for single-domain families)
+The Pfam equivalence tests search 18 diverse Pfam HMMs (model lengths 23-452) against 20k human Swiss-Prot proteins and compare results against C HMMER golden files. Strong hits (E < 1e-20) have >95% recall. Remaining differences are due to SIMD int16 Viterbi filter rounding at score boundaries.
 
 ## Architecture
 

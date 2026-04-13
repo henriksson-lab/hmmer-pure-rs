@@ -350,11 +350,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 local_pli.seed = seed;
 
                 local_bg.set_length(sq.n);
-                profile::reconfig_length(&mut local_gm, sq.n as i32);
-                local_om.reconfig_length(sq.n as i32);
 
                 let mut local_th = TopHits::new();
-                let hit = if local_pli.run(&local_gm, &local_om, &local_bg, hmm, sq, &mut local_th) {
+                let hit = if local_pli.run(&mut local_gm, &mut local_om, &local_bg, hmm, sq, &mut local_th) {
                     local_th.hits.into_iter().next()
                 } else {
                     None

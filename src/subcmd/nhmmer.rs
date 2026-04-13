@@ -127,10 +127,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     let mut lpli = Pipeline::new();
                     lpli.new_model(&lgm);
                     lb.set_length(sq.n);
-                    profile::reconfig_length(&mut lgm, sq.n as i32);
-                    lom.reconfig_length(sq.n as i32);
                     let mut lth = TopHits::new();
-                    if lpli.run(&lgm, &lom, &lb, hmm, sq, &mut lth) {
+                    if lpli.run(&mut lgm, &mut lom, &lb, hmm, sq, &mut lth) {
                         hits.extend(lth.hits);
                     }
                 } else {
@@ -160,10 +158,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         let mut lpli = Pipeline::new();
                         lpli.new_model(&lgm);
                         lb.set_length(win_len);
-                        profile::reconfig_length(&mut lgm, win_len as i32);
-                        lom.reconfig_length(win_len as i32);
                         let mut lth = TopHits::new();
-                        if lpli.run(&lgm, &lom, &lb, hmm, &win_sq, &mut lth) {
+                        if lpli.run(&mut lgm, &mut lom, &lb, hmm, &win_sq, &mut lth) {
                             // Adjust hit coordinates to global position
                             for hit in &mut lth.hits {
                                 for dom in &mut hit.dcl {

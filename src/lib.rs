@@ -31,7 +31,7 @@
 //! // Search a sequence programmatically
 //! let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");
 //! let sq = Sequence { name: "query".into(), acc: String::new(), desc: String::new(), dsq, n: 20, l: 20 };
-//! pli.run(&gm, &om, &bg, hmm, &sq, &mut th);
+//! pli.run(&mut gm, &mut om, &bg, hmm, &sq, &mut th);
 //!
 //! // Access results
 //! th.sort_by_sortkey();

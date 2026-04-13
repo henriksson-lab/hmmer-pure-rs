@@ -89,13 +89,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
                 let mut gm = Profile::new(hmm.m, &abc);
                 profile::profile_config(hmm, &local_bg, &mut gm, sq.n as i32, P7_LOCAL);
-                let om = OProfile::convert(&gm);
+                let mut om = OProfile::convert(&gm);
 
                 let mut pli = Pipeline::new();
                 pli.new_model(&gm);
 
                 let mut th = TopHits::new();
-                if pli.run(&gm, &om, &local_bg, hmm, &sq, &mut th) {
+                if pli.run(&mut gm, &mut om, &local_bg, hmm, &sq, &mut th) {
                     // Use the HMM name for the hit (in hmmscan, targets are HMMs)
                     th.hits.into_iter().next().map(|mut hit| {
                         // Swap: in hmmscan output, "target" is the HMM name

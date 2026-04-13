@@ -56,7 +56,7 @@ fn run_p7_pipeline_full(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<Domain
     let mut gm = profile::Profile::new(hmm.m, &abc);
     profile::profile_config(hmm, &bg_obj, &mut gm, 200, profile::P7_LOCAL);
 
-    let om = simd::oprofile::OProfile::convert(&gm);
+    let mut om = simd::oprofile::OProfile::convert(&gm);
 
     let mut pli = pipeline::Pipeline::new();
     pli.new_model(&gm);
@@ -72,7 +72,7 @@ fn run_p7_pipeline_full(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<Domain
         l: seq.len(),
     };
 
-    pli.run(&gm, &om, &bg_obj, hmm, &sq, &mut th);
+    pli.run(&mut gm, &mut om, &bg_obj, hmm, &sq, &mut th);
 
     let mut results = Vec::new();
     for h in &th.hits {
@@ -98,7 +98,7 @@ fn run_p7_pipeline(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<(usize, usi
     let mut gm = profile::Profile::new(hmm.m, &abc);
     profile::profile_config(hmm, &bg_obj, &mut gm, 200, profile::P7_LOCAL);
 
-    let om = simd::oprofile::OProfile::convert(&gm);
+    let mut om = simd::oprofile::OProfile::convert(&gm);
 
     let mut pli = pipeline::Pipeline::new();
     pli.new_model(&gm);
@@ -114,7 +114,7 @@ fn run_p7_pipeline(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<(usize, usi
         l: seq.len(),
     };
 
-    pli.run(&gm, &om, &bg_obj, hmm, &sq, &mut th);
+    pli.run(&mut gm, &mut om, &bg_obj, hmm, &sq, &mut th);
 
     let mut domains = Vec::new();
     for h in &th.hits {

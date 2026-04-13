@@ -96,9 +96,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         local_bg.set_length(l);
                         let mut local_gm = gm.clone();
                         let mut local_om = om.clone();
-                        profile::reconfig_length(&mut local_gm, l as i32);
-                        local_om.reconfig_length(l as i32);
-
                         let sq = Sequence {
                             name: "query".to_string(),
                             acc: String::new(),
@@ -111,7 +108,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         let mut pli = Pipeline::new();
                         pli.new_model(&local_gm);
                         let mut th = TopHits::new();
-                        if pli.run(&local_gm, &local_om, &local_bg, &hmms[i], &sq, &mut th) {
+                        if pli.run(&mut local_gm, &mut local_om, &local_bg, &hmms[i], &sq, &mut th) {
                             for hit in &th.hits {
                                 results.push((hmms[i].name.clone(), hit.score));
                             }
