@@ -1,2 +1,4 @@
 hmmer
 target
+test_data/*.fasta
+tests/golden/pfam_*.tblout

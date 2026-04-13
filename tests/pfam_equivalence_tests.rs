@@ -135,7 +135,27 @@ fn compare_results(golden_path: &str, hmm: &str, seqdb: &str) -> ComparisonResul
 }
 
 // Shared test database
-const SEQDB: &str = "test_data/human_swissprot_2k.fasta.gz";
+// Prefer uncompressed for speed; fall back to .gz (which is committed to git)
+fn seqdb_path() -> String {
+    let uncompressed = format!("{}/test_data/human_swissprot_2k.fasta", env!("CARGO_MANIFEST_DIR"));
+    if std::path::Path::new(&uncompressed).exists() {
+        return "test_data/human_swissprot_2k.fasta".to_string();
+    }
+    // Decompress .gz on first use
+    let gz = format!("{}/test_data/human_swissprot_2k.fasta.gz", env!("CARGO_MANIFEST_DIR"));
+    if std::path::Path::new(&gz).exists() {
+        use std::io::Read;
+        let f = std::fs::File::open(&gz).unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(f);
+        let mut data = Vec::new();
+        decoder.read_to_end(&mut data).unwrap();
+        std::fs::write(&uncompressed, &data).unwrap();
+        return "test_data/human_swissprot_2k.fasta".to_string();
+    }
+    "test_data/human_swissprot_2k.fasta.gz".to_string()
+}
+
+const SEQDB_GZ: &str = "test_data/human_swissprot_2k.fasta.gz";
 
 // ============================================================
 // Per-family equivalence tests
@@ -147,7 +167,7 @@ macro_rules! pfam_test {
         fn $test_name() {
             let golden = test_path(&format!("tests/golden/pfam_{}.tblout", $family));
             let hmm = test_path(&format!("test_data/{}_pfam.hmm", $family));
-            let seqdb = test_path(SEQDB);
+            let seqdb = test_path(&seqdb_path());
 
             // Skip if golden file or HMM doesn't exist
             if !std::path::Path::new(&golden).exists() {
@@ -232,7 +252,7 @@ fn test_no_total_failures() {
     for family in &families {
         let golden = test_path(&format!("tests/golden/pfam_{}.tblout", family));
         let hmm = test_path(&format!("test_data/{}_pfam.hmm", family));
-        let seqdb = test_path(SEQDB);
+        let seqdb = test_path(&seqdb_path());
 
         if !std::path::Path::new(&golden).exists() || !std::path::Path::new(&hmm).exists() {
             continue;
@@ -264,7 +284,7 @@ fn test_top_hit_agreement() {
     for family in &families {
         let golden = test_path(&format!("tests/golden/pfam_{}.tblout", family));
         let hmm = test_path(&format!("test_data/{}_pfam.hmm", family));
-        let seqdb = test_path(SEQDB);
+        let seqdb = test_path(&seqdb_path());
 
         if !std::path::Path::new(&golden).exists() || !std::path::Path::new(&hmm).exists() {
             continue;
@@ -304,7 +324,7 @@ fn test_strong_hit_recall() {
     for family in &families {
         let golden = test_path(&format!("tests/golden/pfam_{}.tblout", family));
         let hmm = test_path(&format!("test_data/{}_pfam.hmm", family));
-        let seqdb = test_path(SEQDB);
+        let seqdb = test_path(&seqdb_path());
 
         if !std::path::Path::new(&golden).exists() || !std::path::Path::new(&hmm).exists() {
             continue;
@@ -345,7 +365,7 @@ fn test_tblout_format_all_families() {
 
     for family in &families {
         let hmm = test_path(&format!("test_data/{}_pfam.hmm", family));
-        let seqdb = test_path(SEQDB);
+        let seqdb = test_path(&seqdb_path());
 
         if !std::path::Path::new(&hmm).exists() { continue; }
 
