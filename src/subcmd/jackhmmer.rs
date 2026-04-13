@@ -184,7 +184,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut th = TopHits::new();
         th.hits = all_hits;
         th.sort_by_sortkey();
-        th.threshold(args.e_value, args.inc_e, args.e_value, args.inc_e, z, z);
+        {
+            let mut tmp_pli = Pipeline::new();
+            tmp_pli.e_value_threshold = args.e_value;
+            tmp_pli.inc_e = args.inc_e;
+            th.threshold(&tmp_pli, z, z);
+        }
 
         // Output results for this round
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();

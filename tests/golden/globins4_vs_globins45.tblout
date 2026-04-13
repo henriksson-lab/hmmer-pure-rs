@@ -1,0 +1,58 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+MYG_ESCGI            -          globins4             -            8.7e-67  215.6   2.9   9.7e-67  215.4   2.9   1.0   1   0   0   1   1   1   1 -
+HBB_MANSP            -          globins4             -            1.1e-65  211.9   0.1   1.3e-65  211.8   0.1   1.0   1   0   0   1   1   1   1 -
+HBB_CALAR            -          globins4             -            7.4e-65  209.3   0.2   8.2e-65  209.2   0.2   1.0   1   0   0   1   1   1   1 -
+MYG_HORSE            -          globins4             -            5.5e-64  206.5   1.2   6.1e-64  206.3   1.2   1.0   1   0   0   1   1   1   1 -
+HBB_URSMA            -          globins4             -            2.8e-63  204.2   0.1   3.1e-63  204.1   0.1   1.0   1   0   0   1   1   1   1 -
+HBB_RABIT            -          globins4             -            9.9e-63  202.4   0.5   1.1e-62  202.3   0.5   1.0   1   0   0   1   1   1   1 -
+HBA_PONPY            -          globins4             -            2.6e-62  201.1   1.3   2.8e-62  200.9   1.3   1.0   1   0   0   1   1   1   1 -
+HBB_SPECI            -          globins4             -              2e-61  198.2   1.1   2.2e-61  198.1   1.1   1.0   1   0   0   1   1   1   1 -
+MYG_LYCPI            -          globins4             -              1e-60  195.9   1.7   1.1e-60  195.8   1.7   1.0   1   0   0   1   1   1   1 -
+MYG_PROGU            -          globins4             -            1.1e-60  195.8   0.3   1.2e-60  195.7   0.3   1.0   1   0   0   1   1   1   1 -
+HBB_SPETO            -          globins4             -            1.4e-60  195.5   0.7   1.5e-60  195.3   0.7   1.0   1   0   0   1   1   1   1 -
+HBA_MACFA            -          globins4             -            1.5e-60  195.3   0.6   1.7e-60  195.2   0.6   1.0   1   0   0   1   1   1   1 -
+MYG_SAISC            -          globins4             -            1.9e-60  195.0   1.1   2.1e-60  194.8   1.1   1.0   1   0   0   1   1   1   1 -
+HBB_SUNMU            -          globins4             -            2.2e-60  194.8   0.1   2.4e-60  194.7   0.1   1.0   1   0   0   1   1   1   1 -
+HBB_TRIIN            -          globins4             -            3.5e-60  194.1   0.1   3.9e-60  194.0   0.1   1.0   1   0   0   1   1   1   1 -
+HBA_MACSI            -          globins4             -            3.7e-60  194.0   0.5   4.1e-60  193.9   0.5   1.0   1   0   0   1   1   1   1 -
+HBB_EQUHE            -          globins4             -            3.3e-59  191.0   0.1   3.7e-59  190.8   0.1   1.0   1   0   0   1   1   1   1 -
+HBA2_GALCR           -          globins4             -            4.5e-59  190.5   0.9     5e-59  190.4   0.9   1.0   1   0   0   1   1   1   1 -
+HBB_TACAC            -          globins4             -            1.7e-58  188.7   0.3   1.8e-58  188.6   0.3   1.0   1   0   0   1   1   1   1 -
+MYG_MOUSE            -          globins4             -            2.9e-58  187.9   0.3   3.2e-58  187.8   0.3   1.0   1   0   0   1   1   1   1 -
+HBE_PONPY            -          globins4             -            5.7e-58  187.0   0.5   6.3e-58  186.8   0.5   1.0   1   0   0   1   1   1   1 -
+HBA_MESAU            -          globins4             -            1.6e-57  185.5   0.4   1.8e-57  185.3   0.4   1.0   1   0   0   1   1   1   1 -
+HBA2_BOSMU           -          globins4             -              2e-57  185.2   0.7   2.2e-57  185.0   0.7   1.0   1   0   0   1   1   1   1 -
+HBB_TUPGL            -          globins4             -            6.2e-57  183.6   0.0   6.9e-57  183.5   0.0   1.0   1   0   0   1   1   1   1 -
+HBA_AILME            -          globins4             -            1.3e-56  182.6   0.2   1.4e-56  182.5   0.2   1.0   1   0   0   1   1   1   1 -
+HBB_ORNAN            -          globins4             -            1.6e-56  182.2   0.0   1.8e-56  182.1   0.0   1.0   1   0   0   1   1   1   1 -
+HBB_COLLI            -          globins4             -            1.7e-56  182.1   0.1   1.9e-56  182.0   0.1   1.0   1   0   0   1   1   1   1 -
+HBB_LARRI            -          globins4             -            2.9e-55  178.2   0.1   3.2e-55  178.0   0.1   1.0   1   0   0   1   1   1   1 -
+HBA_PAGLA            -          globins4             -            8.1e-55  176.7   0.7   8.9e-55  176.6   0.7   1.0   1   0   0   1   1   1   1 -
+HBA_ERIEU            -          globins4             -            2.6e-54  175.1   0.1   2.9e-54  174.9   0.1   1.0   1   0   0   1   1   1   1 -
+HBA_PROLO            -          globins4             -            3.2e-54  174.8   0.1   3.6e-54  174.6   0.1   1.0   1   0   0   1   1   1   1 -
+HBAZ_HORSE           -          globins4             -            2.4e-51  165.5   0.2   2.7e-51  165.3   0.2   1.0   1   0   0   1   1   1   1 -
+HBB1_VAREX           -          globins4             -            3.5e-51  164.9   0.1   3.8e-51  164.8   0.1   1.0   1   0   0   1   1   1   1 -
+HBA_FRAPO            -          globins4             -              3e-50  161.9   0.5   3.4e-50  161.7   0.5   1.0   1   0   0   1   1   1   1 -
+HBA_PHACO            -          globins4             -            4.6e-50  161.3   0.4   5.1e-50  161.2   0.4   1.0   1   0   0   1   1   1   1 -
+HBAD_PASMO           -          globins4             -            5.1e-49  157.9   0.1   5.6e-49  157.8   0.1   1.0   1   0   0   1   1   1   1 -
+HBA_ANSSE            -          globins4             -            8.4e-49  157.2   0.5   9.3e-49  157.1   0.5   1.0   1   0   0   1   1   1   1 -
+HBAD_CHLME           -          globins4             -              1e-48  157.0   0.4   1.1e-48  156.8   0.4   1.0   1   0   0   1   1   1   1 -
+HBA_TRIOC            -          globins4             -            1.1e-48  156.8   0.4   1.2e-48  156.7   0.4   1.0   1   0   0   1   1   1   1 -
+HBBL_RANCA           -          globins4             -              2e-48  156.0   0.3   2.2e-48  155.8   0.3   1.0   1   0   0   1   1   1   1 -
+HBA_COLLI            -          globins4             -            2.4e-48  155.7   0.3   2.7e-48  155.6   0.3   1.0   1   0   0   1   1   1   1 -
+HBB2_XENTR           -          globins4             -            1.1e-47  153.6   1.1   1.1e-47  153.5   1.1   1.0   1   0   0   1   1   1   1 -
+HBA4_SALIR           -          globins4             -            4.5e-43  138.6   0.1     5e-43  138.5   0.1   1.0   1   0   0   1   1   1   1 -
+MYG_MUSAN            -          globins4             -            9.9e-38  121.3   0.4   1.1e-37  121.1   0.4   1.0   1   0   0   1   1   1   1 -
+HBB2_TRICR           -          globins4             -            4.7e-36  115.8   0.0   5.2e-36  115.7   0.0   1.0   1   0   0   1   1   1   1 -
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/tutorial/globins4.hmm
+# Target file:     hmmer/tutorial/globins45.fa
+# Option settings: hmmsearch --tblout tests/golden/globins4_vs_globins45.tblout --noali hmmer/tutorial/globins4.hmm hmmer/tutorial/globins45.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:21:55 2026
+# [ok]

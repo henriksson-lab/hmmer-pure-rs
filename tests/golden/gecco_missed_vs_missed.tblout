@@ -1,0 +1,21 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+CP157504.1_4375      -          AAA_15               PF13175.9      4e-15   45.2  17.2     4e-15   45.2  17.2   4.4   1   1   2   3   3   3   1 -
+CP157504.1_15        -          AAA_18               PF13238.9    1.4e-11   34.2   0.0   4.5e-11   32.6   0.0   1.9   1   1   0   1   1   1   1 -
+CP157504.1_3872      -          Abhydrolase_1        PF00561.23   1.7e-20   62.8   0.0     9e-18   53.9   0.0   2.9   1   1   0   1   1   1   1 -
+CP157504.1_5095      -          Hydrolase            PF00702.29   3.1e-14   42.8   0.6   3.3e-12   36.2   0.6   2.9   1   1   0   1   1   1   1 -
+CP157504.1_2069      -          MurJ                 PF03023.17   2.5e-11   31.8  10.3   2.5e-11   31.8  10.3   2.5   1   1   0   2   2   2   1 -
+CP157504.1_2185      -          PTS_EIIC             PF02378.21   9.9e-18   53.2  33.1   9.9e-18   53.2  33.1   2.5   1   1   0   1   1   1   1 -
+CP157504.1_2175      -          SBP_bac_1            PF01547.28   2.7e-18   56.0   9.8   3.5e-18   55.6   9.8   1.1   1   0   0   1   1   1   1 -
+CP157504.1_3741      -          Sugar_tr             PF00083.27   3.8e-12   34.8  15.3   3.8e-12   34.8  15.3   2.3   2   0   0   2   2   2   1 -
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/testsuite/gecco_missed_hmms.hmm
+# Target file:     hmmer/testsuite/gecco_missed_proteins.faa
+# Option settings: hmmsearch --tblout tests/golden/gecco_missed_vs_missed.tblout --noali hmmer/testsuite/gecco_missed_hmms.hmm hmmer/testsuite/gecco_missed_proteins.faa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:21:56 2026
+# [ok]

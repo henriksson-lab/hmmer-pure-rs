@@ -114,7 +114,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         th.hits = all_hits;
         let z = hmms.len() as f64;
         th.sort_by_sortkey();
-        th.threshold(args.e_value, args.inc_e, args.e_value, args.inc_e, z, z);
+        {
+            let mut tmp_pli = Pipeline::new();
+            tmp_pli.e_value_threshold = args.e_value;
+            tmp_pli.inc_e = args.inc_e;
+            th.threshold(&tmp_pli, z, z);
+        }
 
         writeln!(out, "Scores for complete sequence (score includes all domains):").unwrap();
         writeln!(out, "   --- full sequence ---   --- best 1 domain ---    -#dom-").unwrap();

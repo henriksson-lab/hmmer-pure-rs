@@ -91,7 +91,7 @@ pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &T
         let dom_evalue = if !hit.dcl.is_empty() { z * hit.dcl[0].lnp.exp() } else { evalue };
         let dom_score = if !hit.dcl.is_empty() { hit.dcl[0].bitscore } else { hit.score };
         writeln!(f,
-            "{:<20}{:<11}{:<21}{:<11}{:9.2e} {:6.1} {:5.1} {:9.2e} {:6.1} {:5.1} {:5.1} {:3} {:3} {:3} {:3} {:3} {:3} {:3} {}",
+            "{:<19} {:<10} {:<20} {:<10} {:>9.2e} {:>6.1} {:>5.1} {:>9.2e} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
             hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc },
             qname, qacc.unwrap_or("-"),
             evalue, hit.score, hit.bias, dom_evalue, dom_score, hit.bias,
@@ -113,7 +113,7 @@ pub fn write_domtblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th:
         for (di, dom) in hit.dcl.iter().enumerate() {
             let dom_evalue = domz * dom.lnp.exp();
             writeln!(f,
-                "{:<20}{:<11}{:>5} {:<21}{:<11}{:>5} {:9.2e} {:6.1} {:5.1} {:3} {:3} {:9.2e} {:9.2e} {:6.1} {:5.1} {:5} {:5} {:5} {:5} {:5} {:5} {:.2} {}",
+                "{:<19} {:<10} {:>5} {:<20} {:<10} {:>5} {:>9.2e} {:>6.1} {:>5.1} {:>3} {:>3} {:>9.2e} {:>9.2e} {:>6.1} {:>5.1} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:.2} {}",
                 hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc }, 0,
                 qname, qacc.unwrap_or("-"), 0,
                 evalue, hit.score, hit.bias, di + 1, hit.ndom,

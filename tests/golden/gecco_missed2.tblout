@@ -1,0 +1,25 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+CP157504.1_4784      -          AAA_5                PF07728.17   1.2e-12   37.4   0.1   8.1e-11   31.5   0.1   2.3   1   1   0   1   1   1   1 -
+CP157504.1_15        -          AAA_5                PF07728.17   3.7e-05   13.2   0.0   7.9e-05   12.1   0.0   1.6   1   0   0   1   1   1   1 -
+CP157504.1_3186      -          Acetyltransf_7       PF13508.10   2.7e-10   30.0   0.0   3.7e-10   29.6   0.0   1.3   1   0   0   1   1   1   1 -
+CP157504.1_1695      -          Acetyltransf_7       PF13508.10     3e-10   29.8   0.1     6e-10   28.9   0.1   1.5   1   0   0   1   1   1   1 -
+CP157504.1_1695      -          Acetyltransf_8       PF13523.9    7.9e-11   31.3   0.1   3.7e-10   29.1   0.1   1.8   1   1   0   1   1   1   1 -
+CP157504.1_2760      -          GAF                  PF01590.29   1.8e-11   34.3   0.0   3.4e-10   30.2   0.0   2.5   2   0   0   2   2   2   1 -
+CP157504.1_4741      -          Methyltransf_12      PF08242.15   1.3e-10   31.5   0.0   2.7e-10   30.4   0.0   1.6   1   0   0   1   1   1   1 -
+CP157504.1_3976      -          MFS_1_like           PF12832.10   6.1e-14   41.0  35.7   1.7e-10   29.6  18.0   2.3   1   1   1   2   2   2   2 -
+CP157504.1_4970      -          Peptidase_M20        PF01546.31   1.5e-10   30.5   0.0   7.9e-10   28.1   0.0   2.1   2   1   0   2   2   2   1 -
+CP157504.1_1483      -          Polysacc_synt_2      PF02719.18   1.1e-11   33.8   0.2   8.9e-11   30.8   0.2   2.3   1   1   0   1   1   1   1 -
+CP157504.1_1403      -          SMC_N                PF02463.22   1.3e-10   30.5   0.0   1.9e-10   30.0   0.0   1.1   1   0   0   1   1   1   1 -
+CP157504.1_15        -          Thymidylate_kin      PF02223.20   3.7e-11   32.4   0.6   9.8e-11   31.1   0.6   1.8   1   1   0   1   1   1   1 -
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/testsuite/gecco_missed2_hmms.hmm
+# Target file:     hmmer/testsuite/gecco_missed2_proteins.faa
+# Option settings: hmmsearch --tblout tests/golden/gecco_missed2.tblout --noali hmmer/testsuite/gecco_missed2_hmms.hmm hmmer/testsuite/gecco_missed2_proteins.faa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:21:56 2026
+# [ok]

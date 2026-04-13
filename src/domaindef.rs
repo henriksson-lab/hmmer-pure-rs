@@ -1,10 +1,10 @@
 //! Domain definition using posterior probabilities.
-//! Optimized: skips expensive Backward+Decoding for simple single-domain cases.
+//! Port of p7_domaindef.c p7_domaindef_ByPosteriorHeuristics().
 
 use crate::alphabet::{Alphabet, Dsq};
 use crate::bg::Bg;
 use crate::dp::generic_backward::g_backward;
-use crate::dp::generic_decoding::{domain_occupancy, g_decoding};
+use crate::dp::generic_decoding::{domain_decoding, g_decoding};
 use crate::dp::generic_fwdback::g_forward;
 use crate::dp::generic_stotrace::g_stochastic_trace;
 use crate::dp::generic_viterbi::g_viterbi;
@@ -17,41 +17,80 @@ use crate::tophits::{AliDisplay, Domain};
 use crate::trace::State;
 use crate::util::random::MersenneTwister;
 
-const RT1: f32 = 0.25;
-const RT2: f32 = 0.10;
+// Thresholds matching C's p7_domaindef defaults
+const RT1: f32 = 0.25; // mocc threshold to trigger a domain region
+const RT2: f32 = 0.10; // mocc threshold to end a domain region
+const RT3: f32 = 0.20; // threshold for multi-domain region detection
+const NSAMPLES: usize = 200; // stochastic tracebacks for clustering
 
-pub fn find_domain_regions(mocc: &[f32], l: usize) -> Vec<(usize, usize)> {
+/// Region detection state machine matching C's p7_domaindef_ByPosteriorHeuristics().
+/// Uses btot/etot/mocc arrays to find domain regions.
+fn find_domain_regions(
+    btot: &[f32],
+    etot: &[f32],
+    mocc: &[f32],
+    l: usize,
+) -> Vec<(usize, usize)> {
     let mut regions = Vec::new();
-    let mut i = 1;
-    while i <= l {
-        if mocc[i] >= RT1 {
-            let start = i;
-            while i <= l && mocc[i] >= RT2 {
-                i += 1;
+    let mut i: i64 = -1;
+    let mut triggered = false;
+
+    for j in 1..=l {
+        if !triggered {
+            // Looking for the START of a domain region.
+            // Reset i when mocc (minus local B contribution) drops below rt2.
+            if mocc[j] - (btot[j] - btot[j - 1]) < RT2 {
+                i = j as i64;
+            } else if i == -1 {
+                i = j as i64;
             }
-            let end = i - 1;
-            if end >= start {
-                regions.push((start, end));
+            // Trigger when mocc rises above rt1
+            if mocc[j] >= RT1 {
+                triggered = true;
             }
+        } else if mocc[j] - (etot[j] - etot[j - 1]) < RT2 {
+            // Found the END of a domain region: mocc dropped below rt2
+            // (after subtracting local E contribution). Region is i..j.
+            if i >= 1 {
+                regions.push((i as usize, j));
+            }
+            i = -1;
+            triggered = false;
         }
-        i += 1;
     }
+
     regions
 }
 
-/// Score a domain envelope: SIMD Forward for score, Viterbi for traceback.
+/// Check if a region contains multiple domains.
+/// Matches C's is_multidomain_region().
+fn is_multidomain_region(btot: &[f32], etot: &[f32], i: usize, j: usize) -> bool {
+    let mut max = -1.0_f32;
+    for z in i..=j {
+        let expected_n = (etot[z] - etot[i - 1]).min(btot[j] - btot[z - 1]);
+        max = max.max(expected_n);
+    }
+    max >= RT3
+}
+
+/// Score a domain envelope: Forward for score, Viterbi for traceback,
+/// posterior decoding for PP annotation and null2 bias.
+/// `seq_len` is the full sequence length (for null model and length correction).
+/// `bg_f` is the background frequencies for the alphabet.
 pub fn score_domain_envelope(
     dsq: &[Dsq],
-    l: usize,
+    seq_len: usize,
     gm: &Profile,
     hmm: &Hmm,
     ienv: usize,
     jenv: usize,
     null_sc: f32,
+    bg_f: &[f32],
 ) -> Domain {
-    debug_assert!(ienv >= 1 && jenv <= l);
+    debug_assert!(ienv >= 1 && jenv <= seq_len);
     debug_assert!(null_sc.is_finite());
     let env_len = jenv - ienv + 1;
+    let l = seq_len; // full sequence length for length correction
 
     let mut env_gm = gm.clone();
     reconfig_unihit(&mut env_gm, env_len as i32);
@@ -60,7 +99,7 @@ pub fn score_domain_envelope(
     sub_dsq.extend_from_slice(&dsq[ienv..=jenv]);
     sub_dsq.push(crate::alphabet::DSQ_SENTINEL);
 
-    // SIMD Forward for the score
+    // Forward for the envelope score
     let env_fwd_sc;
     #[cfg(target_arch = "x86_64")]
     {
@@ -79,41 +118,35 @@ pub fn score_domain_envelope(
         env_fwd_sc = g_forward(&sub_dsq, env_len, &env_gm, &mut gx);
     }
 
-    let p1 = env_len as f32 / (env_len as f32 + 1.0);
-    let env_null = env_len as f32 * p1.ln() + (1.0 - p1).ln();
-    let bitscore = (env_fwd_sc - env_null) / std::f32::consts::LN_2;
-    let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
-    let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
-    let lnp = crate::stats::exponential::surv(bitscore as f64, tau, lambda).ln();
-
     // Viterbi traceback for alignment
     let mut gx_vit = Gmx::new(gm.m, env_len);
     g_viterbi(&sub_dsq, env_len, &env_gm, &mut gx_vit);
     let tr = crate::trace::g_trace(&sub_dsq, env_len, &env_gm, &gx_vit);
 
-    // Compute posterior probabilities for PP annotation
+    // Posterior decoding for PP annotation and null2
     let mut gx_fwd = Gmx::new(gm.m, env_len);
     g_forward(&sub_dsq, env_len, &env_gm, &mut gx_fwd);
     let mut gx_bck = Gmx::new(gm.m, env_len);
     g_backward(&sub_dsq, env_len, &env_gm, &mut gx_bck);
     let mut env_pp = Gmx::new(gm.m, env_len);
-    crate::dp::generic_decoding::g_decoding(&env_gm, &gx_fwd, &gx_bck, &mut env_pp);
+    g_decoding(&env_gm, &gx_fwd, &gx_bck, &mut env_pp);
 
     let abc = Alphabet::new(hmm.abc_type);
-    let ad = crate::trace::alignment_display_with_pp(&tr, &sub_dsq, hmm, &abc, Some(&env_pp)).map(|mut ad| {
-        ad.sqfrom += ienv - 1;
-        ad.sqto += ienv - 1;
-        AliDisplay {
-            model: ad.model,
-            mline: ad.mline,
-            aseq: ad.aseq,
-            hmmfrom: ad.hmmfrom,
-            hmmto: ad.hmmto,
-            sqfrom: ad.sqfrom,
-            sqto: ad.sqto,
-            ppline: ad.ppline,
-        }
-    });
+    let ad = crate::trace::alignment_display_with_pp(&tr, &sub_dsq, hmm, &abc, Some(&env_pp))
+        .map(|mut ad| {
+            ad.sqfrom += ienv - 1;
+            ad.sqto += ienv - 1;
+            AliDisplay {
+                model: ad.model,
+                mline: ad.mline,
+                aseq: ad.aseq,
+                hmmfrom: ad.hmmfrom,
+                hmmto: ad.hmmto,
+                sqfrom: ad.sqfrom,
+                sqto: ad.sqto,
+                ppline: ad.ppline,
+            }
+        });
 
     let (iali, jali) = if let Some(ref a) = ad {
         (a.sqfrom as i64, a.sqto as i64)
@@ -121,55 +154,49 @@ pub fn score_domain_envelope(
         (ienv as i64, jenv as i64)
     };
 
-    // Null2 bias from envelope posterior
-    let env_null2 = generic_null2::null2_by_expectation(&env_gm, hmm, &env_pp, &crate::bg::AMINO_FREQUENCIES);
-    let dom_bias_nats = generic_null2::null2_score(&env_null2, &sub_dsq, 1, env_len);
-    let dom_bias = (dom_bias_nats / std::f32::consts::LN_2).max(0.0);
+    // Null2 bias from envelope posterior (with omega weighting, matching C)
+    let env_null2 = generic_null2::null2_by_expectation(
+        &env_gm,
+        hmm,
+        &env_pp,
+        bg_f,
+    );
+    let dom_correction = generic_null2::null2_score(&env_null2, &sub_dsq, 1, env_len);
+    let omega = 1.0_f32 / 256.0;
+    let dom_bias = crate::logsum::p7_flogsum(0.0, omega.ln() + dom_correction);
+
+    // Domain bitscore matching C's rescore_isolated_domain():
+    // C: bitscore = envsc + (L - Ld) * log(L / (L+3))
+    //    bitscore = (bitscore - (nullsc + dombias)) / log(2)
+    // The first line adds a correction for non-envelope residues under the null model.
+    // nullsc is the full-sequence null model score.
+    let length_correction = (l - env_len) as f32
+        * (l as f32 / (l as f32 + 3.0)).ln();
+    let dom_bitscore = (env_fwd_sc + length_correction - (null_sc + dom_bias))
+        / std::f32::consts::LN_2;
+    let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
+    let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
+    let dom_lnp = crate::stats::exponential::surv(dom_bitscore as f64, tau, lambda).ln();
 
     Domain {
         iali,
         jali,
         ienv: ienv as i64,
         jenv: jenv as i64,
-        bitscore,
-        lnp,
-        dombias: dom_bias,
+        bitscore: dom_bitscore,
+        lnp: dom_lnp,
+        dombias: (dom_bias / std::f32::consts::LN_2).max(0.0),
         oasc: 0.0,
         envsc: env_fwd_sc,
-        domcorrection: dom_bias_nats,
+        domcorrection: dom_correction,
         is_reported: false,
         is_included: false,
         ad,
     }
 }
 
-/// Fast bias estimate without Backward: uses the HMM's match emission composition
-/// vs background to estimate composition bias for the envelope residues.
-fn estimate_bias_fast(hmm: &Hmm, dsq: &[Dsq], l: usize) -> f32 {
-    let k = hmm.abc_k;
-    // Count residue frequencies in the envelope
-    let mut counts = vec![0usize; k];
-    for i in 1..=l {
-        let x = dsq[i] as usize;
-        if x < k {
-            counts[x] += 1;
-        }
-    }
-    // Compare observed composition to background
-    let mut bias = 0.0_f32;
-    let total = l as f32;
-    for x in 0..k {
-        let obs_freq = counts[x] as f32 / total;
-        let bg_freq = crate::bg::AMINO_FREQUENCIES.get(x).copied().unwrap_or(0.05);
-        if obs_freq > 0.0 && bg_freq > 0.0 {
-            bias += obs_freq * (obs_freq / bg_freq).ln();
-        }
-    }
-    // Convert to bits, clamp to non-negative
-    (bias / std::f32::consts::LN_2 * total).max(0.0)
-}
-
 /// Run domain definition on a sequence that passed Forward filter.
+/// Port of p7_domaindef_ByPosteriorHeuristics().
 /// Returns (domains, nexpected, seq_bias_nats).
 pub fn define_domains(
     dsq: &[Dsq],
@@ -178,128 +205,125 @@ pub fn define_domains(
     hmm: &Hmm,
     bg: &Bg,
     null_sc: f32,
+    seed: u32,
 ) -> (Vec<Domain>, f32, f32) {
     crate::logsum::p7_flogsuminit();
 
-    // Quick estimate of expected domains using SIMD Forward score
-    // If the Forward score is modest, likely just one domain — skip expensive posterior
-    let fwd_sc;
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("sse2") {
-            let om = crate::simd::oprofile::OProfile::convert(gm);
-            fwd_sc = unsafe { crate::simd::fwd_filter::forward_parser(dsq, l, &om) };
-        } else {
-            let mut gx = Gmx::new(gm.m, l);
-            fwd_sc = g_forward(dsq, l, gm, &mut gx);
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let mut gx = Gmx::new(gm.m, l);
-        fwd_sc = g_forward(dsq, l, gm, &mut gx);
-    }
-
-    let bitscore = (fwd_sc - null_sc) / std::f32::consts::LN_2;
-
-    // Fast path: single domain covering the whole sequence
-    // Use Viterbi traceback for alignment (no Backward needed)
-    let seq_bias = estimate_bias_fast(hmm, dsq, l);
-
-    // For simple cases (short sequences, moderate scores), skip full posterior
-    // and just return a single domain
-    if l <= gm.m * 3 || bitscore < 100.0 {
-        let dom = score_domain_envelope(dsq, l, gm, hmm, 1, l, null_sc);
-        let nexpected = 1.0_f32;
-        return (vec![dom], nexpected, seq_bias);
-    }
-
-    // Complex case: run full posterior for domain region detection
+    // Full Forward + Backward on the entire sequence
     let mut gx_fwd = Gmx::new(gm.m, l);
     g_forward(dsq, l, gm, &mut gx_fwd);
 
     let mut gx_bck = Gmx::new(gm.m, l);
     g_backward(dsq, l, gm, &mut gx_bck);
 
+    // Domain decoding: compute btot, etot, mocc (matching C's p7_DomainDecoding)
+    let (btot, etot, mocc) = domain_decoding(gm, &gx_fwd, &gx_bck);
+
+    // nexpected = btot[L] (expected number of domains)
+    let nexpected = btot[l].max(0.01);
+
+    // Null2 for sequence-level bias (from posterior decoding)
     let mut pp = Gmx::new(gm.m, l);
     g_decoding(gm, &gx_fwd, &gx_bck, &mut pp);
-
-    let mocc = domain_occupancy(&pp);
-
     let null2 = generic_null2::null2_by_expectation(gm, hmm, &pp, &bg.f);
-    let seq_bias_posterior = generic_null2::null2_score(&null2, dsq, 1, l);
+    let seq_bias = generic_null2::null2_score(&null2, dsq, 1, l);
 
-    let mut regions = find_domain_regions(&mocc, l);
-    let nexpected: f32 = (mocc[1..=l].iter().sum::<f32>() / gm.m as f32).max(0.01);
-
-    // Multidomain clustering
-    if nexpected > 1.5 && !regions.is_empty() {
-        let nsamples = 200;
-        let mut rng = MersenneTwister::new(42);
-        let mut segments = Vec::new();
-
-        for trace_idx in 0..nsamples {
-            let tr = g_stochastic_trace(&mut rng, dsq, l, gm, &gx_fwd);
-            let mut in_domain = false;
-            let mut seg_i = 0;
-            let mut seg_k = 0;
-            let mut seg_j = 0;
-            let mut seg_m = 0;
-
-            for z in 0..tr.n {
-                match tr.st[z] {
-                    State::B => {
-                        in_domain = true;
-                        seg_i = 0;
-                        seg_k = 0;
-                    }
-                    State::M if in_domain => {
-                        if seg_i == 0 {
-                            seg_i = tr.i[z];
-                            seg_k = tr.k[z];
-                        }
-                        seg_j = tr.i[z];
-                        seg_m = tr.k[z];
-                    }
-                    State::E if in_domain => {
-                        if seg_i > 0 && seg_j > 0 {
-                            segments.push(SegmentPair {
-                                i: seg_i,
-                                j: seg_j,
-                                k: seg_k,
-                                m: seg_m,
-                                trace_idx,
-                            });
-                        }
-                        in_domain = false;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if !segments.is_empty() {
-            let params = ClusterParams::default();
-            let envelopes = spensemble::cluster(&segments, nsamples, &params);
-            if envelopes.len() > 1 {
-                regions = envelopes.iter().map(|e| (e.ienv, e.jenv)).collect();
-            }
-        }
-    }
+    // Region detection using C's state machine
+    let regions = find_domain_regions(&btot, &etot, &mocc, l);
 
     if regions.is_empty() {
-        let dom = score_domain_envelope(dsq, l, gm, hmm, 1, l, null_sc);
-        return (vec![dom], nexpected, seq_bias_posterior);
+        // No regions found — if nexpected > 0, return single domain covering sequence
+        if nexpected >= 0.5 {
+            let dom = score_domain_envelope(dsq, l, gm, hmm, 1, l, null_sc, &bg.f);
+            return (vec![dom], nexpected, seq_bias);
+        }
+        return (Vec::new(), nexpected, seq_bias);
     }
 
     let mut domains = Vec::new();
-    for (ienv, jenv) in &regions {
-        let mut dom = score_domain_envelope(dsq, l, gm, hmm, *ienv, *jenv, null_sc);
-        let dom_bias_null2 = generic_null2::null2_score(&null2, dsq, *ienv, *jenv);
-        dom.dombias = (dom_bias_null2 / std::f32::consts::LN_2).max(0.0);
-        dom.domcorrection = dom_bias_null2;
-        domains.push(dom);
+
+    for &(ri, rj) in &regions {
+        if is_multidomain_region(&btot, &etot, ri, rj) {
+            // Multi-domain region: resolve by stochastic traceback clustering
+            // Run Forward on the region in multihit mode
+            let region_len = rj - ri + 1;
+            let mut region_gm = gm.clone();
+            reconfig_multihit(&mut region_gm, region_len as i32);
+
+            let mut sub_dsq = vec![crate::alphabet::DSQ_SENTINEL];
+            sub_dsq.extend_from_slice(&dsq[ri..=rj]);
+            sub_dsq.push(crate::alphabet::DSQ_SENTINEL);
+
+            let mut region_fwd = Gmx::new(gm.m, region_len);
+            g_forward(&sub_dsq, region_len, &region_gm, &mut region_fwd);
+
+            let mut rng = MersenneTwister::new(seed);
+            let mut segments = Vec::new();
+
+            for trace_idx in 0..NSAMPLES {
+                let tr = g_stochastic_trace(&mut rng, &sub_dsq, region_len, &region_gm, &region_fwd);
+                let mut in_domain = false;
+                let mut seg_i = 0;
+                let mut seg_k = 0;
+                let mut seg_j = 0;
+                let mut seg_m = 0;
+
+                for z in 0..tr.n {
+                    match tr.st[z] {
+                        State::B => {
+                            in_domain = true;
+                            seg_i = 0;
+                            seg_k = 0;
+                        }
+                        State::M if in_domain => {
+                            if seg_i == 0 {
+                                seg_i = tr.i[z];
+                                seg_k = tr.k[z];
+                            }
+                            seg_j = tr.i[z];
+                            seg_m = tr.k[z];
+                        }
+                        State::E if in_domain => {
+                            if seg_i > 0 && seg_j > 0 {
+                                segments.push(SegmentPair {
+                                    i: seg_i + ri - 1, // convert to full-sequence coords
+                                    j: seg_j + ri - 1,
+                                    k: seg_k,
+                                    m: seg_m,
+                                    trace_idx,
+                                });
+                            }
+                            in_domain = false;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if !segments.is_empty() {
+                let params = ClusterParams::default();
+                let envelopes = spensemble::cluster(&segments, NSAMPLES, &params);
+                for env in &envelopes {
+                    let ienv = env.ienv.max(1).min(l);
+                    let jenv = env.jenv.max(1).min(l);
+                    if jenv >= ienv {
+                        domains.push(score_domain_envelope(
+                            dsq, l, gm, hmm, ienv, jenv, null_sc, &bg.f,
+                        ));
+                    }
+                }
+            } else {
+                // Clustering failed — treat as single domain
+                domains.push(score_domain_envelope(dsq, l, gm, hmm, ri, rj, null_sc, &bg.f));
+            }
+        } else {
+            // Single-domain region: the region IS the envelope
+            domains.push(score_domain_envelope(dsq, l, gm, hmm, ri, rj, null_sc, &bg.f));
+        }
     }
 
-    (domains, nexpected, seq_bias_posterior)
+    // Sort domains by envelope start position
+    domains.sort_by_key(|d| d.ienv);
+
+    (domains, nexpected, seq_bias)
 }

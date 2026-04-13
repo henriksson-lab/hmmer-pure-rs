@@ -1,0 +1,28 @@
+#                                                                --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name         accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+# ------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+sp|P69892|HBG2_HUMAN  -          Globin               PF00042.29   1.2e-36  125.9   0.0   1.6e-36  125.5   0.0   1.2   1   0   0   1   1   1   1 Hemoglobin subunit gamma-2 OS=Homo sapiens OX=9606 GN=HBG2 PE=1 SV=2
+sp|P69891|HBG1_HUMAN  -          Globin               PF00042.29   2.9e-36  124.7   0.0   3.9e-36  124.3   0.0   1.2   1   0   0   1   1   1   1 Hemoglobin subunit gamma-1 OS=Homo sapiens OX=9606 GN=HBG1 PE=1 SV=3
+sp|P02008|HBAZ_HUMAN  -          Globin               PF00042.29   1.3e-35  122.6   0.1   1.6e-35  122.3   0.1   1.1   1   0   0   1   1   1   1 Hemoglobin subunit zeta OS=Homo sapiens OX=9606 GN=HBZ PE=1 SV=2
+sp|P02100|HBE_HUMAN   -          Globin               PF00042.29   6.4e-35  120.3   0.2   1.2e-34  119.5   0.0   1.5   2   0   0   2   2   2   1 Hemoglobin subunit epsilon OS=Homo sapiens OX=9606 GN=HBE1 PE=1 SV=2
+sp|P69905|HBA_HUMAN   -          Globin               PF00042.29   1.9e-33  115.6   1.2   1.9e-33  115.6   1.2   1.7   2   0   0   2   2   2   1 Hemoglobin subunit alpha OS=Homo sapiens OX=9606 GN=HBA1 PE=1 SV=2
+sp|P68871|HBB_HUMAN   -          Globin               PF00042.29   2.3e-33  115.3   0.0   4.2e-33  114.5   0.0   1.4   2   0   0   2   2   2   1 Hemoglobin subunit beta OS=Homo sapiens OX=9606 GN=HBB PE=1 SV=2
+sp|P02042|HBD_HUMAN   -          Globin               PF00042.29   5.8e-33  114.0   0.0   1.3e-32  112.9   0.0   1.5   2   0   0   2   2   2   1 Hemoglobin subunit delta OS=Homo sapiens OX=9606 GN=HBD PE=1 SV=2
+sp|P09105|HBAT_HUMAN  -          Globin               PF00042.29   2.9e-30  105.3   0.1   4.3e-30  104.8   0.0   1.3   2   0   0   2   2   1   1 Hemoglobin subunit theta-1 OS=Homo sapiens OX=9606 GN=HBQ1 PE=1 SV=2
+sp|Q6B0K9|HBM_HUMAN   -          Globin               PF00042.29   5.1e-28   98.1   0.1   6.3e-28   97.8   0.1   1.1   1   0   0   1   1   1   1 Hemoglobin subunit mu OS=Homo sapiens OX=9606 GN=HBM PE=1 SV=1
+sp|Q8WWM9|CYGB_HUMAN  -          Globin               PF00042.29     4e-26   92.0   0.3   7.2e-26   91.2   0.1   1.5   2   0   0   2   2   2   1 Cytoglobin OS=Homo sapiens OX=9606 GN=CYGB PE=1 SV=1
+sp|P02144|MYG_HUMAN   -          Globin               PF00042.29   3.2e-24   85.8   1.1   3.9e-24   85.6   1.1   1.1   1   0   0   1   1   1   1 Myoglobin OS=Homo sapiens OX=9606 GN=MB PE=1 SV=2
+sp|Q9NPG2|NGB_HUMAN   -          Globin               PF00042.29   2.9e-18   66.7   0.0   3.4e-18   66.4   0.0   1.1   1   0   0   1   1   1   1 Neuroglobin OS=Homo sapiens OX=9606 GN=NGB PE=1 SV=1
+sp|Q8N7X0|ADGB_HUMAN  -          Globin               PF00042.29    0.0022   18.7   0.0     0.008   16.8   0.0   2.0   1   0   0   1   1   1   1 Androglobin OS=Homo sapiens OX=9606 GN=ADGB PE=1 SV=3
+sp|Q69YQ0|CYTSA_HUMAN -          Globin               PF00042.29      0.14   12.9   1.1      0.35   11.6   0.3   2.1   2   0   0   2   2   1   0 Cytospin-A OS=Homo sapiens OX=9606 GN=SPECC1L PE=1 SV=3
+sp|Q99424|ACOX2_HUMAN -          Globin               PF00042.29      0.15   12.7   0.1      0.58   10.8   0.1   2.1   1   1   0   1   1   1   0 Peroxisomal acyl-coenzyme A oxidase 2 OS=Homo sapiens OX=9606 GN=ACOX2 PE=1 SV=1
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      test_data/Globin_pfam.hmm
+# Target file:     test_data/human_swissprot_2k.fasta
+# Option settings: hmmsearch --tblout tests/golden/pfam_Globin.tblout --noali test_data/Globin_pfam.hmm test_data/human_swissprot_2k.fasta 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:43:23 2026
+# [ok]

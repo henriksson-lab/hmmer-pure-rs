@@ -116,9 +116,11 @@ impl Bg {
         self.fhmm_t[1][1] = l1 / (l1 + 1.0);
         self.fhmm_t[1][2] = 1.0;
 
-        // Emissions
-        self.fhmm_e0 = self.f.clone();
-        self.fhmm_e1 = compo[..self.k].to_vec();
+        // Emissions as odds ratios (e[x] / bg_freq[x]), matching C's esl_hmm_Configure()
+        self.fhmm_e0 = vec![1.0_f32; self.k]; // bg/bg = 1.0
+        self.fhmm_e1 = compo[..self.k].iter().zip(self.f[..self.k].iter())
+            .map(|(&c, &f)| if f > 0.0 { c / f } else { 0.0 })
+            .collect();
 
         // Initial probabilities
         self.fhmm_pi = [0.999, 0.001];

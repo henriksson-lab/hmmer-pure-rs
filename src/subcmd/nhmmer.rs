@@ -192,7 +192,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         th.hits = all_hits;
         let z = sequences.len() as f64;
         th.sort_by_sortkey();
-        th.threshold(args.e_value, args.inc_e, args.e_value, args.inc_e, z, z);
+        th.threshold(&pli, z, z);
 
         // Output
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();

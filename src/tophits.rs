@@ -118,19 +118,35 @@ impl TopHits {
 
     /// Apply reporting and inclusion thresholds.
     /// Uses E-value thresholds: inc_e for inclusion, report_e for reporting.
-    pub fn threshold(&mut self, report_e: f64, inc_e: f64, report_dome: f64, inc_dome: f64, z: f64, domz: f64) {
+    pub fn threshold(&mut self, pli: &super::pipeline::Pipeline, z: f64, domz: f64) {
         self.nreported = 0;
         self.nincluded = 0;
 
         for hit in &mut self.hits {
-            // Convert lnP to E-value: E = Z * P = Z * exp(lnP)
             let evalue = z * hit.lnp.exp();
 
-            if evalue <= report_e {
+            // Sequence-level reporting
+            let reported = if pli.by_e {
+                evalue <= pli.e_value_threshold
+            } else if let Some(t) = pli.t {
+                hit.score >= t
+            } else {
+                evalue <= pli.e_value_threshold
+            };
+
+            if reported {
                 hit.flags |= P7_IS_REPORTED;
                 self.nreported += 1;
 
-                if evalue <= inc_e {
+                // Sequence-level inclusion
+                let included = if pli.inc_by_e {
+                    evalue <= pli.inc_e
+                } else if let Some(t) = pli.inc_t {
+                    hit.score >= t
+                } else {
+                    evalue <= pli.inc_e
+                };
+                if included {
                     hit.flags |= P7_IS_INCLUDED;
                     self.nincluded += 1;
                 }
@@ -143,10 +159,27 @@ impl TopHits {
             hit.nincluded = 0;
             for dom in &mut hit.dcl {
                 let dom_evalue = domz * dom.lnp.exp();
-                if dom_evalue <= report_dome {
+
+                let dom_reported = if pli.dom_by_e {
+                    dom_evalue <= pli.dom_e_value_threshold
+                } else if let Some(t) = pli.dom_t {
+                    dom.bitscore >= t
+                } else {
+                    dom_evalue <= pli.dom_e_value_threshold
+                };
+
+                if dom_reported {
                     dom.is_reported = true;
                     hit.nreported += 1;
-                    if dom_evalue <= inc_dome {
+
+                    let dom_included = if pli.incdom_by_e {
+                        dom_evalue <= pli.inc_dome
+                    } else if let Some(t) = pli.inc_dom_t {
+                        dom.bitscore >= t
+                    } else {
+                        dom_evalue <= pli.inc_dome
+                    };
+                    if dom_included {
                         dom.is_included = true;
                         hit.nincluded += 1;
                     }

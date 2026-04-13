@@ -1,0 +1,22 @@
+#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord
+# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target
+#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   1   9      0.17      0.17   -1.3   0.0    61    74   396   409   395   411 0.85 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   2   9   1.3e-14   1.3e-14   40.7   0.0     2    84   439   520   437   521 0.95 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   3   9     2e-06     2e-06   14.4   0.0    13    85   836   913   826   914 0.73 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   4   9    0.0016    0.0016    5.1   0.0    10    36  1209  1235  1203  1259 0.82 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   5   9   1.7e-09   1.7e-09   24.3   0.0    14    80  1313  1380  1304  1386 0.82 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   6   9     0.063     0.063    0.0   0.0    58    72  1754  1768  1739  1769 0.89 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   7   9   1.2e-16   1.2e-16   47.2   0.9     1    85  1799  1890  1799  1891 0.91 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   8   9   1.8e-07   1.8e-07   17.8   0.0     6    74  1904  1966  1901  1976 0.90 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+7LESS_DROME          P13368      2554 fn3                  PF00041.13    86   1.9e-57  178.0   0.4   9   9   6.6e-06   6.6e-06   12.8   0.0     1    86  1993  2107  1993  2107 0.89 RecName: Full=Protein sevenless;          EC=2.7.10.1;
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/tutorial/fn3.hmm
+# Target file:     hmmer/tutorial/7LESS_DROME
+# Option settings: hmmsearch --tblout tests/golden/fn3_vs_7less_dom.tblout --domtblout tests/golden/fn3_vs_7less.domtblout --noali hmmer/tutorial/fn3.hmm hmmer/tutorial/7LESS_DROME 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:21:55 2026
+# [ok]

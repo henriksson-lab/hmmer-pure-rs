@@ -1,0 +1,42 @@
+#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----
+# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target
+#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------
+CP157504.1_588       -          3Beta_HSD            PF01073.22   2.2e-12   36.8   1.1   6.2e-12   35.3   1.1   1.7   1   1   0   1   1   1   1 -
+CP157504.1_2575      -          3Beta_HSD            PF01073.22   9.7e-09   24.9   0.0   1.9e-08   23.9   0.0   1.5   1   1   0   1   1   1   1 -
+CP157504.1_347       -          3Beta_HSD            PF01073.22   9.5e-06   15.1   0.0   1.7e-05   14.3   0.0   1.4   1   1   0   1   1   1   1 -
+CP157504.1_3027      -          AAA_16               PF13191.9    1.5e-08   25.5   0.2   2.2e-08   25.0   0.2   1.6   1   1   0   1   1   1   1 -
+CP157504.1_3443      -          Acetyltransf_10      PF13673.10   2.2e-14   43.9   0.0   2.6e-14   43.7   0.0   1.1   1   0   0   1   1   1   1 -
+CP157504.1_782       -          Acetyltransf_10      PF13673.10   5.2e-09   26.5   0.1   8.4e-09   25.8   0.1   1.3   1   1   0   1   1   1   1 -
+CP157504.1_3881      -          Acetyltransf_10      PF13673.10   1.2e-08   25.3   0.0   1.6e-08   24.9   0.0   1.2   1   0   0   1   1   1   1 -
+CP157504.1_3881      -          Acetyltransf_3       PF13302.10   1.1e-22   71.5   0.0   1.3e-22   71.3   0.0   1.0   1   0   0   1   1   1   1 -
+CP157504.1_782       -          Acetyltransf_3       PF13302.10   1.2e-08   26.1   0.0   1.4e-08   25.9   0.0   1.1   1   0   0   1   1   1   1 -
+CP157504.1_3881      -          Acetyltransf_4       PF13420.10   1.9e-11   34.5   0.2   2.4e-11   34.2   0.2   1.2   1   0   0   1   1   1   1 -
+CP157504.1_782       -          Acetyltransf_4       PF13420.10   1.6e-08   25.1   0.5   1.8e-08   24.8   0.5   1.0   1   0   0   1   1   1   1 -
+CP157504.1_3443      -          Acetyltransf_9       PF13527.10   5.5e-09   26.6   0.0   1.8e-08   24.9   0.0   1.7   1   1   0   1   1   1   1 -
+CP157504.1_3713      -          CTP_transf_like      PF01467.29   1.5e-08   25.3   0.0     2e-08   24.9   0.0   1.2   1   0   0   1   1   1   1 -
+CP157504.1_4793      -          DAO                  PF01266.27   3.5e-09   26.9   0.6   1.9e-08   24.5   0.1   2.0   1   1   1   2   2   2   1 -
+CP157504.1_3967      -          DctM                 PF06808.15   2.3e-09   26.8  43.5   8.6e-09   24.9  17.9   2.4   1   1   0   2   2   2   2 -
+CP157504.1_1085      -          F420_oxidored        PF03807.20   1.7e-09   28.6   2.9   5.1e-09   27.1   0.5   2.2   2   0   0   2   2   2   1 -
+CP157504.1_347       -          F420_oxidored        PF03807.20   8.5e-06   16.8   0.0   1.7e-05   15.8   0.0   1.5   1   0   0   1   1   1   1 -
+CP157504.1_857       -          Flavodoxin_2         PF02525.20   2.8e-09   27.2   0.0   2.2e-08   24.3   0.0   2.0   1   1   0   1   1   1   1 -
+CP157504.1_5170      -          Glutaredoxin         PF00462.27   4.2e-09   27.0   0.0   5.8e-09   26.5   0.0   1.2   1   0   0   1   1   1   1 -
+CP157504.1_165       -          Glyoxalase_6         PF18029.4      1e-08   26.3   0.0   2.4e-08   25.1   0.0   1.6   1   1   0   1   1   1   1 -
+CP157504.1_3663      -          HTH_26               PF13443.9    1.8e-08   25.2   0.0     2e-08   25.0   0.0   1.1   1   0   0   1   1   1   1 -
+CP157504.1_588       -          NAD_binding_10       PF13460.9      4e-51  163.8   1.8   4.7e-51  163.6   1.8   1.0   1   0   0   1   1   1   1 -
+CP157504.1_2575      -          NAD_binding_10       PF13460.9    2.2e-20   63.6   0.9   4.3e-20   62.7   0.6   1.7   1   1   0   1   1   1   1 -
+CP157504.1_347       -          NAD_binding_10       PF13460.9    5.7e-09   26.4   0.0   7.5e-09   26.0   0.0   1.2   1   0   0   1   1   1   1 -
+CP157504.1_1408      -          PAS_8                PF13188.10   4.1e-15   45.9   0.0   1.6e-08   24.9   0.0   3.2   3   0   0   3   3   3   2 -
+CP157504.1_1918      -          Peptidase_S15        PF02129.21     7e-09   25.9   0.1   1.7e-08   24.7   0.1   1.5   1   1   1   2   2   2   1 -
+CP157504.1_4766      -          SBP_bac_11           PF13531.9    5.6e-09   26.4   0.2     1e-08   25.5   0.2   1.4   1   1   0   1   1   1   1 -
+CP157504.1_588       -          Semialdhyde_dh       PF01118.27   8.5e-09   26.3   0.6   1.6e-08   25.4   0.6   1.5   1   0   0   1   1   1   1 -
+CP157504.1_38        -          Toprim               PF01751.25   1.3e-08   25.4   0.6   2.4e-08   24.6   0.1   1.8   2   1   0   2   2   2   1 -
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/testsuite/gecco_missed3_hmms.hmm
+# Target file:     hmmer/testsuite/gecco_missed3_proteins.faa
+# Option settings: hmmsearch --tblout tests/golden/gecco_missed3.tblout --noali hmmer/testsuite/gecco_missed3_hmms.hmm hmmer/testsuite/gecco_missed3_proteins.faa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Mon Apr 13 11:21:56 2026
+# [ok]

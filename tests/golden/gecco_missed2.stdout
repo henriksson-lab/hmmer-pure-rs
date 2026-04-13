@@ -1,0 +1,337 @@
+# hmmsearch :: search profile(s) against a sequence database
+# HMMER 3.3.2 (Nov 2020); http://hmmer.org/
+# Copyright (C) 2020 Howard Hughes Medical Institute.
+# Freely distributed under the BSD open source license.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# query HMM file:                  hmmer/testsuite/gecco_missed2_hmms.hmm
+# target sequence database:        hmmer/testsuite/gecco_missed2_proteins.faa
+# per-seq hits tabular output:     tests/golden/gecco_missed2.tblout
+# show alignments in output:       no
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Query:       AAA_5  [M=138]
+Accession:   PF07728.17
+Description: AAA domain (dynein-related subfamily)
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.2e-12   37.4   0.1    8.1e-11   31.5   0.1    2.3  1  CP157504.1_4784  
+    3.7e-05   13.2   0.0    7.9e-05   12.1   0.0    1.6  1  CP157504.1_15    
+
+
+Domain annotation for each sequence:
+>> CP157504.1_4784  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   31.5   0.1   1.6e-11   8.1e-11       1     138 []      55     173 ..      55     173 .. 0.89
+
+>> CP157504.1_15  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   12.1   0.0   1.6e-05   7.9e-05       5      27 ..      10      32 ..       7      40 .. 0.88
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (138 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         5  (0.5); expected 0.2 (0.02)
+Passed bias filter:                        5  (0.5); expected 0.2 (0.02)
+Passed Vit filter:                         3  (0.3); expected 0.0 (0.001)
+Passed Fwd filter:                         2  (0.2); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               2  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 40.50
+//
+Query:       Acetyltransf_7  [M=80]
+Accession:   PF13508.10
+Description: Acetyltransferase (GNAT) domain
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    2.7e-10   30.0   0.0    3.7e-10   29.6   0.0    1.3  1  CP157504.1_3186  
+      3e-10   29.8   0.1      6e-10   28.9   0.1    1.5  1  CP157504.1_1695  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_3186  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   29.6   0.0   7.4e-11   3.7e-10      28      80 .]      78     140 ..      37     140 .. 0.69
+
+>> CP157504.1_1695  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   28.9   0.1   1.2e-10     6e-10       5      79 ..      57     139 ..      52     140 .. 0.72
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (80 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         3  (0.3); expected 0.2 (0.02)
+Passed bias filter:                        3  (0.3); expected 0.2 (0.02)
+Passed Vit filter:                         2  (0.2); expected 0.0 (0.001)
+Passed Fwd filter:                         2  (0.2); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               2  [number of targets reported over threshold]
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.00
+# Mc/sec: 99.34
+//
+Query:       Acetyltransf_8  [M=145]
+Accession:   PF13523.9
+Description: Acetyltransferase (GNAT) domain
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    7.9e-11   31.3   0.1    3.7e-10   29.1   0.1    1.8  1  CP157504.1_1695  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_1695  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   29.1   0.1   3.7e-11   3.7e-10       4     143 ..      13     144 ..      11     146 .. 0.78
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (145 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         3  (0.3); expected 0.2 (0.02)
+Passed bias filter:                        3  (0.3); expected 0.2 (0.02)
+Passed Vit filter:                         2  (0.2); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 46.05
+//
+Query:       GAF  [M=133]
+Accession:   PF01590.29
+Description: GAF domain
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.8e-11   34.3   0.0    3.4e-10   30.2   0.0    2.5  2  CP157504.1_2760  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_2760  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   30.2   0.0   3.4e-11   3.4e-10       8     133 .]     141     283 ..     134     283 .. 0.67
+   2 ?    1.4   0.0     0.026      0.26      69     130 ..     368     424 ..     325     427 .. 0.76
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (133 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         2  (0.2); expected 0.2 (0.02)
+Passed bias filter:                        2  (0.2); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.00
+# Mc/sec: 102.67
+//
+Query:       Methyltransf_12  [M=99]
+Accession:   PF08242.15
+Description: Methyltransferase domain
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.3e-10   31.5   0.0    2.7e-10   30.4   0.0    1.6  1  CP157504.1_4741  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_4741  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   30.4   0.0   2.7e-11   2.7e-10       2      99 .]      51     142 ..      50     142 .. 0.86
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (99 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         1  (0.1); expected 0.2 (0.02)
+Passed bias filter:                        1  (0.1); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.00
+# Mc/sec: 170.12
+//
+Query:       MFS_1_like  [M=385]
+Accession:   PF12832.10
+Description: MFS_1 like family
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    6.1e-14   41.0  35.7    1.7e-10   29.6  18.0    2.3  2  CP157504.1_3976  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_3976  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   17.4   9.9   8.8e-08   8.8e-07     235     356 ..      21     143 ..       7     154 .. 0.86
+   2 !   29.6  18.0   1.7e-11   1.7e-10     162     373 ..     148     355 ..     142     368 .. 0.88
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (385 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         1  (0.1); expected 0.2 (0.02)
+Passed bias filter:                        1  (0.1); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.03u 0.00s 00:00:00.03 Elapsed: 00:00:00.02
+# Mc/sec: 44.92
+//
+Query:       Peptidase_M20  [M=207]
+Accession:   PF01546.31
+Description: Peptidase family M20/M25/M40
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.5e-10   30.5   0.0    7.9e-10   28.1   0.0    2.1  2  CP157504.1_4970  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_4970  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 ?   -2.2   0.0      0.16       1.6      70      91 ..      54      70 ..      49     105 .. 0.69
+   2 !   28.1   0.0   7.9e-11   7.9e-10      29     206 ..     173     343 ..     159     344 .. 0.77
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (207 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         1  (0.1); expected 0.2 (0.02)
+Passed bias filter:                        1  (0.1); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.01u 0.01s 00:00:00.02 Elapsed: 00:00:00.00
+# Mc/sec: 78.96
+//
+Query:       Polysacc_synt_2  [M=294]
+Accession:   PF02719.18
+Description: Polysaccharide biosynthesis protein
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.1e-11   33.8   0.2    8.9e-11   30.8   0.2    2.3  1  CP157504.1_1483  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_1483  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   30.8   0.2   8.9e-12   8.9e-11       1     124 [.       4     113 ..       4     168 .. 0.75
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (294 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         1  (0.1); expected 0.2 (0.02)
+Passed bias filter:                        1  (0.1); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 64.41
+//
+Query:       SMC_N  [M=220]
+Accession:   PF02463.22
+Description: RecF/RecN/SMC N terminal domain
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence        Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------        -----------
+    1.3e-10   30.5   0.0    1.9e-10   30.0   0.0    1.1  1  CP157504.1_1403  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_1403  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   30.0   0.0   1.9e-11   1.9e-10      28     213 ..      41     226 ..      22     231 .. 0.84
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (220 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         2  (0.2); expected 0.2 (0.02)
+Passed bias filter:                        2  (0.2); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.00
+# Mc/sec: 155.31
+//
+Query:       Thymidylate_kin  [M=185]
+Accession:   PF02223.20
+Description: Thymidylate kinase
+Scores for complete sequences (score includes all domains):
+   --- full sequence ---   --- best 1 domain ---    -#dom-
+    E-value  score  bias    E-value  score  bias    exp  N  Sequence      Description
+    ------- ------ -----    ------- ------ -----   ---- --  --------      -----------
+    3.7e-11   32.4   0.6    9.8e-11   31.1   0.6    1.8  1  CP157504.1_15  
+
+
+Domain annotation for each sequence:
+>> CP157504.1_15  
+   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc
+ ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----
+   1 !   31.1   0.6   9.8e-12   9.8e-11       1     164 [.       9     167 ..       9     192 .. 0.78
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (185 nodes)
+Target sequences:                         10  (3195 residues searched)
+Passed MSV filter:                         2  (0.2); expected 0.2 (0.02)
+Passed bias filter:                        2  (0.2); expected 0.2 (0.02)
+Passed Vit filter:                         1  (0.1); expected 0.0 (0.001)
+Passed Fwd filter:                         1  (0.1); expected 0.0 (1e-05)
+Initial search space (Z):                 10  [actual number of targets]
+Domain search space  (domZ):               1  [number of targets reported over threshold]
+# CPU time: 0.01u 0.00s 00:00:00.01 Elapsed: 00:00:00.01
+# Mc/sec: 47.77
+//
+[ok]

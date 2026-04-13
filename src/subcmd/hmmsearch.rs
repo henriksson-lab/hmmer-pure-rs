@@ -24,25 +24,11 @@ struct Args {
     /// Sequence database (FASTA format)
     seqdb: PathBuf,
 
-    /// Report sequences <= this E-value threshold
-    #[arg(short = 'E', default_value = "10.0")]
-    e_value: f64,
+    // --- Output options ---
 
-    /// Report sequences >= this score threshold
-    #[arg(short = 'T')]
-    score_threshold: Option<f32>,
-
-    /// Include sequences <= this E-value threshold
-    #[arg(long = "incE", default_value = "0.01")]
-    inc_e: f64,
-
-    /// Report domains <= this E-value threshold
-    #[arg(long = "domE", default_value = "10.0")]
-    dom_e: f64,
-
-    /// Include domains <= this E-value threshold
-    #[arg(long = "incdomE", default_value = "0.01")]
-    inc_dome: f64,
+    /// Direct output to file, not stdout
+    #[arg(short = 'o')]
+    outfile: Option<PathBuf>,
 
     /// Save per-sequence hits to tabular file
     #[arg(long = "tblout")]
@@ -55,6 +41,58 @@ struct Args {
     /// Don't output alignments
     #[arg(long = "noali")]
     noali: bool,
+
+    // --- Reporting thresholds ---
+
+    /// Report sequences <= this E-value threshold
+    #[arg(short = 'E', default_value = "10.0")]
+    e_value: f64,
+
+    /// Report sequences >= this score threshold
+    #[arg(short = 'T')]
+    score_threshold: Option<f32>,
+
+    /// Report domains <= this E-value threshold
+    #[arg(long = "domE", default_value = "10.0")]
+    dom_e: f64,
+
+    /// Report domains >= this score threshold
+    #[arg(long = "domT")]
+    dom_t: Option<f32>,
+
+    // --- Inclusion thresholds ---
+
+    /// Include sequences <= this E-value threshold
+    #[arg(long = "incE", default_value = "0.01")]
+    inc_e: f64,
+
+    /// Include sequences >= this score threshold
+    #[arg(long = "incT")]
+    inc_t: Option<f32>,
+
+    /// Include domains <= this E-value threshold
+    #[arg(long = "incdomE", default_value = "0.01")]
+    inc_dome: f64,
+
+    /// Include domains >= this score threshold
+    #[arg(long = "incdomT")]
+    inc_dom_t: Option<f32>,
+
+    // --- Model-specific cutoffs ---
+
+    /// Use model's GA gathering cutoffs to set all thresholding
+    #[arg(long = "cut_ga")]
+    cut_ga: bool,
+
+    /// Use model's NC noise cutoffs to set all thresholding
+    #[arg(long = "cut_nc")]
+    cut_nc: bool,
+
+    /// Use model's TC trusted cutoffs to set all thresholding
+    #[arg(long = "cut_tc")]
+    cut_tc: bool,
+
+    // --- Acceleration heuristics ---
 
     /// Skip all filters (run everything through Forward)
     #[arg(long = "max")]
@@ -72,9 +110,57 @@ struct Args {
     #[arg(long = "F3", default_value = "1e-5")]
     f3: f64,
 
+    /// Turn off composition bias filter
+    #[arg(long = "nobias")]
+    nobias: bool,
+
+    // --- Other expert options ---
+
+    /// Turn off biased composition score corrections
+    #[arg(long = "nonull2")]
+    nonull2: bool,
+
+    /// Set number of comparisons for E-value calculation
+    #[arg(short = 'Z')]
+    z_value: Option<f64>,
+
+    /// Set number of significant seqs for domain E-value calculation
+    #[arg(long = "domZ")]
+    domz_value: Option<f64>,
+
+    /// Set RNG seed (0: one-time arbitrary seed)
+    #[arg(long = "seed", default_value = "42")]
+    seed: u32,
+
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
     cpu: usize,
+
+    // --- Output formatting ---
+
+    /// Prefer accessions over names in output
+    #[arg(long = "acc")]
+    show_acc: bool,
+
+    /// Unlimit ASCII text output line width
+    #[arg(long = "notextw")]
+    notextw: bool,
+
+    /// Set max width of ASCII text output lines
+    #[arg(long = "textw", default_value = "120")]
+    textw: usize,
+
+    /// Save table of hits in Pfam format
+    #[arg(long = "pfamtblout")]
+    pfamtblout: Option<PathBuf>,
+
+    /// Save multiple alignment of all hits to file
+    #[arg(short = 'A')]
+    ali_outfile: Option<PathBuf>,
+
+    /// Assert target sequence file format (e.g. fasta, embl, genbank, uniprot)
+    #[arg(long = "tformat")]
+    tformat: Option<String>,
 }
 
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
@@ -94,8 +180,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    // Output destination: -o file or stdout
+    let outfile_handle;
+    let stdout;
+    let mut out: Box<dyn std::io::Write> = if let Some(ref path) = args.outfile {
+        outfile_handle = std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("Error creating output file: {}", e);
+            std::process::exit(1);
+        });
+        Box::new(std::io::BufWriter::new(outfile_handle))
+    } else {
+        stdout = std::io::stdout();
+        Box::new(stdout.lock())
+    };
 
     // Print header
     writeln!(out, "# hmmsearch :: search profile(s) against a sequence database").unwrap();
@@ -121,6 +218,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         })
     });
+    let mut pfamtblout_file = args.pfamtblout.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating pfamtblout file: {}", e);
+            std::process::exit(1);
+        })
+    });
+    let mut ali_outfile = args.ali_outfile.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating alignment output file: {}", e);
+            std::process::exit(1);
+        })
+    });
+
+    let textw = if args.notextw { 0 } else { args.textw };
 
     for hmm in &hmms {
         let abc = Alphabet::new(hmm.abc_type);
@@ -134,14 +245,62 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         let mut pli = Pipeline::new();
         pli.new_model(&gm);
+
+        // Filter thresholds
         pli.f1 = args.f1;
         pli.f2 = args.f2;
         pli.f3 = args.f3;
+        pli.do_max = args.max;
+        if args.nobias { pli.do_biasfilter = false; }
+        if args.nonull2 { pli.do_null2 = false; }
+        pli.seed = args.seed;
+
+        // Reporting thresholds
         pli.e_value_threshold = args.e_value;
         pli.dom_e_value_threshold = args.dom_e;
         pli.inc_e = args.inc_e;
         pli.inc_dome = args.inc_dome;
-        pli.do_max = args.max;
+
+        // Score-based thresholds (override E-value based)
+        if let Some(t) = args.score_threshold {
+            pli.t = Some(t);
+            pli.by_e = false;
+        }
+        if let Some(t) = args.dom_t {
+            pli.dom_t = Some(t);
+            pli.dom_by_e = false;
+        }
+        if let Some(t) = args.inc_t {
+            pli.inc_t = Some(t);
+            pli.inc_by_e = false;
+        }
+        if let Some(t) = args.inc_dom_t {
+            pli.inc_dom_t = Some(t);
+            pli.incdom_by_e = false;
+        }
+
+        // Model-specific cutoffs (override both E-value and score thresholds)
+        if args.cut_ga {
+            pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::GA;
+        } else if args.cut_tc {
+            pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::TC;
+        } else if args.cut_nc {
+            pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::NC;
+        }
+        if let Err(e) = pli.new_model_thresholds(&hmm.cutoff) {
+            eprintln!("Error: {} for model {}", e, hmm.name);
+            continue;
+        }
+
+        // Database size overrides
+        if let Some(z) = args.z_value {
+            pli.z = z;
+            pli.z_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+        }
+        if let Some(dz) = args.domz_value {
+            pli.domz = dz;
+            pli.domz_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+        }
 
         // Read all sequences first
         let mut sequences = Vec::new();
@@ -170,9 +329,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let f3 = args.f3;
         let do_max = args.max;
 
-        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = sequences
+        let nobias = args.nobias;
+        let nonull2 = args.nonull2;
+        let seed = args.seed;
+
+        let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> = sequences
             .par_iter()
-            .filter_map(|sq| {
+            .map(|sq| {
                 let mut local_bg = bg.clone();
                 let mut local_gm = (*shared_gm).clone();
                 let mut local_om = (*shared_om).clone();
@@ -182,45 +345,68 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 local_pli.f2 = f2;
                 local_pli.f3 = f3;
                 local_pli.do_max = do_max;
+                if nobias { local_pli.do_biasfilter = false; }
+                if nonull2 { local_pli.do_null2 = false; }
+                local_pli.seed = seed;
 
                 local_bg.set_length(sq.n);
                 profile::reconfig_length(&mut local_gm, sq.n as i32);
                 local_om.reconfig_length(sq.n as i32);
 
                 let mut local_th = TopHits::new();
-                if local_pli.run(&local_gm, &local_om, &local_bg, hmm, sq, &mut local_th) {
+                let hit = if local_pli.run(&local_gm, &local_om, &local_bg, hmm, sq, &mut local_th) {
                     local_th.hits.into_iter().next()
                 } else {
                     None
-                }
+                };
+                (hit, local_pli.n_past_msv, local_pli.n_past_bias, local_pli.n_past_vit, local_pli.n_past_fwd)
             })
             .collect();
 
         let mut th = TopHits::new();
-        th.hits = all_hits;
         pli.n_targets = sequences.len() as u64;
-        pli.n_past_fwd = th.hits.len() as u64;
-        pli.n_past_msv = sequences.len() as u64;
-        pli.n_past_bias = sequences.len() as u64;
-        pli.n_past_vit = sequences.len() as u64;
+        pli.n_past_msv = 0;
+        pli.n_past_bias = 0;
+        pli.n_past_vit = 0;
+        pli.n_past_fwd = 0;
+        for (hit, msv, bias, vit, fwd) in results {
+            pli.n_past_msv += msv;
+            pli.n_past_bias += bias;
+            pli.n_past_vit += vit;
+            pli.n_past_fwd += fwd;
+            if let Some(h) = hit {
+                th.hits.push(h);
+            }
+        }
 
         // Set Z (database size)
-        let z = if pli.z > 0.0 { pli.z } else { pli.n_targets as f64 };
-        let domz = z;
+        let z = match pli.z_setby {
+            hmmer_pure_rs::pipeline::ZSetBy::Option => pli.z,
+            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => pli.n_targets as f64,
+        };
 
-        // Sort and threshold
+        // Sort and threshold (first pass with domz = z for sequence-level reporting)
         th.sort_by_sortkey();
         th.threshold(
-            pli.e_value_threshold,
-            pli.inc_e,
-            pli.dom_e_value_threshold,
-            pli.inc_dome,
+            &pli,
             z,
-            domz,
+            z, // temporary domz = z for first pass
         );
+
+        // Set domz: user-specified, or auto = nreported from first pass
+        let domz = match pli.domz_setby {
+            hmmer_pure_rs::pipeline::ZSetBy::Option => pli.domz,
+            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => th.nreported.max(1) as f64,
+        };
+        // Re-threshold with correct domz for domain-level E-values
+        if domz != z {
+            th.threshold(&pli, z, domz);
+        }
 
         // Output query header
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
+
+        let show_acc = args.show_acc;
 
         // Per-sequence hit table
         writeln!(out, "Scores for complete sequences (score includes all domains):").unwrap();
@@ -248,7 +434,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
             writeln!(
                 out,
-                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
+                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {} {}",
                 hmmer_pure_rs::output::fmt_evalue(evalue),
                 hit.score,
                 hit.bias,
@@ -257,7 +443,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 hit.bias,
                 hit.nexpected,
                 hit.ndom,
-                hit.name,
+                if show_acc && !hit.acc.is_empty() { &hit.acc } else { &hit.name },
                 if hit.desc.is_empty() { "" } else { &hit.desc },
             ).unwrap();
         }
@@ -277,7 +463,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     continue;
                 }
 
-                writeln!(out, ">> {}  {}", hit.name, hit.desc).unwrap();
+                writeln!(out, ">> {}  {}", if show_acc && !hit.acc.is_empty() { &hit.acc } else { &hit.name }, hit.desc).unwrap();
                 writeln!(out, "   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc").unwrap();
                 writeln!(out, " ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----").unwrap();
 
@@ -380,6 +566,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         if let Some(ref mut f) = domtblout_file {
             write_domtblout(f, &hmm.name, hmm.acc.as_deref(), &th, z, domz);
         }
+        if let Some(ref mut f) = pfamtblout_file {
+            write_pfamtblout(f, &hmm.name, hmm.acc.as_deref(), &th, z, domz);
+        }
+        if let Some(ref mut f) = ali_outfile {
+            write_ali_output(f, hmm, &th, domz, textw);
+        }
     }
 
     writeln!(out, "//").unwrap();
@@ -410,7 +602,7 @@ fn write_tblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &Top
 
         writeln!(
             f,
-            "{:<20}{:<11}{:<21}{:<11}{:9.2e} {:6.1} {:5.1} {:9.2e} {:6.1} {:5.1} {:5.1} {:3} {:3} {:3} {:3} {:3} {:3} {:3} {}",
+            "{:<19} {:<10} {:<20} {:<10} {:>9.2e} {:>6.1} {:>5.1} {:>9.2e} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
             hit.name,
             if hit.acc.is_empty() { "-" } else { &hit.acc },
             qname,
@@ -449,7 +641,7 @@ fn write_domtblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &
 
             writeln!(
                 f,
-                "{:<20}{:<11}{:>5} {:<21}{:<11}{:>5} {:9.2e} {:6.1} {:5.1} {:3} {:3} {:9.2e} {:9.2e} {:6.1} {:5.1} {:5} {:5} {:5} {:5} {:5} {:5} {:.2} {}",
+                "{:<19} {:<10} {:>5} {:<20} {:<10} {:>5} {:>9.2e} {:>6.1} {:>5.1} {:>3} {:>3} {:>9.2e} {:>9.2e} {:>6.1} {:>5.1} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:.2} {}",
                 hit.name,
                 if hit.acc.is_empty() { "-" } else { &hit.acc },
                 0, // target length (not tracked yet)
@@ -476,4 +668,46 @@ fn write_domtblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &
             ).unwrap();
         }
     }
+}
+
+/// Write Pfam-format tabular output (--pfamtblout).
+/// Two sections: sequence scores, then domain scores.
+fn write_pfamtblout(f: &mut std::fs::File, _qname: &str, _qacc: Option<&str>, th: &TopHits, z: f64, _domz: f64) {
+    use std::io::Write;
+    // Sequence scores section
+    for hit in &th.hits {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 { continue; }
+        let evalue = z * hit.lnp.exp();
+        let bias = hit.pre_score - hit.score;
+        writeln!(f, "{:<20} {:6.1} {:9.2e} {:3} {:5.1} {:5.1}    {}",
+            hit.name, hit.score, evalue, hit.ndom, hit.nexpected, bias,
+            if hit.desc.is_empty() { "-" } else { &hit.desc },
+        ).unwrap();
+    }
+}
+
+/// Write alignment output in Stockholm format (-A).
+fn write_ali_output(f: &mut std::fs::File, hmm: &hmmer_pure_rs::hmm::Hmm, th: &TopHits, _domz: f64, _textw: usize) {
+    use std::io::Write;
+    // Write a minimal Stockholm-format MSA of included hits
+    writeln!(f, "# STOCKHOLM 1.0").unwrap();
+    writeln!(f, "#=GF ID   {}", hmm.name).unwrap();
+    if let Some(ref acc) = hmm.acc {
+        writeln!(f, "#=GF AC   {}", acc).unwrap();
+    }
+    if let Some(ref desc) = hmm.desc {
+        writeln!(f, "#=GF DE   {}", desc).unwrap();
+    }
+
+    // Collect included domains and output their aligned sequences
+    for hit in &th.hits {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 { continue; }
+        for dom in &hit.dcl {
+            if !dom.is_included { continue; }
+            if let Some(ref ad) = dom.ad {
+                writeln!(f, "{:<30} {}", hit.name, ad.aseq).unwrap();
+            }
+        }
+    }
+    writeln!(f, "//").unwrap();
 }

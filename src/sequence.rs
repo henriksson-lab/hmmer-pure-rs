@@ -229,9 +229,15 @@ impl<R: Read> SeqFile<R> {
 }
 
 /// Open a FASTA file for reading with the given alphabet.
-pub fn open_seq_file(path: &std::path::Path, abc: &Alphabet) -> HmmerResult<SeqFile<std::fs::File>> {
+/// Automatically detects and decompresses `.gz` files.
+pub fn open_seq_file(path: &std::path::Path, abc: &Alphabet) -> HmmerResult<SeqFile<Box<dyn Read>>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-    Ok(SeqFile::new(file, abc.clone()))
+    let reader: Box<dyn Read> = if path.extension().map_or(false, |e| e == "gz") {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    Ok(SeqFile::new(reader, abc.clone()))
 }
 
 #[cfg(test)]
