@@ -340,7 +340,11 @@ pub fn alignment_display_with_pp(
 
                 // Model consensus
                 let cons_ch = if let Some(ref cons) = hmm.consensus {
-                    if k < cons.len() { cons[k] as char } else { 'x' }
+                    if k < cons.len() {
+                        cons[k] as char
+                    } else {
+                        'x'
+                    }
                 } else {
                     'x'
                 };
@@ -358,12 +362,15 @@ pub fn alignment_display_with_pp(
                 if cons_ch.to_ascii_uppercase() == seq_ch.to_ascii_uppercase() {
                     mline.push(seq_ch.to_ascii_uppercase());
                 } else {
-                    let sc = hmm.mat[k][dsq[i] as usize];
-                    let bg = crate::bg::AMINO_FREQUENCIES
-                        .get(dsq[i] as usize)
+                    let x = dsq[i] as usize;
+                    let sc = hmm
+                        .mat
+                        .get(k)
+                        .and_then(|row| row.get(x))
                         .copied()
-                        .unwrap_or(0.05);
-                    if sc > bg * 1.5 {
+                        .unwrap_or(0.0);
+                    let bg = crate::bg::AMINO_FREQUENCIES.get(x).copied().unwrap_or(0.05);
+                    if x < hmm.abc_k && sc > bg * 1.5 {
                         mline.push('+');
                     } else {
                         mline.push(' ');
@@ -371,7 +378,7 @@ pub fn alignment_display_with_pp(
                 }
                 // PP for match state
                 if let Some(pp_mx) = pp {
-                    let pp_val = pp_mx.mmx(i, k) + pp_mx.imx(i, k);
+                    let pp_val = pp_mx.mmx(i, k);
                     ppline.push(crate::dp::generic_optacc::pp_to_char(pp_val.min(1.0)));
                 } else {
                     ppline.push('*');
@@ -401,7 +408,11 @@ pub fn alignment_display_with_pp(
                 hmmto = k;
 
                 let cons_ch = if let Some(ref cons) = hmm.consensus {
-                    if k < cons.len() { cons[k] as char } else { 'x' }
+                    if k < cons.len() {
+                        cons[k] as char
+                    } else {
+                        'x'
+                    }
                 } else {
                     'x'
                 };
@@ -424,6 +435,60 @@ pub fn alignment_display_with_pp(
         sqfrom,
         sqto,
     })
+}
+
+/// Compute the same coordinate span as `alignment_display_with_pp` without
+/// constructing printable alignment strings.
+pub fn alignment_coords(tr: &Trace) -> Option<(usize, usize, usize, usize)> {
+    let mut z1 = None;
+    let mut z2 = None;
+    for z in 0..tr.n {
+        if tr.st[z] == State::M || tr.st[z] == State::D || tr.st[z] == State::I {
+            if z1.is_none() {
+                z1 = Some(z);
+            }
+            z2 = Some(z);
+        }
+    }
+
+    let z1 = z1?;
+    let z2 = z2?;
+    let mut hmmfrom = 0;
+    let mut hmmto = 0;
+    let mut sqfrom = 0;
+    let mut sqto = 0;
+
+    for z in z1..=z2 {
+        match tr.st[z] {
+            State::M => {
+                let k = tr.k[z];
+                let i = tr.i[z];
+                if hmmfrom == 0 {
+                    hmmfrom = k;
+                    sqfrom = i;
+                }
+                hmmto = k;
+                sqto = i;
+            }
+            State::I => {
+                let i = tr.i[z];
+                if sqto == 0 && sqfrom == 0 {
+                    sqfrom = i;
+                }
+                sqto = i;
+            }
+            State::D => {
+                let k = tr.k[z];
+                if hmmfrom == 0 {
+                    hmmfrom = k;
+                }
+                hmmto = k;
+            }
+            _ => {}
+        }
+    }
+
+    Some((hmmfrom, hmmto, sqfrom, sqto))
 }
 
 /// Alignment display data for one domain.

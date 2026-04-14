@@ -34,7 +34,7 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
     };
 
     let mut xn: i16 = om.base_w;
-    let mut xb: i16 = xn.saturating_add(om.xw[P7O_N][P7O_MOVE]);
+    let mut xb: i16 = add_i16(xn, om.xw[P7O_N][P7O_MOVE]);
     let mut xj: i16 = -32768;
     let mut xc: i16 = -32768;
 
@@ -111,13 +111,10 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
         }
 
         // Special states (scalar)
-        xn = xn.saturating_add(om.xw[P7O_N][P7O_LOOP]);
-        xc = (xc.saturating_add(om.xw[P7O_C][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_MOVE]));
-        xj = (xj.saturating_add(om.xw[P7O_J][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_LOOP]));
-        xb = (xj.saturating_add(om.xw[P7O_J][P7O_MOVE]))
-            .max(xn.saturating_add(om.xw[P7O_N][P7O_MOVE]));
+        xn = add_i16(xn, om.xw[P7O_N][P7O_LOOP]);
+        xc = add_i16(xc, om.xw[P7O_C][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_MOVE]));
+        xj = add_i16(xj, om.xw[P7O_J][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_LOOP]));
+        xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE]).max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
 
         // Lazy F loop: check if DD paths need evaluation
         let dmax = hmax_epi16(dmaxv);
@@ -184,6 +181,11 @@ unsafe fn hmax_epi16(a: __m128i) -> i16 {
 #[target_feature(enable = "sse2")]
 unsafe fn any_gt_epi16(a: __m128i, b: __m128i) -> bool {
     _mm_movemask_epi8(_mm_cmpgt_epi16(a, b)) != 0
+}
+
+#[inline(always)]
+fn add_i16(a: i16, b: i16) -> i16 {
+    (a as i32 + b as i32) as i16
 }
 
 #[cfg(test)]

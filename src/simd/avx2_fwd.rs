@@ -49,21 +49,23 @@ impl OProfileAvx2Fwd {
         let mut j = 0;
         for qi in 0..nq {
             let ki = qi + 1;
-            let specs: [(usize, usize); 7] = [
-                (crate::profile::P7P_BM, ki.wrapping_sub(1)),
-                (crate::profile::P7P_MM, ki.wrapping_sub(1)),
-                (crate::profile::P7P_IM, ki.wrapping_sub(1)),
-                (crate::profile::P7P_DM, ki.wrapping_sub(1)),
-                (crate::profile::P7P_MD, ki),
-                (crate::profile::P7P_MI, ki),
-                (crate::profile::P7P_II, ki),
+            let specs: [usize; 7] = [
+                ki.wrapping_sub(1),
+                ki.wrapping_sub(1),
+                ki.wrapping_sub(1),
+                ki.wrapping_sub(1),
+                ki,
+                ki,
+                ki,
             ];
-            for &(tg, kb) in &specs {
+            for (slot, &kb) in specs.iter().enumerate() {
                 let mut tmp = [0.0f32; 8];
                 for z in 0..8 {
                     let node = kb + z * nq;
                     if node < m {
-                        tmp[z] = om.tsc_at(node, tg).exp();
+                        let sse_q = node % nq_sse;
+                        let sse_z = node / nq_sse;
+                        tmp[z] = om.tfv[sse_q * 7 + slot][sse_z];
                     }
                 }
                 tfv[j] = tmp;
@@ -76,7 +78,9 @@ impl OProfileAvx2Fwd {
             for z in 0..8 {
                 let node = ki + z * nq;
                 if node < m {
-                    tmp[z] = om.tsc_at(node, crate::profile::P7P_DD).exp();
+                    let sse_q = node % nq_sse;
+                    let sse_z = node / nq_sse;
+                    tmp[z] = om.tfv[7 * nq_sse + sse_q][sse_z];
                 }
             }
             tfv[j] = tmp;
@@ -95,7 +99,7 @@ impl OProfileAvx2Fwd {
 
 /// AVX2 Forward parser.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx")]
+#[target_feature(enable = "avx2")]
 pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -> f32 {
     let q_count = nqf_avx2(om.m);
     let nscells = 3;
@@ -213,14 +217,60 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx")]
+#[target_feature(enable = "avx2")]
 unsafe fn rightshift_ps_avx2(v: __m256) -> __m256 {
-    // Cross-lane shift by 4 bytes (1 float)
-    let perm = _mm256_permute2f128_ps(v, v, 0x08); // lane0=zero, lane1=old_lane0
-    let shifted = _mm256_castsi256_ps(_mm256_alignr_epi8::<4>(
-        _mm256_castps_si256(v),
-        _mm256_castps_si256(perm),
-    ));
-    // Zero the first float
-    _mm256_blend_ps::<0x01>( shifted, _mm256_setzero_ps())
+    let idx = _mm256_set_epi32(6, 5, 4, 3, 2, 1, 0, 0);
+    let shifted = _mm256_permutevar8x32_ps(v, idx);
+    _mm256_blend_ps::<0x01>(shifted, _mm256_setzero_ps())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::Alphabet;
+    use crate::bg::Bg;
+    use crate::profile::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_avx2_rightshift() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        unsafe {
+            let v = _mm256_set_ps(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
+            let shifted = rightshift_ps_avx2(v);
+            let mut out = [0.0_f32; 8];
+            _mm256_storeu_ps(out.as_mut_ptr(), shifted);
+            assert_eq!(out, [0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        }
+    }
+
+    #[test]
+    fn test_avx2_forward_matches_sse() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let abc = Alphabet::new(hmm.abc_type);
+        let bg = Bg::new(&abc);
+        let mut gm = Profile::new(hmm.m, &abc);
+        profile_config(&hmm, &bg, &mut gm, 400, P7_LOCAL);
+        let om = OProfile::convert(&gm);
+        let avx_om = OProfileAvx2Fwd::from_oprofile(&om);
+        let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY");
+        let sse = unsafe { crate::simd::fwd_filter::forward_parser(&dsq, dsq.len() - 2, &om) };
+        let avx = unsafe { avx2_forward_parser(&dsq, dsq.len() - 2, &avx_om) };
+        assert!(
+            (sse - avx).abs() < 1.0e-3,
+            "SSE Forward {sse} and AVX2 Forward {avx} differ"
+        );
+    }
 }

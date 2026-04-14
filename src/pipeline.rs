@@ -32,27 +32,27 @@ pub enum BitCutoff {
 /// Pipeline configuration and state.
 pub struct Pipeline {
     // Thresholds
-    pub f1: f64,  // MSV filter threshold (default 0.02)
-    pub f2: f64,  // Viterbi filter threshold (default 1e-3)
-    pub f3: f64,  // Forward filter threshold (default 1e-5)
+    pub f1: f64, // MSV filter threshold (default 0.02)
+    pub f2: f64, // Viterbi filter threshold (default 1e-3)
+    pub f3: f64, // Forward filter threshold (default 1e-5)
 
     // Reporting thresholds (E-value based)
-    pub e_value_threshold: f64,      // per-sequence E-value (default 10.0)
-    pub dom_e_value_threshold: f64,  // per-domain E-value (default 10.0)
-    pub inc_e: f64,                  // inclusion E-value (default 0.01)
-    pub inc_dome: f64,               // domain inclusion E-value (default 0.01)
+    pub e_value_threshold: f64,     // per-sequence E-value (default 10.0)
+    pub dom_e_value_threshold: f64, // per-domain E-value (default 10.0)
+    pub inc_e: f64,                 // inclusion E-value (default 0.01)
+    pub inc_dome: f64,              // domain inclusion E-value (default 0.01)
 
     // Reporting thresholds (score based, set by -T/--domT/--incT/--incdomT or --cut_*)
-    pub t: Option<f32>,              // per-sequence score threshold
-    pub dom_t: Option<f32>,          // per-domain score threshold
-    pub inc_t: Option<f32>,          // inclusion score threshold
-    pub inc_dom_t: Option<f32>,      // domain inclusion score threshold
+    pub t: Option<f32>,         // per-sequence score threshold
+    pub dom_t: Option<f32>,     // per-domain score threshold
+    pub inc_t: Option<f32>,     // inclusion score threshold
+    pub inc_dom_t: Option<f32>, // domain inclusion score threshold
 
     // Whether to use E-value or score thresholds
-    pub by_e: bool,                  // report by E-value (default true)
-    pub dom_by_e: bool,              // report domains by E-value (default true)
-    pub inc_by_e: bool,              // include by E-value (default true)
-    pub incdom_by_e: bool,           // include domains by E-value (default true)
+    pub by_e: bool,        // report by E-value (default true)
+    pub dom_by_e: bool,    // report domains by E-value (default true)
+    pub inc_by_e: bool,    // include by E-value (default true)
+    pub incdom_by_e: bool, // include domains by E-value (default true)
 
     // Model-specific bit cutoffs
     pub use_bit_cutoffs: BitCutoff,
@@ -61,7 +61,9 @@ pub struct Pipeline {
     pub do_biasfilter: bool,
     pub do_null2: bool,
     pub do_max: bool, // if true, skip MSV/Viterbi filters
-    pub seed: u32,    // RNG seed for stochastic traceback (default 42, 0 = arbitrary)
+    pub do_alignment: bool,
+    pub do_alignment_display: bool,
+    pub seed: u32, // RNG seed for stochastic traceback (default 42, 0 = arbitrary)
 
     // Statistics
     pub n_past_msv: u64,
@@ -76,7 +78,6 @@ pub struct Pipeline {
 
     // E-value parameters (from HMM)
     pub evparam: [f32; 6],
-
 }
 
 impl Pipeline {
@@ -101,6 +102,8 @@ impl Pipeline {
             do_biasfilter: true,
             do_null2: true,
             do_max: false,
+            do_alignment: true,
+            do_alignment_display: true,
             seed: 42,
             n_past_msv: 0,
             n_past_bias: 0,
@@ -123,7 +126,10 @@ impl Pipeline {
     /// Apply model-specific bit-score cutoffs (--cut_ga, --cut_nc, --cut_tc).
     /// Called after new_model() when use_bit_cutoffs is set.
     /// Returns Err if the model doesn't have the requested cutoff annotation.
-    pub fn new_model_thresholds(&mut self, cutoffs: &[f32; crate::hmm::NCUTOFFS]) -> Result<(), String> {
+    pub fn new_model_thresholds(
+        &mut self,
+        cutoffs: &[f32; crate::hmm::NCUTOFFS],
+    ) -> Result<(), String> {
         use crate::hmm::*;
         match self.use_bit_cutoffs {
             BitCutoff::GA => {
@@ -271,12 +277,18 @@ impl Pipeline {
             self.n_past_vit += 1;
         }
 
-        // Stage 3: SIMD Forward parser (uses filtersc as baseline, matching C)
+        // Stage 3: full Forward parser.
         let fwd_sc;
+        #[cfg(target_arch = "x86_64")]
+        let mut fwd_pmx_for_domains = None;
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("sse2") {
-                fwd_sc = unsafe { crate::simd::fwd_filter::forward_parser(&sq.dsq, l, om) };
+                let mut fwd_pmx = crate::simd::probmx::ProbMx::new(l);
+                fwd_sc = unsafe {
+                    crate::simd::fwd_filter::forward_parser_pmx(&sq.dsq, l, om, &mut fwd_pmx)
+                };
+                fwd_pmx_for_domains = Some(fwd_pmx);
             } else {
                 let mut gx = crate::dp::gmx::Gmx::new(gm.m, l);
                 fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
@@ -295,28 +307,81 @@ impl Pipeline {
         self.n_past_fwd += 1;
 
         // Sequence passes all filters — run domain definition
-        let (domains, nexpected, _seq_bias_raw) =
-            crate::domaindef::define_domains(&sq.dsq, l, gm, hmm, bg, null_sc, self.seed);
+        let (mut domains, nexpected, seq_correction_sum, domain_stats) =
+            crate::domaindef::define_domains(
+                &sq.dsq,
+                l,
+                gm,
+                Some(om),
+                #[cfg(target_arch = "x86_64")]
+                fwd_pmx_for_domains.as_ref(),
+                #[cfg(not(target_arch = "x86_64"))]
+                None,
+                Some(fwd_sc),
+                hmm,
+                bg,
+                null_sc,
+                self.seed,
+                self.do_alignment,
+                self.do_alignment_display,
+            );
+        if domains.is_empty() {
+            return false;
+        }
 
         // Sequence-level scoring
-        // pre_score: raw Forward score in bits (before null2 correction)
-        // seq_score: after null2 correction, derived from sum of domain biases
-        // NOTE: C computes seq-level null2 from full posterior decoding (ddef->n2sc).
-        // Our estimate_bias_fast() is not equivalent, so we derive sequence bias
-        // from the domain-level null2 corrections (which ARE correctly computed
-        // via posterior decoding in score_domain_envelope).
-        let pre_score = (fwd_sc - null_sc) / std::f32::consts::LN_2;
-
-        // Sum domain-level null2 corrections for sequence-level bias
+        // Match C HMMER's two sequence scores:
+        // 1. the full-sequence Forward score corrected by summed n2sc[]
+        // 2. a reconstruction score from individually rescored domains
         let omega = 1.0_f32 / 256.0;
-        let dom_correction_sum: f32 = domains.iter().map(|d| d.domcorrection).sum();
-        let seqbias = if self.do_null2 && dom_correction_sum.abs() > 1e-7 {
-            crate::logsum::p7_flogsum(0.0, omega.ln() + dom_correction_sum)
+        let mut pre_score = (fwd_sc - null_sc) / std::f32::consts::LN_2;
+        let seqbias = if self.do_null2 {
+            crate::logsum::p7_flogsum(0.0, omega.ln() + seq_correction_sum)
         } else {
             0.0
         };
-        let seq_score = (fwd_sc - (null_sc + seqbias)) / std::f32::consts::LN_2;
+        let mut seq_score = (fwd_sc - (null_sc + seqbias)) / std::f32::consts::LN_2;
+
+        let mut sum_env = 0.0_f32;
+        let mut sum_correction = 0.0_f32;
+        let mut ld = 0usize;
+        for dom in &domains {
+            let use_domain = if self.do_null2 {
+                dom.envsc - dom.domcorrection > 0.0
+            } else {
+                dom.envsc > 0.0
+            };
+            if use_domain {
+                sum_env += dom.envsc;
+                sum_correction += dom.domcorrection;
+                ld += (dom.jenv - dom.ienv + 1) as usize;
+            }
+        }
+        let sum_score_nats = sum_env + (l - ld) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
+        let sum_bias = if self.do_null2 {
+            crate::logsum::p7_flogsum(0.0, omega.ln() + sum_correction)
+        } else {
+            0.0
+        };
+        let pre2_score = (sum_score_nats - null_sc) / std::f32::consts::LN_2;
+        let sum_score = (sum_score_nats - (null_sc + sum_bias)) / std::f32::consts::LN_2;
+        if ld > 0 && sum_score > seq_score {
+            seq_score = sum_score;
+            pre_score = pre2_score;
+        }
         let seq_bias_bits = (pre_score - seq_score).max(0.0);
+
+        if !self.do_null2 {
+            let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
+            let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
+            for dom in &mut domains {
+                let env_len = (dom.jenv - dom.ienv + 1) as usize;
+                let length_correction = (l - env_len) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
+                dom.dombias = 0.0;
+                dom.bitscore = (dom.envsc + length_correction - null_sc) / std::f32::consts::LN_2;
+                dom.lnp = crate::stats::exponential::surv(dom.bitscore as f64, tau, lambda).ln();
+            }
+        }
 
         // P-values
         let mu_f = self.evparam[crate::hmm::P7_FTAU] as f64;
@@ -328,15 +393,20 @@ impl Pipeline {
         hit.name = sq.name.clone();
         hit.acc = sq.acc.clone();
         hit.desc = sq.desc.clone();
+        hit.n = sq.n;
         hit.score = seq_score;
         hit.bias = seq_bias_bits;
         hit.pre_score = pre_score;
-        hit.sum_score = seq_score;
+        hit.sum_score = sum_score;
         hit.lnp = lnp;
         hit.pre_lnp = pre_lnp;
-        hit.sum_lnp = lnp;
+        hit.sum_lnp = stats::exponential::surv(sum_score as f64, mu_f, lam_f).ln();
         hit.sortkey = lnp;
         hit.nexpected = nexpected;
+        hit.nregions = domain_stats.nregions;
+        hit.nclustered = domain_stats.nclustered;
+        hit.noverlaps = domain_stats.noverlaps;
+        hit.nenvelopes = domain_stats.nenvelopes;
         hit.ndom = domains.len();
         hit.dcl = domains;
 

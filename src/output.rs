@@ -34,14 +34,20 @@ pub fn fmt_evalue(val: f64) -> String {
     } else {
         // Exponential notation
         // Format with 1 decimal place, then trim trailing zeros
-        let mantissa = val / 10.0_f64.powi(exp);
-        let exp_str = format!("e-{:02}", -exp);
-        if exp > 0 {
+        let mut exp = exp;
+        let mut mantissa = val / 10.0_f64.powi(exp);
+        mantissa = (mantissa * 10.0).round() / 10.0;
+        if mantissa.abs() >= 10.0 {
+            mantissa /= 10.0;
+            exp += 1;
+        }
+        if exp >= 0 {
             let exp_str = format!("e+{:02}", exp);
             let m = format!("{:.1}", mantissa);
             let m = m.trim_end_matches('0').trim_end_matches('.');
             format!("{:>9}", format!("{}{}", m, exp_str))
         } else {
+            let exp_str = format!("e-{:02}", -exp);
             let m = format!("{:.1}", mantissa);
             let m = m.trim_end_matches('0').trim_end_matches('.');
             format!("{:>9}", format!("{}{}", m, exp_str))
@@ -71,13 +77,13 @@ mod tests {
         assert_eq!(fmt_evalue(7.3e-15), "  7.3e-15");
         assert_eq!(fmt_evalue(0.015), "    0.015");
         assert_eq!(fmt_evalue(2.9e-14), "  2.9e-14");
-        assert_eq!(fmt_evalue(10.0), "       10");  // Fixed, no trailing .0
+        assert_eq!(fmt_evalue(10.0), "       10"); // Fixed, no trailing .0
         assert_eq!(fmt_evalue(0.5), "      0.5");
     }
 }
 
-use std::io::Write;
 use crate::tophits::{TopHits, P7_IS_REPORTED};
+use std::io::Write;
 
 /// Write per-sequence tabular output (--tblout format).
 pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
@@ -86,10 +92,20 @@ pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &T
     writeln!(f, "#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------").unwrap();
 
     for hit in &th.hits {
-        if hit.flags & P7_IS_REPORTED == 0 { continue; }
+        if hit.flags & P7_IS_REPORTED == 0 {
+            continue;
+        }
         let evalue = z * hit.lnp.exp();
-        let dom_evalue = if !hit.dcl.is_empty() { z * hit.dcl[0].lnp.exp() } else { evalue };
-        let dom_score = if !hit.dcl.is_empty() { hit.dcl[0].bitscore } else { hit.score };
+        let dom_evalue = if !hit.dcl.is_empty() {
+            z * hit.dcl[0].lnp.exp()
+        } else {
+            evalue
+        };
+        let dom_score = if !hit.dcl.is_empty() {
+            hit.dcl[0].bitscore
+        } else {
+            hit.score
+        };
         writeln!(f,
             "{:<19} {:<10} {:<20} {:<10} {:>9.2e} {:>6.1} {:>5.1} {:>9.2e} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
             hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc },
@@ -102,23 +118,37 @@ pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &T
 }
 
 /// Write per-domain tabular output (--domtblout format).
-pub fn write_domtblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64, domz: f64) {
+pub fn write_domtblout<W: Write>(
+    f: &mut W,
+    qname: &str,
+    qacc: Option<&str>,
+    th: &TopHits,
+    z: f64,
+    domz: f64,
+) {
     writeln!(f, "#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord").unwrap();
     writeln!(f, "# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target").unwrap();
     writeln!(f, "#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------").unwrap();
 
     for hit in &th.hits {
-        if hit.flags & P7_IS_REPORTED == 0 { continue; }
+        if hit.flags & P7_IS_REPORTED == 0 {
+            continue;
+        }
         let evalue = z * hit.lnp.exp();
         for (di, dom) in hit.dcl.iter().enumerate() {
-            let dom_evalue = domz * dom.lnp.exp();
+            if !dom.is_reported {
+                continue;
+            }
+            let c_evalue = domz * dom.lnp.exp();
+            let i_evalue = z * dom.lnp.exp();
+            let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
             writeln!(f,
                 "{:<19} {:<10} {:>5} {:<20} {:<10} {:>5} {:>9.2e} {:>6.1} {:>5.1} {:>3} {:>3} {:>9.2e} {:>9.2e} {:>6.1} {:>5.1} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:.2} {}",
-                hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc }, 0,
+                hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc }, hit.n,
                 qname, qacc.unwrap_or("-"), 0,
                 evalue, hit.score, hit.bias, di + 1, hit.ndom,
-                dom_evalue / z.max(1.0), dom_evalue, dom.bitscore, dom.dombias,
-                1, 0, dom.iali, dom.jali, dom.ienv, dom.jenv, 0.95_f32,
+                c_evalue, i_evalue, dom.bitscore, dom.dombias,
+                1, 0, dom.iali, dom.jali, dom.ienv, dom.jenv, acc,
                 if hit.desc.is_empty() { "-" } else { &hit.desc },
             ).unwrap();
         }

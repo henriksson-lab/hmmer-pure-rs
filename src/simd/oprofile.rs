@@ -166,15 +166,9 @@ impl OProfile {
         }
 
         // Transition costs
-        let tbm_b = unbiased_byteify(
-            scale_b,
-            (2.0_f32 / (m as f32 * (m as f32 + 1.0))).ln(),
-        );
+        let tbm_b = unbiased_byteify(scale_b, (2.0_f32 / (m as f32 * (m as f32 + 1.0))).ln());
         let tec_b = unbiased_byteify(scale_b, 0.5_f32.ln());
-        let tjb_b = unbiased_byteify(
-            scale_b,
-            (3.0_f32 / (gm.l as f32 + 3.0)).ln(),
-        );
+        let tjb_b = unbiased_byteify(scale_b, (3.0_f32 / (gm.l as f32 + 3.0)).ln());
 
         // === Viterbi word-precision conversion ===
         let scale_w = 500.0_f32 / std::f32::consts::LN_2;
@@ -209,13 +203,13 @@ impl OProfile {
             let ki = qi + 1;
             // 7 transitions: BM, MM, IM, DM, MD, MI, II
             let trans_specs: [(usize, usize, i16); 7] = [
-                (P7P_BM, ki.wrapping_sub(1), 0),  // BM: off-by-one, starts from k=0
-                (P7P_MM, ki.wrapping_sub(1), 0),  // MM: rotated by -1
-                (P7P_IM, ki.wrapping_sub(1), 0),  // IM: rotated by -1
-                (P7P_DM, ki.wrapping_sub(1), 0),  // DM: rotated by -1
-                (P7P_MD, ki, 0),                    // MD: straight
-                (P7P_MI, ki, 0),                    // MI: straight
-                (P7P_II, ki, -1),                   // II: maxval=-1 (prevent zero-cost II)
+                (P7P_BM, ki.wrapping_sub(1), 0), // BM: off-by-one, starts from k=0
+                (P7P_MM, ki.wrapping_sub(1), 0), // MM: rotated by -1
+                (P7P_IM, ki.wrapping_sub(1), 0), // IM: rotated by -1
+                (P7P_DM, ki.wrapping_sub(1), 0), // DM: rotated by -1
+                (P7P_MD, ki, 0),                 // MD: straight
+                (P7P_MI, ki, 0),                 // MI: straight
+                (P7P_II, ki, -1),                // II: maxval=-1 (prevent zero-cost II)
             ];
 
             for &(tg, kb, maxval) in &trans_specs {
@@ -385,10 +379,20 @@ impl OProfile {
     /// Reconfigure for a new target sequence length.
     pub fn reconfig_length(&mut self, l: i32) {
         self.l = l;
-        self.tjb_b = unbiased_byteify(
-            self.scale_b,
-            (3.0_f32 / (l as f32 + 3.0)).ln(),
-        );
+        let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
+        let ploop = 1.0 - pmove;
+
+        self.tjb_b = unbiased_byteify(self.scale_b, (3.0_f32 / (l as f32 + 3.0)).ln());
+        self.xw[P7O_N][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
+        self.xw[P7O_C][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
+        self.xw[P7O_J][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
+
+        self.xf[P7O_N][P7O_LOOP] = ploop;
+        self.xf[P7O_N][P7O_MOVE] = pmove;
+        self.xf[P7O_C][P7O_LOOP] = ploop;
+        self.xf[P7O_C][P7O_MOVE] = pmove;
+        self.xf[P7O_J][P7O_LOOP] = ploop;
+        self.xf[P7O_J][P7O_MOVE] = pmove;
     }
 
     /// Access a transition score from the underlying profile data.
@@ -401,7 +405,11 @@ impl OProfile {
         let z = (node) / nq;
         if z < 8 && q < self.twv.len() / 8 {
             // Map back: twv layout is [q*7+t] for t=0..6, then DD at 7*nq+q
-            let idx = if tsc_type == P7P_DD { 7 * nq + q } else { q * 7 + tsc_type };
+            let idx = if tsc_type == P7P_DD {
+                7 * nq + q
+            } else {
+                q * 7 + tsc_type
+            };
             if idx < self.twv.len() && z < 8 {
                 return self.twv[idx][z] as f32 / self.scale_w;
             }
@@ -413,9 +421,13 @@ impl OProfile {
 /// Public wordify for use by AVX2/NEON restriping.
 pub fn wordify_pub(scale_w: f32, sc: f32) -> i16 {
     let sc = (scale_w * sc).round();
-    if sc >= 32767.0 { 32767 }
-    else if sc <= -32768.0 { -32768 }
-    else { sc as i16 }
+    if sc >= 32767.0 {
+        32767
+    } else if sc <= -32768.0 {
+        -32768
+    } else {
+        sc as i16
+    }
 }
 
 #[cfg(test)]

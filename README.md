@@ -27,10 +27,11 @@ The SIMD-accelerated filter pipeline (MSV → bias → Viterbi → Forward) matc
 | Domain definition: Decoding | 7% | **No** | Posterior probabilities |
 | Null2 bias | 2% | No | Needs per-M-state posteriors |
 
+**Known deviation:** C HMMER computes sequence-level null2 bias from the full-sequence posterior decoding. This port derives it from the sum of per-domain null2 corrections, which is an approximation. Per-domain scores and biases match C; the sequence-level bias may differ for multi-domain hits.
+
 **Path to C-equivalent speed:**
-1. Port C's full-matrix SIMD Forward/Backward (`p7_Forward`/`p7_Backward` in `impl_sse/fwdback.c`) — stores all L rows instead of parser mode's single row. This eliminates the 64% generic DP bottleneck.
-2. Port C's SIMD posterior decoding (`p7_Decoding` in `impl_sse/decoding.c`) for null2 computation.
-3. Infrastructure is partially built: `forward_parser_with_specials` and `bck_decoding` exist but need per-row scale factor normalization matching C's `scaleproduct` logic.
+1. Port C's full-matrix SIMD Forward/Backward for per-envelope null2 (currently uses generic DP on each domain envelope).
+2. Port C's SIMD posterior decoding (`p7_Decoding` in `impl_sse/decoding.c`) to eliminate remaining generic DP.
 
 ## Features
 

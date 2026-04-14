@@ -77,6 +77,27 @@ impl Gmx {
         self.l = 0;
     }
 
+    /// Grow matrix storage for callers that overwrite all active cells before reading.
+    pub fn grow_to_zeroed(&mut self, m: usize, l: usize) {
+        let new_w = m + 1;
+        let new_r = l + 1;
+
+        if new_w > self.alloc_w || new_r > self.alloc_r {
+            self.alloc_w = new_w.max(self.alloc_w);
+            self.alloc_r = new_r.max(self.alloc_r);
+
+            self.dp_mem = vec![0.0; self.alloc_r * self.alloc_w * P7G_NSCELLS];
+            self.xmx = vec![0.0; self.alloc_r * P7G_NXCELLS];
+
+            self.row_offsets.resize(self.alloc_r, 0);
+            for i in 0..self.alloc_r {
+                self.row_offsets[i] = i * self.alloc_w * P7G_NSCELLS;
+            }
+        }
+        self.m = 0;
+        self.l = 0;
+    }
+
     /// Access MMX(i,k) - Match state score at position i, node k
     #[inline]
     pub fn mmx(&self, i: usize, k: usize) -> f32 {
@@ -132,5 +153,10 @@ impl Gmx {
     pub fn reuse(&mut self) {
         self.m = 0;
         self.l = 0;
+    }
+
+    #[inline]
+    pub fn row_width(&self) -> usize {
+        self.alloc_w
     }
 }
