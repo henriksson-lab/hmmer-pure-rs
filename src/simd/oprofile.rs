@@ -38,6 +38,55 @@ pub const P7O_MOVE: usize = 0;
 pub const P7O_LOOP: usize = 1;
 pub const P7O_NXTRANS: usize = 2;
 
+#[cfg(feature = "tracehash")]
+fn trace_oprofile_fwd_vectors(om: &OProfile) {
+    for x in 0..om.abc_kp {
+        for (q, lanes) in om.rfv[x].iter().enumerate() {
+            let mut th = tracehash::th_call!("oprofile_rfv_bits");
+            th.input_usize(om.m);
+            th.input_usize(om.abc_kp);
+            th.input_usize(x);
+            th.input_usize(q);
+            for lane in lanes {
+                th.output_u64(lane.to_bits() as u64);
+            }
+            th.finish();
+        }
+    }
+
+    for (idx, lanes) in om.tfv.iter().enumerate() {
+        let mut th = tracehash::th_call!("oprofile_tfv_bits");
+        th.input_usize(om.m);
+        th.input_usize(idx);
+        for lane in lanes {
+            th.output_u64(lane.to_bits() as u64);
+        }
+        th.finish();
+    }
+
+    for state in 0..P7O_NXSTATES {
+        for trans in 0..P7O_NXTRANS {
+            let mut th = tracehash::th_call!("oprofile_xf_bits");
+            th.input_usize(om.m);
+            th.input_usize(state);
+            th.input_usize(trans);
+            th.output_u64(om.xf[state][trans].to_bits() as u64);
+            th.finish();
+        }
+    }
+}
+
+#[cfg(feature = "tracehash")]
+fn trace_oprofile_tfv_source(m: usize, idx: usize, lanes: &[f32; 4]) {
+    let mut th = tracehash::th_call!("oprofile_tfv_source_bits");
+    th.input_usize(m);
+    th.input_usize(idx);
+    for lane in lanes {
+        th.output_u64(lane.to_bits() as u64);
+    }
+    th.finish();
+}
+
 /// Optimized profile for SSE2 SIMD operations.
 #[derive(Debug, Clone)]
 pub struct OProfile {
@@ -453,10 +502,14 @@ impl OProfile {
                 }
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #[cfg(feature = "tracehash")]
+                    trace_oprofile_tfv_source(m, j, &tmp);
                     tfv[j] = unsafe { esl_sse_expf4(tmp) };
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
+                    #[cfg(feature = "tracehash")]
+                    trace_oprofile_tfv_source(m, j, &tmp);
                     tfv[j] = esl_sse_expf4(tmp);
                 }
                 j += 1;
@@ -476,10 +529,14 @@ impl OProfile {
             }
             #[cfg(target_arch = "x86_64")]
             {
+                #[cfg(feature = "tracehash")]
+                trace_oprofile_tfv_source(m, j, &tmp);
                 tfv[j] = unsafe { esl_sse_expf4(tmp) };
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
+                #[cfg(feature = "tracehash")]
+                trace_oprofile_tfv_source(m, j, &tmp);
                 tfv[j] = esl_sse_expf4(tmp);
             }
             j += 1;
@@ -496,7 +553,7 @@ impl OProfile {
         xf[P7O_J][P7O_LOOP] = gm.xsc[P7P_J][P7P_LOOP].exp();
         xf[P7O_J][P7O_MOVE] = gm.xsc[P7P_J][P7P_MOVE].exp();
 
-        OProfile {
+        let om = OProfile {
             rbv,
             tbm_b,
             tec_b,
@@ -524,7 +581,12 @@ impl OProfile {
             name: gm.name.clone(),
             abc_k: k,
             abc_kp: kp,
-        }
+        };
+
+        #[cfg(feature = "tracehash")]
+        trace_oprofile_fwd_vectors(&om);
+
+        om
     }
 
     /// Reconfigure for a new target sequence length.

@@ -441,11 +441,11 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     if row_scale_l > 1.0 {
         let inv = 1.0 / row_scale_l;
         let scalev = _mm_set1_ps(inv);
-        x_e *= inv;
-        x_n *= inv;
-        x_j *= inv;
-        x_b *= inv;
-        x_c *= inv;
+        x_e /= row_scale_l;
+        x_n /= row_scale_l;
+        x_j /= row_scale_l;
+        x_b /= row_scale_l;
+        x_c /= row_scale_l;
         for v in dpp_buf.iter_mut() {
             *v = _mm_mul_ps(*v, scalev);
         }
@@ -629,10 +629,10 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         if row_scale > 1.0 {
             let inv_xb = 1.0 / row_scale;
             let scalev = _mm_set1_ps(inv_xb);
-            x_e *= inv_xb;
-            x_n *= inv_xb;
-            x_j *= inv_xb;
-            x_c *= inv_xb;
+            x_e /= row_scale;
+            x_n /= row_scale;
+            x_j /= row_scale;
+            x_c /= row_scale;
             for qi in 0..row_len {
                 let p = dpc.add(qi);
                 *p = _mm_mul_ps(*p, scalev);
@@ -641,7 +641,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
             if has_own_scales {
                 x_b = 1.0;
             } else {
-                x_b *= inv_xb;
+                x_b /= row_scale;
             }
         }
 
@@ -872,11 +872,11 @@ unsafe fn backward_parser_pmx_offset_direct(
     if row_scale_l > 1.0 {
         let inv = 1.0 / row_scale_l;
         let scalev = _mm_set1_ps(inv);
-        x_e *= inv;
-        x_n *= inv;
-        x_j *= inv;
-        x_b *= inv;
-        x_c *= inv;
+        x_e /= row_scale_l;
+        x_n /= row_scale_l;
+        x_j /= row_scale_l;
+        x_b /= row_scale_l;
+        x_c /= row_scale_l;
         let row_l = striped_ptr.add(l * row_width);
         let mut off = 0;
         while off < row_width {
@@ -999,10 +999,10 @@ unsafe fn backward_parser_pmx_offset_direct(
         if row_scale > 1.0 {
             let inv_xb = 1.0 / row_scale;
             let scalev = _mm_set1_ps(inv_xb);
-            x_e *= inv_xb;
-            x_n *= inv_xb;
-            x_j *= inv_xb;
-            x_c *= inv_xb;
+            x_e /= row_scale;
+            x_n /= row_scale;
+            x_j /= row_scale;
+            x_c /= row_scale;
             let mut off = 0;
             while off < row_width {
                 let p = dpc.add(off);
@@ -1013,7 +1013,7 @@ unsafe fn backward_parser_pmx_offset_direct(
             if has_own_scales {
                 x_b = 1.0;
             } else {
-                x_b *= inv_xb;
+                x_b /= row_scale;
             }
         }
 

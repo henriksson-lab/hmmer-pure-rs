@@ -23,6 +23,15 @@ const RT2: f32 = 0.10; // mocc threshold to end a domain region
 const RT3: f32 = 0.20; // threshold for multi-domain region detection
 const NSAMPLES: usize = 200; // stochastic tracebacks for clustering
 
+#[inline(always)]
+fn c_fsum(values: &[f32]) -> f32 {
+    let mut sum = 0.0_f32;
+    for &value in values {
+        sum += value;
+    }
+    sum
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DomainDefinitionStats {
     pub nregions: usize,
@@ -1455,6 +1464,7 @@ fn trace_pmx_backward_row_parts_q1e5(
 
 fn add_null2_correction(
     null2_arr: &[f32],
+    abc: &Alphabet,
     dsq: &[Dsq],
     ienv: usize,
     jenv: usize,
@@ -1467,16 +1477,32 @@ fn add_null2_correction(
     }
     for pos in ienv..=jenv {
         let x = dsq[pos] as usize;
-        let sc = if x < null2_arr.len() {
-            log_null2[x]
-        } else {
-            0.0
-        };
+        let sc = null2_odds_for_code(null2_arr, &log_null2, abc, x);
         if let Some(ref mut n2sc) = n2sc {
             n2sc[pos] = sc;
         }
         *dom_correction += sc;
     }
+}
+
+fn null2_odds_for_code(null2_arr: &[f32], log_null2: &[f32; 256], abc: &Alphabet, x: usize) -> f32 {
+    if x < null2_arr.len() {
+        return log_null2[x];
+    }
+    if x >= abc.kp || x == abc.k || x >= abc.kp.saturating_sub(2) {
+        return 0.0;
+    }
+    let n = abc.ndegen[x];
+    if n == 0 {
+        return 0.0;
+    }
+    let mut odds = 0.0_f32;
+    for a in 0..abc.k {
+        if abc.degen[x][a] {
+            odds += null2_arr[a];
+        }
+    }
+    (odds / n as f32).ln()
 }
 
 /// Score a domain envelope: Forward for score, Viterbi for traceback,
@@ -1549,9 +1575,8 @@ fn score_domain_envelope(
             if make_alignment || !null2_is_done {
                 use crate::simd::oprofile::{P7O_C, P7O_J, P7O_LOOP, P7O_N};
                 use crate::simd::probmx::{
-                    match_odds_from_rsc, p_decoding_to_gmx,
-                    p_null2_odds_from_omx_expectation_reuse, p_null2_odds_from_pmx,
-                    p_null2_odds_from_pmx_reuse, ProbMx,
+                    match_odds_from_rsc, p_decoding_to_gmx, p_null2_odds_from_gmx_reuse,
+                    p_null2_odds_from_omx_expectation_reuse, ProbMx,
                 };
 
                 if let Some(ref mut scratch) = simd_scratch {
@@ -1607,7 +1632,24 @@ fn score_domain_envelope(
                         );
                     }
                     if !null2_is_done {
+                        let local_match_odds;
+                        let match_odds = if let Some(match_odds) = match_odds {
+                            match_odds
+                        } else {
+                            local_match_odds = match_odds_from_rsc(&gm.rsc, gm.abc_k, gm.m);
+                            &local_match_odds
+                        };
                         if make_alignment {
+                            p_null2_odds_from_gmx_reuse(
+                                unsafe { &*env_pp_ptr },
+                                gm.m,
+                                gm.abc_k,
+                                match_odds,
+                                &mut scratch.null2,
+                                &mut scratch.exp_m,
+                                &mut scratch.exp_i,
+                            );
+                        } else {
                             p_null2_odds_from_omx_expectation_reuse(
                                 &scratch.fwd_pmx,
                                 &scratch.bck_pmx,
@@ -1618,28 +1660,8 @@ fn score_domain_envelope(
                                 &mut scratch.exp_m,
                                 &mut scratch.exp_i,
                             );
-                            simd_null2_scratch = Some(&scratch.null2);
-                        } else {
-                            let local_match_odds;
-                            let match_odds = if let Some(match_odds) = match_odds {
-                                match_odds
-                            } else {
-                                local_match_odds = match_odds_from_rsc(&gm.rsc, gm.abc_k, gm.m);
-                                &local_match_odds
-                            };
-                            p_null2_odds_from_pmx_reuse(
-                                &scratch.fwd_pmx,
-                                &scratch.bck_pmx,
-                                gm.m,
-                                gm.abc_k,
-                                match_odds,
-                                njc_loop,
-                                &mut scratch.null2,
-                                &mut scratch.exp_m,
-                                &mut scratch.exp_i,
-                            );
-                            simd_null2_scratch = Some(&scratch.null2);
                         }
+                        simd_null2_scratch = Some(&scratch.null2);
                     }
                 } else {
                     let mut fwd_pmx = ProbMx::new_full(gm.m, env_len);
@@ -1694,10 +1716,20 @@ fn score_domain_envelope(
                             local_match_odds = match_odds_from_rsc(&gm.rsc, gm.abc_k, gm.m);
                             &local_match_odds
                         };
-                        simd_null2_arr = Some(if make_alignment {
-                            let mut null2 = Vec::new();
-                            let mut exp_m = Vec::new();
-                            let mut exp_i = Vec::new();
+                        let mut null2 = Vec::new();
+                        let mut exp_m = Vec::new();
+                        let mut exp_i = Vec::new();
+                        if make_alignment {
+                            p_null2_odds_from_gmx_reuse(
+                                unsafe { &*env_pp_ptr },
+                                gm.m,
+                                gm.abc_k,
+                                match_odds,
+                                &mut null2,
+                                &mut exp_m,
+                                &mut exp_i,
+                            );
+                        } else {
                             p_null2_odds_from_omx_expectation_reuse(
                                 &fwd_pmx,
                                 &bck_pmx,
@@ -1708,12 +1740,8 @@ fn score_domain_envelope(
                                 &mut exp_m,
                                 &mut exp_i,
                             );
-                            null2
-                        } else {
-                            p_null2_odds_from_pmx(
-                                &fwd_pmx, &bck_pmx, gm.m, gm.abc_k, match_odds, njc_loop,
-                            )
-                        });
+                        }
+                        simd_null2_arr = Some(null2);
                     }
                 }
             } else {
@@ -1760,9 +1788,11 @@ fn score_domain_envelope(
             }
         }
     } else {
+        let abc = Alphabet::new(hmm.abc_type);
         if let Some(null2_arr) = simd_null2_scratch {
             add_null2_correction(
                 null2_arr,
+                &abc,
                 dsq,
                 ienv,
                 jenv,
@@ -1775,6 +1805,7 @@ fn score_domain_envelope(
             });
             add_null2_correction(
                 &null2_arr,
+                &abc,
                 dsq,
                 ienv,
                 jenv,
@@ -2143,7 +2174,7 @@ pub fn define_domains(
                 om.xf[P7O_J][P7O_LOOP],
                 om.xf[P7O_C][P7O_LOOP],
             ];
-            let r = p_domain_decoding(fwd_pmx_ref, &bck_pmx, l, njc_loop);
+            let r = p_domain_decoding(fwd_pmx_ref, &bck_pmx, gm.m, l, njc_loop);
             btot = r.0;
             etot = r.1;
             mocc = r.2;
@@ -2224,7 +2255,7 @@ pub fn define_domains(
                 make_alignment_display,
             );
             stats.nenvelopes += 1;
-            let seq_bias = n2sc.iter().sum();
+            let seq_bias = c_fsum(&n2sc);
             #[cfg(feature = "tracehash")]
             trace_define_domains_summary(l, gm.m, 1, nexpected, seq_bias, stats);
             return (vec![dom], nexpected, seq_bias, stats);
@@ -2272,15 +2303,7 @@ pub fn define_domains(
                         );
                     }
                     #[cfg(feature = "tracehash")]
-                    trace_region_forward_summary(
-                        dsq,
-                        l,
-                        gm.m,
-                        ri,
-                        rj,
-                        &region_om,
-                        &region_pmx,
-                    );
+                    trace_region_forward_summary(dsq, l, gm.m, ri, rj, &region_om, &region_pmx);
                     Some((region_om, region_pmx))
                 } else {
                     None
@@ -2299,10 +2322,7 @@ pub fn define_domains(
                 #[cfg(target_arch = "x86_64")]
                 let tr = if let Some((ref region_om, ref region_pmx)) = region_trace_pmx {
                     crate::dp::generic_stotrace::stochastic_trace_pmx(
-                        &mut rng,
-                        region_len,
-                        region_om,
-                        region_pmx,
+                        &mut rng, region_len, region_om, region_pmx,
                     )
                 } else {
                     g_stochastic_trace(&mut rng, &sub_dsq, region_len, &region_gm, &region_fwd)
@@ -2357,7 +2377,16 @@ pub fn define_domains(
                 for (_domain_idx, &(sqfrom, sqto, tfrom, tto)) in trace_domains.iter().enumerate() {
                     #[cfg(feature = "tracehash")]
                     trace_region_null2_segment(
-                        gm.m, ri, rj, trace_idx, _domain_idx, sqfrom, sqto, tfrom, tto, &tr,
+                        gm.m,
+                        ri,
+                        rj,
+                        trace_idx,
+                        _domain_idx,
+                        sqfrom,
+                        sqto,
+                        tfrom,
+                        tto,
+                        &tr,
                     );
                     #[cfg(target_arch = "x86_64")]
                     let null2 = if let Some((ref region_om, _)) = region_trace_pmx {
@@ -2484,7 +2513,7 @@ pub fn define_domains(
     // Sort domains by envelope start position
     domains.sort_by_key(|d| d.ienv);
 
-    let seq_bias = n2sc.iter().sum();
+    let seq_bias = c_fsum(&n2sc);
     #[cfg(feature = "tracehash")]
     trace_define_domains_summary(l, gm.m, domains.len(), nexpected, seq_bias, stats);
     (domains, nexpected, seq_bias, stats)

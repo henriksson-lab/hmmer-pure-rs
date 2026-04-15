@@ -5,6 +5,34 @@ use crate::alphabet::Alphabet;
 use crate::bg::Bg;
 use crate::hmm::*;
 
+#[link(name = "m")]
+unsafe extern "C" {
+    #[link_name = "log"]
+    fn c_log(x: f64) -> f64;
+}
+
+#[inline]
+fn c_log_to_f32(x: f64) -> f32 {
+    unsafe { c_log(x) as f32 }
+}
+
+#[inline]
+fn c_log_f32_to_f32(x: f32) -> f32 {
+    c_log_to_f32(x as f64)
+}
+
+#[cfg(feature = "tracehash")]
+fn trace_profile_entry_source(m: usize, k: usize, occ: f32, z: f32, ratio: f32, score: f32) {
+    let mut th = tracehash::th_call!("profile_entry_source_bits");
+    th.input_usize(m);
+    th.input_usize(k);
+    th.output_u64(occ.to_bits() as u64);
+    th.output_u64(z.to_bits() as u64);
+    th.output_u64(ratio.to_bits() as u64);
+    th.output_u64(score.to_bits() as u64);
+    th.finish();
+}
+
 // Profile transition indices (different ordering from HMM transitions)
 pub const P7P_MM: usize = 0;
 pub const P7P_IM: usize = 1;
@@ -52,9 +80,9 @@ pub struct Profile {
     pub xsc: [[f32; P7P_NXTRANS]; P7P_NXSTATES],
 
     pub mode: i32,
-    pub l: i32,      // configured target length
-    pub m: usize,    // model length (nodes)
-    pub nj: f32,     // expected # J uses
+    pub l: i32,   // configured target length
+    pub m: usize, // model length (nodes)
+    pub nj: f32,  // expected # J uses
 
     // Annotation (copied from HMM)
     pub name: String,
@@ -150,8 +178,10 @@ pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
     mocc[0] = 0.0;
     mocc[1] = hmm.t[0][MI] + hmm.t[0][MM]; // 1 - B->D_1
     for k in 2..=hmm.m {
-        mocc[k] = mocc[k - 1] * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI])
-            + (1.0 - mocc[k - 1]) * hmm.t[k - 1][DM];
+        let prev = mocc[k - 1];
+        let match_or_insert = prev * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI]);
+        let delete_entry = (1.0_f64 - prev as f64) * hmm.t[k - 1][DM] as f64;
+        mocc[k] = (match_or_insert as f64 + delete_entry) as f32;
     }
     mocc
 }
@@ -219,26 +249,35 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
     if gm.is_local() {
         // Local mode: occ[k] / sum(occ[i] * (M-i+1))
         let occ = hmm_calculate_occupancy(hmm);
-        let z: f32 = (1..=hmm.m)
-            .map(|k| occ[k] * (hmm.m - k + 1) as f32)
-            .sum();
+        let mut z = 0.0_f32;
         for k in 1..=hmm.m {
-            gm.set_tsc(k - 1, P7P_BM, ((occ[k] / z) as f64).ln() as f32);
+            z += occ[k] * (hmm.m - k + 1) as f32;
+        }
+        for k in 1..=hmm.m {
+            let ratio = occ[k] / z;
+            let score = c_log_f32_to_f32(ratio);
+            #[cfg(feature = "tracehash")]
+            trace_profile_entry_source(hmm.m, k, occ[k], z, ratio, score);
+            gm.set_tsc(k - 1, P7P_BM, score);
         }
     } else {
         // Glocal mode: left wing retraction
-        let mut z = (hmm.t[0][MD] as f64).ln();
-        gm.set_tsc(0, P7P_BM, ((1.0 - hmm.t[0][MD]) as f64).ln() as f32);
+        let mut z = c_log_f32_to_f32(hmm.t[0][MD]);
+        gm.set_tsc(0, P7P_BM, c_log_to_f32(1.0 - hmm.t[0][MD] as f64));
         for k in 1..hmm.m {
-            gm.set_tsc(k, P7P_BM, (z + (hmm.t[k][DM] as f64).ln()) as f32);
-            z += (hmm.t[k][DD] as f64).ln();
+            gm.set_tsc(
+                k,
+                P7P_BM,
+                (z as f64 + unsafe { c_log(hmm.t[k][DM] as f64) }) as f32,
+            );
+            z = (z as f64 + unsafe { c_log(hmm.t[k][DD] as f64) }) as f32;
         }
     }
 
     // E state transitions
     if gm.is_multihit() {
-        gm.xsc[P7P_E][P7P_MOVE] = -(2.0_f32.ln()); // -log(2)
-        gm.xsc[P7P_E][P7P_LOOP] = -(2.0_f32.ln());
+        gm.xsc[P7P_E][P7P_MOVE] = -(std::f64::consts::LN_2 as f32); // -log(2)
+        gm.xsc[P7P_E][P7P_LOOP] = -(std::f64::consts::LN_2 as f32);
         gm.nj = 1.0;
     } else {
         gm.xsc[P7P_E][P7P_MOVE] = 0.0;
@@ -248,25 +287,25 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
 
     // Transition scores (nodes 1..M-1) — use f64 log to match C's log()
     for k in 1..gm.m {
-        gm.set_tsc(k, P7P_MM, (hmm.t[k][MM] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_MI, (hmm.t[k][MI] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_MD, (hmm.t[k][MD] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_IM, (hmm.t[k][IM] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_II, (hmm.t[k][II] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_DM, (hmm.t[k][DM] as f64).ln() as f32);
-        gm.set_tsc(k, P7P_DD, (hmm.t[k][DD] as f64).ln() as f32);
+        gm.set_tsc(k, P7P_MM, c_log_f32_to_f32(hmm.t[k][MM]));
+        gm.set_tsc(k, P7P_MI, c_log_f32_to_f32(hmm.t[k][MI]));
+        gm.set_tsc(k, P7P_MD, c_log_f32_to_f32(hmm.t[k][MD]));
+        gm.set_tsc(k, P7P_IM, c_log_f32_to_f32(hmm.t[k][IM]));
+        gm.set_tsc(k, P7P_II, c_log_f32_to_f32(hmm.t[k][II]));
+        gm.set_tsc(k, P7P_DM, c_log_f32_to_f32(hmm.t[k][DM]));
+        gm.set_tsc(k, P7P_DD, c_log_f32_to_f32(hmm.t[k][DD]));
     }
 
     // Match emission scores
     let mut sc = vec![0.0_f32; abc.kp];
-    sc[abc.k] = f32::NEG_INFINITY;     // gap
+    sc[abc.k] = f32::NEG_INFINITY; // gap
     sc[abc.kp - 2] = f32::NEG_INFINITY; // nonresidue
     sc[abc.kp - 1] = f32::NEG_INFINITY; // missing data
 
     for k in 1..=hmm.m {
         for x in 0..abc.k {
             // Match C: log((double)mat[k][x] / bg->f[x]) — double precision division + log
-            sc[x] = ((hmm.mat[k][x] as f64) / (bg.f[x] as f64)).ln() as f32;
+            sc[x] = c_log_to_f32((hmm.mat[k][x] as f64) / (bg.f[x] as f64));
         }
         f_expect_sc_vec(&abc, &mut sc, &bg.f);
 
@@ -298,19 +337,19 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
 pub fn reconfig_length(gm: &mut Profile, l: i32) {
     let pmove = (2.0 + gm.nj) / (l as f32 + 2.0 + gm.nj);
     let ploop = 1.0 - pmove;
-    gm.xsc[P7P_N][P7P_LOOP] = ploop.ln();
-    gm.xsc[P7P_C][P7P_LOOP] = ploop.ln();
-    gm.xsc[P7P_J][P7P_LOOP] = ploop.ln();
-    gm.xsc[P7P_N][P7P_MOVE] = pmove.ln();
-    gm.xsc[P7P_C][P7P_MOVE] = pmove.ln();
-    gm.xsc[P7P_J][P7P_MOVE] = pmove.ln();
+    gm.xsc[P7P_N][P7P_LOOP] = c_log_f32_to_f32(ploop);
+    gm.xsc[P7P_C][P7P_LOOP] = c_log_f32_to_f32(ploop);
+    gm.xsc[P7P_J][P7P_LOOP] = c_log_f32_to_f32(ploop);
+    gm.xsc[P7P_N][P7P_MOVE] = c_log_f32_to_f32(pmove);
+    gm.xsc[P7P_C][P7P_MOVE] = c_log_f32_to_f32(pmove);
+    gm.xsc[P7P_J][P7P_MOVE] = c_log_f32_to_f32(pmove);
     gm.l = l;
 }
 
 /// Reconfigure into multihit mode for target length L.
 pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
-    gm.xsc[P7P_E][P7P_MOVE] = -(2.0_f32.ln());
-    gm.xsc[P7P_E][P7P_LOOP] = -(2.0_f32.ln());
+    gm.xsc[P7P_E][P7P_MOVE] = -(std::f64::consts::LN_2 as f32);
+    gm.xsc[P7P_E][P7P_LOOP] = -(std::f64::consts::LN_2 as f32);
     gm.nj = 1.0;
     reconfig_length(gm, l);
 }

@@ -293,33 +293,90 @@ impl ProbMx {
 pub fn p_domain_decoding(
     fwd: &ProbMx,
     bck: &ProbMx,
+    m: usize,
     l: usize,
     njc_loop: [f32; 3],
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    #[cfg(not(feature = "tracehash"))]
+    let _ = m;
     let n_loop = njc_loop[0];
     let j_loop = njc_loop[1];
     let c_loop = njc_loop[2];
 
     let bck_n0 = bck.xmx(0, PXN);
-    let mut scaleproduct = if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 };
+    let mut scaleproduct = if bck_n0 > 0.0 {
+        (1.0_f64 / bck_n0 as f64) as f32
+    } else {
+        0.0
+    };
 
     let mut btot = vec![0.0_f32; l + 1];
     let mut etot = vec![0.0_f32; l + 1];
     let mut mocc = vec![0.0_f32; l + 1];
 
     for i in 1..=l {
-        let b = fwd.xmx(i - 1, PXB) * bck.xmx(i - 1, PXB) * fwd.row_scale[i - 1] * scaleproduct;
-        btot[i] = btot[i - 1] + b;
+        #[cfg(feature = "tracehash")]
+        let scale_before = scaleproduct;
+        btot[i] = btot[i - 1];
+        let mut b = fwd.xmx(i - 1, PXB);
+        b *= bck.xmx(i - 1, PXB);
+        b *= fwd.row_scale[i - 1];
+        b *= scaleproduct;
+        btot[i] += b;
 
-        scaleproduct *= fwd.row_scale[i - 1] / bck.row_scale[i - 1];
+        if bck.has_own_scales {
+            scaleproduct *= fwd.row_scale[i - 1] / bck.row_scale[i - 1];
+        }
+        #[cfg(feature = "tracehash")]
+        let scale_after = scaleproduct;
 
-        let e = fwd.xmx(i, PXE) * bck.xmx(i, PXE) * fwd.row_scale[i] * scaleproduct;
-        etot[i] = etot[i - 1] + e;
+        etot[i] = etot[i - 1];
+        let mut e = fwd.xmx(i, PXE);
+        e *= bck.xmx(i, PXE);
+        e *= fwd.row_scale[i];
+        e *= scaleproduct;
+        etot[i] += e;
 
-        let pn = fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * n_loop * scaleproduct;
-        let pj = fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * j_loop * scaleproduct;
-        let pc = fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * c_loop * scaleproduct;
-        mocc[i] = 1.0 - pn - pj - pc;
+        let mut njcp = fwd.xmx(i - 1, PXN);
+        njcp *= bck.xmx(i, PXN);
+        njcp *= n_loop;
+        njcp *= scaleproduct;
+
+        let mut term = fwd.xmx(i - 1, PXJ);
+        term *= bck.xmx(i, PXJ);
+        term *= j_loop;
+        term *= scaleproduct;
+        njcp += term;
+
+        term = fwd.xmx(i - 1, PXC);
+        term *= bck.xmx(i, PXC);
+        term *= c_loop;
+        term *= scaleproduct;
+        njcp += term;
+        mocc[i] = (1.0_f64 - njcp as f64) as f32;
+
+        #[cfg(feature = "tracehash")]
+        if i <= 8 || i == l {
+            let mut th = tracehash::th_call!("domain_decoding_step_bits");
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_usize(i);
+            th.output_f32(fwd.xmx(i - 1, PXB));
+            th.output_f32(bck.xmx(i - 1, PXB));
+            th.output_f32(fwd.row_scale[i - 1]);
+            th.output_f32(scale_before);
+            th.output_f32(b);
+            th.output_f32(btot[i]);
+            th.output_f32(scale_after);
+            th.output_f32(fwd.xmx(i, PXE));
+            th.output_f32(bck.xmx(i, PXE));
+            th.output_f32(fwd.row_scale[i]);
+            th.output_f32(e);
+            th.output_f32(etot[i]);
+            th.output_f32(njcp);
+            th.output_f32(mocc[i]);
+            th.finish();
+        }
     }
 
     (btot, etot, mocc)
@@ -528,8 +585,7 @@ fn p_decoding_to_gmx_striped(
             *ppx.add(xrow + P7G_C) = pc;
 
             if bck.has_own_scales {
-                scaleproduct *=
-                    *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
+                scaleproduct *= *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
             }
         }
     }
@@ -688,7 +744,11 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
     let mut exp_j = 0.0_f32;
     let mut scaleproduct = {
         let bck_n0 = bck.xmx(0, PXN);
-        if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 }
+        if bck_n0 > 0.0 {
+            1.0 / bck_n0
+        } else {
+            0.0
+        }
     };
 
     unsafe {
@@ -723,8 +783,7 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
                 * scaleproduct;
 
             if bck.has_own_scales {
-                scaleproduct *=
-                    *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
+                scaleproduct *= *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
             }
         }
 
