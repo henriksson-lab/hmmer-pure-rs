@@ -17,7 +17,10 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
-#[command(name = "phmmer", about = "Search a protein sequence against a protein database")]
+#[command(
+    name = "phmmer",
+    about = "Search a protein sequence against a protein database"
+)]
 struct Args {
     /// Query sequence file (FASTA)
     seqfile: PathBuf,
@@ -56,6 +59,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.cpu)
+        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
         .build_global()
         .ok();
 
@@ -65,14 +69,40 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "# phmmer :: search a protein sequence against a protein database").unwrap();
+    writeln!(
+        out,
+        "# phmmer :: search a protein sequence against a protein database"
+    )
+    .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
     writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
-    writeln!(out, "# Freely distributed under the BSD open source license.").unwrap();
-    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
-    writeln!(out, "# query sequence file:             {}", args.seqfile.display()).unwrap();
-    writeln!(out, "# target sequence database:        {}", args.seqdb.display()).unwrap();
-    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(
+        out,
+        "# Freely distributed under the BSD open source license."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# query sequence file:             {}",
+        args.seqfile.display()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# target sequence database:        {}",
+        args.seqdb.display()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // Read query sequences
@@ -152,26 +182,36 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         // Output
         writeln!(out, "Query:       {}  [L={}]", query_sq.name, query_sq.n).unwrap();
-        writeln!(out, "Scores for complete sequences (score includes all domains):").unwrap();
-        writeln!(out, "   --- full sequence ---   --- best 1 domain ---    -#dom-").unwrap();
-        writeln!(out, "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description").unwrap();
-        writeln!(out, "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------").unwrap();
+        writeln!(
+            out,
+            "Scores for complete sequences (score includes all domains):"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
+        )
+        .unwrap();
 
         for hit in &th.hits {
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
             }
             let evalue = z * hit.lnp.exp();
-            let dom_evalue = if !hit.dcl.is_empty() {
-                z * hit.dcl[0].lnp.exp()
-            } else {
-                evalue
-            };
-            let dom_score = if !hit.dcl.is_empty() {
-                hit.dcl[0].bitscore
-            } else {
-                hit.score
-            };
+            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
             writeln!(
                 out,
                 "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
@@ -180,20 +220,31 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 hit.bias,
                 hmmer_pure_rs::output::fmt_evalue(dom_evalue),
                 dom_score,
-                hit.bias,
+                dom_bias,
                 hit.nexpected,
-                hit.ndom,
+                hit.nreported,
                 hit.name,
                 if hit.desc.is_empty() { "" } else { &hit.desc },
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         if th.nreported == 0 {
-            writeln!(out, "\n   [No hits detected that satisfy reporting thresholds]").unwrap();
+            writeln!(
+                out,
+                "\n   [No hits detected that satisfy reporting thresholds]"
+            )
+            .unwrap();
         }
 
         writeln!(out).unwrap();
-        writeln!(out, "# Searched {} sequences ({} residues)", sequences.len(), total_residues).unwrap();
+        writeln!(
+            out,
+            "# Searched {} sequences ({} residues)",
+            sequences.len(),
+            total_residues
+        )
+        .unwrap();
         writeln!(out, "//").unwrap();
         query_sq.reuse();
     }

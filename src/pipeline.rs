@@ -11,6 +11,126 @@ use crate::simd::vit_filter::{viterbi_filter, VitResult};
 use crate::stats;
 use crate::tophits::*;
 
+#[cfg(feature = "tracehash")]
+fn trace_pipeline_decision(
+    function: &'static str,
+    dsq: &[u8],
+    l: usize,
+    m: usize,
+    score: f32,
+    baseline: f32,
+    pvalue: f64,
+    ran: bool,
+    passed: bool,
+) {
+    let mut th = match function {
+        "pipeline_msv_decision" => tracehash::th_call!("pipeline_msv_decision"),
+        "pipeline_bias_decision" => tracehash::th_call!("pipeline_bias_decision"),
+        _ => tracehash::th_call!("pipeline_vit_decision"),
+    };
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[1..=l]);
+    th.output_u64(ran as u64);
+    th.output_f32(score);
+    th.output_f32(baseline);
+    th.output_f32(pvalue as f32);
+    th.output_u64(passed as u64);
+    th.finish();
+}
+
+#[cfg(feature = "tracehash")]
+#[allow(clippy::too_many_arguments)]
+fn trace_pipeline_score_components(
+    dsq: &[u8],
+    l: usize,
+    m: usize,
+    fwd_sc: f32,
+    null_sc: f32,
+    full_seq_bias: f32,
+    pre_score: f32,
+    direct_seq_score: f32,
+    sum_score_nats: f32,
+    sum_bias: f32,
+    pre2_score: f32,
+    sum_score: f32,
+    final_pre_score: f32,
+    final_seq_score: f32,
+    ld: usize,
+    ndom: usize,
+) {
+    let mut th = tracehash::th_call!("pipeline_score_components");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[1..=l]);
+    th.output_f32(fwd_sc);
+    th.output_f32(null_sc);
+    th.output_f32(full_seq_bias);
+    th.output_f32(pre_score);
+    th.output_f32(direct_seq_score);
+    th.output_f32(sum_score_nats);
+    th.output_f32(sum_bias);
+    th.output_f32(pre2_score);
+    th.output_f32(sum_score);
+    th.output_f32(final_pre_score);
+    th.output_f32(final_seq_score);
+    th.output_u64(ld as u64);
+    th.output_u64(ndom as u64);
+    th.finish();
+
+    macro_rules! emit_f32 {
+        ($name:literal, $value:expr) => {{
+            let mut th = tracehash::th_call!($name);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[1..=l]);
+            th.output_f32($value);
+            th.output_f32_quant($value, 1.0e-5);
+            th.finish();
+        }};
+    }
+    emit_f32!("pipeline_score_fwd_sc", fwd_sc);
+    emit_f32!("pipeline_score_full_seq_bias", full_seq_bias);
+    emit_f32!("pipeline_score_direct_seq", direct_seq_score);
+    emit_f32!("pipeline_score_sum_nats", sum_score_nats);
+    emit_f32!("pipeline_score_sum_bias", sum_bias);
+    emit_f32!("pipeline_score_sum_bits", sum_score);
+    emit_f32!("pipeline_score_final_seq", final_seq_score);
+
+    let mut th = tracehash::th_call!("pipeline_score_lengths");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[1..=l]);
+    th.output_u64(ld as u64);
+    th.output_u64(ndom as u64);
+    th.finish();
+}
+
+#[cfg(feature = "tracehash")]
+fn trace_pipeline_domain_score_candidate(
+    dsq: &[u8],
+    l: usize,
+    m: usize,
+    domain_idx: usize,
+    ienv: i64,
+    jenv: i64,
+    envsc: f32,
+    domcorrection: f32,
+    use_domain: bool,
+) {
+    let mut th = tracehash::th_call!("pipeline_domain_score_candidate");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_usize(domain_idx);
+    th.input_bytes(&dsq[1..=l]);
+    th.output_u64(ienv as u64);
+    th.output_u64(jenv as u64);
+    th.output_f32(envsc);
+    th.output_f32(domcorrection);
+    th.output_u64(use_domain as u64);
+    th.finish();
+}
+
 /// How Z/domZ was set.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ZSetBy {
@@ -223,6 +343,8 @@ impl Pipeline {
         };
 
         if !self.do_max {
+            let mut filter_p = 0.0_f64;
+
             // Stage 1: SIMD MSV filter
             let mut usc = f32::INFINITY;
             #[cfg(target_arch = "x86_64")]
@@ -236,40 +358,134 @@ impl Pipeline {
                     if usc != f32::INFINITY {
                         let msv_pval = msv_pvalue(usc, null_sc, &self.evparam);
                         if msv_pval > self.f1 {
+                            #[cfg(feature = "tracehash")]
+                            trace_pipeline_decision(
+                                "pipeline_msv_decision",
+                                &sq.dsq,
+                                l,
+                                gm.m,
+                                usc,
+                                null_sc,
+                                msv_pval,
+                                true,
+                                false,
+                            );
                             return false;
                         }
+                        filter_p = msv_pval;
                     }
                 }
             }
+            #[cfg(feature = "tracehash")]
+            trace_pipeline_decision(
+                "pipeline_msv_decision",
+                &sq.dsq,
+                l,
+                gm.m,
+                usc,
+                null_sc,
+                filter_p,
+                true,
+                true,
+            );
             self.n_past_msv += 1;
 
             // Stage 1b: Bias composition filter
             if self.do_biasfilter && usc != f32::INFINITY {
                 let bias_pval = msv_pvalue(usc, filtersc, &self.evparam);
                 if bias_pval > self.f1 {
+                    #[cfg(feature = "tracehash")]
+                    trace_pipeline_decision(
+                        "pipeline_bias_decision",
+                        &sq.dsq,
+                        l,
+                        gm.m,
+                        usc,
+                        filtersc,
+                        bias_pval,
+                        true,
+                        false,
+                    );
                     return false;
                 }
+                filter_p = bias_pval;
             }
+            #[cfg(feature = "tracehash")]
+            trace_pipeline_decision(
+                "pipeline_bias_decision",
+                &sq.dsq,
+                l,
+                gm.m,
+                usc,
+                filtersc,
+                filter_p,
+                self.do_biasfilter,
+                true,
+            );
             self.n_past_bias += 1;
 
             // Stage 2: SIMD Viterbi filter (uses filtersc as baseline, matching C)
-            #[cfg(target_arch = "x86_64")]
-            {
-                if is_x86_feature_detected!("sse2") {
-                    let vit_result = unsafe { viterbi_filter(&sq.dsq, l, om) };
-                    let vit_sc = match vit_result {
-                        VitResult::Ok(sc) => sc,
-                        VitResult::Overflow => f32::INFINITY,
-                    };
+            #[cfg(feature = "tracehash")]
+            let mut vit_ran = false;
+            #[cfg(feature = "tracehash")]
+            let mut vit_sc_for_trace = f32::INFINITY;
+            #[cfg(feature = "tracehash")]
+            let mut vit_p_for_trace = filter_p;
+            if filter_p > self.f2 {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("sse2") {
+                        #[cfg(feature = "tracehash")]
+                        {
+                            vit_ran = true;
+                        }
+                        let vit_result = unsafe { viterbi_filter(&sq.dsq, l, om) };
+                        let vit_sc = match vit_result {
+                            VitResult::Ok(sc) => sc,
+                            VitResult::Overflow => f32::INFINITY,
+                        };
+                        #[cfg(feature = "tracehash")]
+                        {
+                            vit_sc_for_trace = vit_sc;
+                        }
 
-                    if vit_sc != f32::INFINITY {
-                        let vit_pval = viterbi_pvalue(vit_sc, filtersc, &self.evparam);
-                        if vit_pval > self.f2 {
-                            return false;
+                        if vit_sc != f32::INFINITY {
+                            let vit_pval = viterbi_pvalue(vit_sc, filtersc, &self.evparam);
+                            #[cfg(feature = "tracehash")]
+                            {
+                                vit_p_for_trace = vit_pval;
+                            }
+                            if vit_pval > self.f2 {
+                                #[cfg(feature = "tracehash")]
+                                trace_pipeline_decision(
+                                    "pipeline_vit_decision",
+                                    &sq.dsq,
+                                    l,
+                                    gm.m,
+                                    vit_sc_for_trace,
+                                    filtersc,
+                                    vit_p_for_trace,
+                                    vit_ran,
+                                    false,
+                                );
+                                return false;
+                            }
                         }
                     }
                 }
             }
+            #[cfg(feature = "tracehash")]
+            trace_pipeline_decision(
+                "pipeline_vit_decision",
+                &sq.dsq,
+                l,
+                gm.m,
+                vit_sc_for_trace,
+                filtersc,
+                vit_p_for_trace,
+                vit_ran,
+                true,
+            );
             self.n_past_vit += 1;
         } else {
             self.n_past_msv += 1;
@@ -334,51 +550,92 @@ impl Pipeline {
         // 1. the full-sequence Forward score corrected by summed n2sc[]
         // 2. a reconstruction score from individually rescored domains
         let omega = 1.0_f32 / 256.0;
-        let mut pre_score = (fwd_sc - null_sc) / std::f32::consts::LN_2;
+        let mut pre_score = nats_to_bits_from_scores(fwd_sc, null_sc);
         let seqbias = if self.do_null2 {
-            crate::logsum::p7_flogsum(0.0, omega.ln() + seq_correction_sum)
+            crate::logsum::p7_flogsum(
+                0.0,
+                ((omega as f64).ln() + seq_correction_sum as f64) as f32,
+            )
         } else {
             0.0
         };
-        let mut seq_score = (fwd_sc - (null_sc + seqbias)) / std::f32::consts::LN_2;
+        let mut seq_score = nats_to_bits_from_scores(fwd_sc, null_sc + seqbias);
+        let direct_seq_score = seq_score;
+        #[cfg(not(feature = "tracehash"))]
+        let _ = direct_seq_score;
 
         let mut sum_env = 0.0_f32;
         let mut sum_correction = 0.0_f32;
         let mut ld = 0usize;
-        for dom in &domains {
+        for (domain_idx, dom) in domains.iter().enumerate() {
+            #[cfg(not(feature = "tracehash"))]
+            let _ = domain_idx;
             let use_domain = if self.do_null2 {
                 dom.envsc - dom.domcorrection > 0.0
             } else {
                 dom.envsc > 0.0
             };
+            #[cfg(feature = "tracehash")]
+            trace_pipeline_domain_score_candidate(
+                &sq.dsq,
+                l,
+                gm.m,
+                domain_idx,
+                dom.ienv,
+                dom.jenv,
+                dom.envsc,
+                dom.domcorrection,
+                use_domain,
+            );
             if use_domain {
                 sum_env += dom.envsc;
                 sum_correction += dom.domcorrection;
                 ld += (dom.jenv - dom.ienv + 1) as usize;
             }
         }
-        let sum_score_nats = sum_env + (l - ld) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
+        let len_ratio = l as f32 / (l as f32 + 3.0);
+        let sum_score_nats =
+            (sum_env as f64 + (l - ld) as f64 * (len_ratio as f64).ln()) as f32;
         let sum_bias = if self.do_null2 {
-            crate::logsum::p7_flogsum(0.0, omega.ln() + sum_correction)
+            crate::logsum::p7_flogsum(0.0, ((omega as f64).ln() + sum_correction as f64) as f32)
         } else {
             0.0
         };
-        let pre2_score = (sum_score_nats - null_sc) / std::f32::consts::LN_2;
-        let sum_score = (sum_score_nats - (null_sc + sum_bias)) / std::f32::consts::LN_2;
+        let pre2_score = nats_to_bits_from_scores(sum_score_nats, null_sc);
+        let sum_score = nats_to_bits_from_scores(sum_score_nats, null_sc + sum_bias);
         if ld > 0 && sum_score > seq_score {
             seq_score = sum_score;
             pre_score = pre2_score;
         }
         let seq_bias_bits = (pre_score - seq_score).max(0.0);
+        #[cfg(feature = "tracehash")]
+        trace_pipeline_score_components(
+            &sq.dsq,
+            l,
+            gm.m,
+            fwd_sc,
+            null_sc,
+            seqbias,
+            nats_to_bits_from_scores(fwd_sc, null_sc),
+            direct_seq_score,
+            sum_score_nats,
+            sum_bias,
+            pre2_score,
+            sum_score,
+            pre_score,
+            seq_score,
+            ld,
+            domains.len(),
+        );
 
         if !self.do_null2 {
             let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
             let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
             for dom in &mut domains {
                 let env_len = (dom.jenv - dom.ienv + 1) as usize;
-                let length_correction = (l - env_len) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
+                let length_correction = ((l - env_len) as f64 * (len_ratio as f64).ln()) as f32;
                 dom.dombias = 0.0;
-                dom.bitscore = (dom.envsc + length_correction - null_sc) / std::f32::consts::LN_2;
+                dom.bitscore = nats_to_bits_from_scores(dom.envsc + length_correction, null_sc);
                 dom.lnp = crate::stats::exponential::surv(dom.bitscore as f64, tau, lambda).ln();
             }
         }
@@ -416,7 +673,7 @@ impl Pipeline {
 
 /// Calculate MSV p-value from raw score.
 fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
-    let score = (msv_sc - null_sc) / std::f32::consts::LN_2;
+    let score = nats_to_bits_from_scores(msv_sc, null_sc);
     let mu = evparam[crate::hmm::P7_MMU] as f64;
     let lambda = evparam[crate::hmm::P7_MLAMBDA] as f64;
     stats::gumbel::surv(score as f64, mu, lambda)
@@ -424,7 +681,7 @@ fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
 
 /// Calculate Viterbi p-value from raw score.
 fn viterbi_pvalue(vit_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
-    let score = (vit_sc - null_sc) / std::f32::consts::LN_2;
+    let score = nats_to_bits_from_scores(vit_sc, null_sc);
     let mu = evparam[crate::hmm::P7_VMU] as f64;
     let lambda = evparam[crate::hmm::P7_VLAMBDA] as f64;
     stats::gumbel::surv(score as f64, mu, lambda)
@@ -432,10 +689,15 @@ fn viterbi_pvalue(vit_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
 
 /// Calculate Forward p-value from raw score.
 fn forward_pvalue(fwd_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
-    let score = (fwd_sc - null_sc) / std::f32::consts::LN_2;
+    let score = nats_to_bits_from_scores(fwd_sc, null_sc);
     let tau = evparam[crate::hmm::P7_FTAU] as f64;
     let lambda = evparam[crate::hmm::P7_FLAMBDA] as f64;
     stats::exponential::surv(score as f64, tau, lambda)
+}
+
+#[inline]
+fn nats_to_bits_from_scores(score: f32, baseline: f32) -> f32 {
+    (((score - baseline) as f64) / std::f64::consts::LN_2) as f32
 }
 
 #[cfg(test)]

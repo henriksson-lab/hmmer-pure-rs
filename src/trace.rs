@@ -46,8 +46,25 @@ impl Trace {
 
     pub fn append(&mut self, state: State, k: usize, i: usize) {
         self.st.push(state);
-        self.k.push(k);
-        self.i.push(i);
+        match state {
+            State::N | State::C | State::J => {
+                let emitted = self.st.len() > 1 && self.st[self.st.len() - 2] == state;
+                self.k.push(0);
+                self.i.push(if emitted { i } else { 0 });
+            }
+            State::S | State::B | State::E | State::T => {
+                self.k.push(0);
+                self.i.push(0);
+            }
+            State::D => {
+                self.k.push(k);
+                self.i.push(0);
+            }
+            State::M | State::I => {
+                self.k.push(k);
+                self.i.push(i);
+            }
+        }
         self.n += 1;
     }
 

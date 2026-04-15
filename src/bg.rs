@@ -96,7 +96,7 @@ impl Bg {
     /// Calculate the null1 log-odds score for a sequence of length L.
     /// This is the length-dependent component of the null model.
     pub fn null_one(&self, l: usize) -> f32 {
-        l as f32 * self.p1.ln() + (1.0 - self.p1).ln()
+        (l as f64 * (self.p1 as f64).ln() + (1.0_f64 - self.p1 as f64).ln()) as f32
     }
 
     /// Configure the bias filter HMM with model composition.
@@ -117,10 +117,46 @@ impl Bg {
         self.fhmm_t[1][2] = 1.0;
 
         // Emissions as odds ratios (e[x] / bg_freq[x]), matching C's esl_hmm_Configure()
-        self.fhmm_e0 = vec![1.0_f32; self.k]; // bg/bg = 1.0
-        self.fhmm_e1 = compo[..self.k].iter().zip(self.f[..self.k].iter())
-            .map(|(&c, &f)| if f > 0.0 { c / f } else { 0.0 })
-            .collect();
+        let kp = match self.abc_type {
+            AlphabetType::Dna | AlphabetType::Rna => 18,
+            AlphabetType::Amino => 29,
+            AlphabetType::Unknown => self.k,
+        };
+        self.fhmm_e0 = vec![1.0_f32; kp]; // bg/bg = 1.0, including gap/nonres/missing
+        self.fhmm_e1 = vec![1.0_f32; kp];
+        for x in 0..self.k {
+            self.fhmm_e1[x] = if self.f[x] > 0.0 {
+                compo[x] / self.f[x]
+            } else {
+                0.0
+            };
+        }
+
+        match self.abc_type {
+            AlphabetType::Amino => {
+                self.set_degenerate_filter_emission(21, &[11, 2], compo); // B = N or D
+                self.set_degenerate_filter_emission(22, &[7, 9], compo); // J = I or L
+                self.set_degenerate_filter_emission(23, &[13, 3], compo); // Z = Q or E
+                self.set_degenerate_filter_emission(24, &[8], compo); // O = K
+                self.set_degenerate_filter_emission(25, &[1], compo); // U = C
+                let all: Vec<usize> = (0..self.k).collect();
+                self.set_degenerate_filter_emission(26, &all, compo); // X = any residue
+            }
+            AlphabetType::Dna | AlphabetType::Rna => {
+                self.set_degenerate_filter_emission(5, &[0, 2], compo); // R
+                self.set_degenerate_filter_emission(6, &[1, 3], compo); // Y
+                self.set_degenerate_filter_emission(7, &[0, 1], compo); // M
+                self.set_degenerate_filter_emission(8, &[2, 3], compo); // K
+                self.set_degenerate_filter_emission(9, &[1, 2], compo); // S
+                self.set_degenerate_filter_emission(10, &[0, 3], compo); // W
+                self.set_degenerate_filter_emission(11, &[0, 1, 3], compo); // H
+                self.set_degenerate_filter_emission(12, &[1, 2, 3], compo); // B
+                self.set_degenerate_filter_emission(13, &[0, 1, 2], compo); // V
+                self.set_degenerate_filter_emission(14, &[0, 2, 3], compo); // D
+                self.set_degenerate_filter_emission(15, &[0, 1, 2, 3], compo); // N
+            }
+            AlphabetType::Unknown => {}
+        }
 
         // Initial probabilities
         self.fhmm_pi = [0.999, 0.001];
@@ -130,49 +166,56 @@ impl Bg {
     /// `dsq` is 1-based digital sequence.
     /// Returns the filter score (null model log-likelihood in nats).
     pub fn filter_score(&self, dsq: &[Dsq], l: usize) -> f32 {
-        // Forward algorithm on the 2-state filter HMM
-        let k = self.k;
-
-        // dp[state] = forward probability at current position
-        let mut dp = [0.0_f32; 2];
-
-        // Initialize: position 0
-        dp[0] = self.fhmm_pi[0];
-        dp[1] = self.fhmm_pi[1];
-
-        let mut total_logsc = 0.0_f32;
-
-        for i in 1..=l {
-            let x = dsq[i] as usize;
-            if x >= k {
-                // Non-canonical residue: treat as background
-                continue;
-            }
-
-            let prev = dp;
-
-            // Transition + emission for state 0
-            dp[0] = (prev[0] * self.fhmm_t[0][0] + prev[1] * self.fhmm_t[1][0])
-                * self.fhmm_e0[x];
-            // Transition + emission for state 1
-            dp[1] = (prev[0] * self.fhmm_t[0][1] + prev[1] * self.fhmm_t[1][1])
-                * self.fhmm_e1[x];
-
-            // Rescale to prevent underflow
-            let scale = dp[0] + dp[1];
-            if scale > 0.0 {
-                dp[0] /= scale;
-                dp[1] /= scale;
-                total_logsc += scale.ln();
-            }
+        if l == 0 {
+            let term = self.fhmm_pi[0] * self.fhmm_t[0][2] + self.fhmm_pi[1] * self.fhmm_t[1][2];
+            return term.ln() + (1.0 - self.p1).ln();
         }
 
-        // Terminate: multiply by exit probabilities
+        let (e0, e1) = self.filter_emissions(dsq[1] as usize);
+        let mut dp = [e0 * self.fhmm_pi[0], e1 * self.fhmm_pi[1]];
+        let mut max = dp[0].max(dp[1]);
+        dp[0] /= max;
+        dp[1] /= max;
+        let mut nullsc = (max as f64).ln() as f32;
+
+        for &x in dsq.iter().take(l + 1).skip(2) {
+            let prev = dp;
+            let (e0, e1) = self.filter_emissions(x as usize);
+            dp[0] = (prev[0] * self.fhmm_t[0][0] + prev[1] * self.fhmm_t[1][0]) * e0;
+            dp[1] = (prev[0] * self.fhmm_t[0][1] + prev[1] * self.fhmm_t[1][1]) * e1;
+            max = dp[0].max(dp[1]);
+            dp[0] /= max;
+            dp[1] /= max;
+            nullsc += (max as f64).ln() as f32;
+        }
+
         let term = dp[0] * self.fhmm_t[0][2] + dp[1] * self.fhmm_t[1][2];
-        let nullsc = total_logsc + term.ln();
+        nullsc += (term as f64).ln() as f32;
 
         // Apply length distribution
         nullsc + l as f32 * self.p1.ln() + (1.0 - self.p1).ln()
+    }
+
+    #[inline]
+    fn filter_emissions(&self, x: usize) -> (f32, f32) {
+        if x < self.fhmm_e0.len() {
+            (self.fhmm_e0[x], self.fhmm_e1[x])
+        } else {
+            (1.0, 1.0)
+        }
+    }
+
+    fn set_degenerate_filter_emission(&mut self, x: usize, members: &[usize], compo: &[f32]) {
+        if x >= self.fhmm_e1.len() {
+            return;
+        }
+        let mut numer = 0.0_f32;
+        let mut denom = 0.0_f32;
+        for &y in members {
+            numer += compo[y];
+            denom += self.f[y];
+        }
+        self.fhmm_e1[x] = if denom > 0.0 { numer / denom } else { 0.0 };
     }
 }
 

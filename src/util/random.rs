@@ -1,73 +1,30 @@
-//! Mersenne Twister MT19937 random number generator.
-//! Exact port of Easel's esl_random.c for --seed reproducibility with C HMMER.
+//! Easel random number generator used by HMMER's search pipeline.
+//!
+//! HMMER creates pipeline/domain-definition RNGs with
+//! `esl_randomness_CreateFast()`, the legacy Knuth LCG path in
+//! `esl_random.c`, so this type preserves that stream for parity.
 
-const N: usize = 624;
-const M: usize = 397;
-const UPPER_MASK: u32 = 0x80000000;
-const LOWER_MASK: u32 = 0x7fffffff;
-const MAG01: [u32; 2] = [0x0, 0x9908b0df];
-
-/// Mersenne Twister MT19937 random number generator.
+/// Legacy Easel `CreateFast` random number generator.
 pub struct MersenneTwister {
-    mt: [u32; N],
-    mti: usize,
+    x: u32,
     pub seed: u32,
 }
 
 impl MersenneTwister {
-    /// Create a new MT19937 RNG with the given seed.
+    /// Create a new RNG with the same stream as Easel's esl_randomness_CreateFast().
     pub fn new(seed: u32) -> Self {
-        let mut rng = MersenneTwister {
-            mt: [0u32; N],
-            mti: N + 1,
-            seed,
-        };
-        rng.seed_table(seed);
-        rng
+        let seed = if seed == 0 { 42 } else { seed };
+        let mut x = esl_mix3(seed, 87_654_321, 12_345_678);
+        if x == 0 {
+            x = 42;
+        }
+        MersenneTwister { x, seed }
     }
 
-    /// Seed the state table (Knuth LCG with multiplier 69069).
-    fn seed_table(&mut self, seed: u32) {
-        self.seed = seed;
-        self.mt[0] = seed;
-        for z in 1..N {
-            self.mt[z] = 69069u32.wrapping_mul(self.mt[z - 1]);
-        }
-        self.mti = N; // force fill on first use
-    }
-
-    /// Fill the state table with the twist transformation.
-    fn fill_table(&mut self) {
-        let mut y: u32;
-
-        for z in 0..(N - M) {
-            y = (self.mt[z] & UPPER_MASK) | (self.mt[z + 1] & LOWER_MASK);
-            self.mt[z] = self.mt[z + M] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
-        }
-        for z in (N - M)..(N - 1) {
-            y = (self.mt[z] & UPPER_MASK) | (self.mt[z + 1] & LOWER_MASK);
-            self.mt[z] = self.mt[z + M - N] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
-        }
-        y = (self.mt[N - 1] & UPPER_MASK) | (self.mt[0] & LOWER_MASK);
-        self.mt[N - 1] = self.mt[M - 1] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
-
-        self.mti = 0;
-    }
-
-    /// Generate a random u32.
+    /// Generate a random u32 using Easel's `(a=69069, c=1)` LCG.
     pub fn next_u32(&mut self) -> u32 {
-        if self.mti >= N {
-            self.fill_table();
-        }
-        let mut x = self.mt[self.mti];
-        self.mti += 1;
-
-        // Tempering
-        x ^= x >> 11;
-        x ^= (x << 7) & 0x9d2c5680;
-        x ^= (x << 15) & 0xefc60000;
-        x ^= x >> 18;
-        x
+        self.x = self.x.wrapping_mul(69_069).wrapping_add(1);
+        self.x
     }
 
     /// Generate a uniform random double in [0, 1).
@@ -100,12 +57,43 @@ impl MersenneTwister {
     }
 }
 
+fn esl_mix3(mut a: u32, mut b: u32, mut c: u32) -> u32 {
+    a = a.wrapping_sub(b);
+    a = a.wrapping_sub(c);
+    a ^= c >> 13;
+    b = b.wrapping_sub(c);
+    b = b.wrapping_sub(a);
+    b ^= a << 8;
+    c = c.wrapping_sub(a);
+    c = c.wrapping_sub(b);
+    c ^= b >> 13;
+    a = a.wrapping_sub(b);
+    a = a.wrapping_sub(c);
+    a ^= c >> 12;
+    b = b.wrapping_sub(c);
+    b = b.wrapping_sub(a);
+    b ^= a << 16;
+    c = c.wrapping_sub(a);
+    c = c.wrapping_sub(b);
+    c ^= b >> 5;
+    a = a.wrapping_sub(b);
+    a = a.wrapping_sub(c);
+    a ^= c >> 3;
+    b = b.wrapping_sub(c);
+    b = b.wrapping_sub(a);
+    b ^= a << 10;
+    c = c.wrapping_sub(a);
+    c = c.wrapping_sub(b);
+    c ^= b >> 15;
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_mt_deterministic() {
+    fn test_fast_rng_deterministic() {
         let mut rng1 = MersenneTwister::new(42);
         let mut rng2 = MersenneTwister::new(42);
         for _ in 0..1000 {
@@ -114,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mt_range() {
+    fn test_fast_rng_range() {
         let mut rng = MersenneTwister::new(42);
         for _ in 0..10000 {
             let v = rng.next_f64();
@@ -123,16 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mt_seed42_first_values() {
-        // Verify first few values match C's esl_random with seed 42
+    fn test_fast_rng_seed42_first_values() {
+        // Verify first few values match Easel's esl_randomness_CreateFast(42).
         let mut rng = MersenneTwister::new(42);
-        let v0 = rng.next_u32();
-        let v1 = rng.next_u32();
-        let v2 = rng.next_u32();
-        // These should be deterministic for seed 42
-        assert_ne!(v0, 0);
-        assert_ne!(v1, v0);
-        assert_ne!(v2, v1);
+        assert_eq!(rng.next_u32(), 432_788_820);
+        assert_eq!(rng.next_u32(), 3_613_595_717);
+        assert_eq!(rng.next_u32(), 2_598_039_618);
     }
 
 }

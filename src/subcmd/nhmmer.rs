@@ -17,7 +17,10 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
-#[command(name = "nhmmer", about = "Search DNA/RNA HMM(s) against a nucleotide sequence database")]
+#[command(
+    name = "nhmmer",
+    about = "Search DNA/RNA HMM(s) against a nucleotide sequence database"
+)]
 struct Args {
     /// HMM file, alignment file, or query sequence
     hmmfile: PathBuf,
@@ -25,7 +28,6 @@ struct Args {
     seqdb: PathBuf,
 
     // --- Output options ---
-
     /// Direct output to file, not stdout
     #[arg(short = 'o')]
     outfile: Option<PathBuf>,
@@ -51,7 +53,6 @@ struct Args {
     textw: usize,
 
     // --- Reporting thresholds ---
-
     /// Report sequences <= this E-value threshold
     #[arg(short = 'E', default_value = "10.0")]
     e_value: f64,
@@ -69,7 +70,6 @@ struct Args {
     inc_t: Option<f32>,
 
     // --- Model-specific cutoffs ---
-
     /// Use model's GA gathering cutoffs to set all thresholding
     #[arg(long = "cut_ga")]
     cut_ga: bool,
@@ -83,7 +83,6 @@ struct Args {
     cut_tc: bool,
 
     // --- Acceleration heuristics ---
-
     /// Turn all heuristic filters off (less speed, more power)
     #[arg(long = "max")]
     max: bool,
@@ -105,7 +104,6 @@ struct Args {
     nobias: bool,
 
     // --- Alphabet selection ---
-
     /// Use DNA alphabet
     #[arg(long)]
     dna: bool,
@@ -115,7 +113,6 @@ struct Args {
     rna: bool,
 
     // --- Expert options ---
-
     /// Turn off biased composition score corrections
     #[arg(long = "nonull2")]
     nonull2: bool,
@@ -160,6 +157,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.cpu)
+        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
         .build_global()
         .ok();
 
@@ -184,7 +182,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(out, "# nhmmer :: search a DNA model against a DNA database").unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
-    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // Strand selection
@@ -203,7 +205,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             hmmer_pure_rs::alphabet::AlphabetType::Dna => Alphabet::dna(),
             hmmer_pure_rs::alphabet::AlphabetType::Rna => Alphabet::rna(),
             _ => {
-                if args.rna { Alphabet::rna() } else { Alphabet::dna() }
+                if args.rna {
+                    Alphabet::rna()
+                } else {
+                    Alphabet::dna()
+                }
             }
         };
         let bg = Bg::new(&abc);
@@ -221,8 +227,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         pli.inc_e = args.inc_e;
         pli.do_max = args.max;
         pli.seed = args.seed;
-        if args.nobias { pli.do_biasfilter = false; }
-        if args.nonull2 { pli.do_null2 = false; }
+        if args.nobias {
+            pli.do_biasfilter = false;
+        }
+        if args.nonull2 {
+            pli.do_null2 = false;
+        }
 
         if let Some(t) = args.score_threshold {
             pli.t = Some(t);
@@ -268,7 +278,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         use rayon::prelude::*;
 
-        let max_length = if hmm.max_length > 0 { hmm.max_length } else { (hmm.m * 4) as i32 };
+        let max_length = if hmm.max_length > 0 {
+            hmm.max_length
+        } else {
+            (hmm.m * 4) as i32
+        };
         let _w_length = args.w_length.unwrap_or(0);
         let f1 = args.f1;
         let do_max = args.max;
@@ -284,8 +298,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 // Search top strand (watson)
                 if do_watson {
                     hits.extend(search_sequence(
-                        sq, hmm, &gm, &om, &bg, max_length, f1, do_max,
-                        nobias, nonull2, seed, false,
+                        sq, hmm, &gm, &om, &bg, max_length, f1, do_max, nobias, nonull2, seed,
+                        false,
                     ));
                 }
 
@@ -302,8 +316,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         l: sq.l,
                     };
                     let mut rc_hits = search_sequence(
-                        &rc_sq, hmm, &gm, &om, &bg, max_length, f1, do_max,
-                        nobias, nonull2, seed, true,
+                        &rc_sq, hmm, &gm, &om, &bg, max_length, f1, do_max, nobias, nonull2, seed,
+                        true,
                     );
                     // Convert complement coordinates back to forward strand
                     for hit in &mut rc_hits {
@@ -337,41 +351,59 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         // Output
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
-        writeln!(out, "Scores for complete sequences (score includes all domains):").unwrap();
-        writeln!(out, "   --- full sequence ---   --- best 1 domain ---    -#dom-").unwrap();
-        writeln!(out, "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description").unwrap();
-        writeln!(out, "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------").unwrap();
+        writeln!(
+            out,
+            "Scores for complete sequences (score includes all domains):"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
+        )
+        .unwrap();
 
         for hit in &th.hits {
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
             }
             let evalue = z * hit.lnp.exp();
-            let dom_evalue = if !hit.dcl.is_empty() {
-                z * hit.dcl[0].lnp.exp()
-            } else {
-                evalue
-            };
-            let dom_score = if !hit.dcl.is_empty() {
-                hit.dcl[0].bitscore
-            } else {
-                hit.score
-            };
+            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
             writeln!(
                 out,
                 "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {} {}",
                 hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score, hit.bias,
+                hit.score,
+                hit.bias,
                 hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score, hit.bias,
-                hit.nexpected, hit.ndom,
+                dom_score,
+                dom_bias,
+                hit.nexpected,
+                hit.nreported,
                 hit.name,
                 if hit.desc.is_empty() { "" } else { &hit.desc },
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         if th.nreported == 0 {
-            writeln!(out, "   [No hits detected that satisfy reporting thresholds]").unwrap();
+            writeln!(
+                out,
+                "   [No hits detected that satisfy reporting thresholds]"
+            )
+            .unwrap();
         }
 
         // Tblout
@@ -411,8 +443,12 @@ fn search_sequence(
         lpli.f1 = f1;
         lpli.do_max = do_max;
         lpli.seed = seed;
-        if nobias { lpli.do_biasfilter = false; }
-        if nonull2 { lpli.do_null2 = false; }
+        if nobias {
+            lpli.do_biasfilter = false;
+        }
+        if nonull2 {
+            lpli.do_null2 = false;
+        }
         let mut lth = TopHits::new();
         if lpli.run(&mut lgm, &mut lom, &lb, hmm, sq, &mut lth) {
             return lth.hits;
@@ -424,7 +460,9 @@ fn search_sequence(
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("sse2") {
-            return search_longtarget(sq, hmm, gm, om, bg, max_length, f1, do_max, nobias, nonull2, seed);
+            return search_longtarget(
+                sq, hmm, gm, om, bg, max_length, f1, do_max, nobias, nonull2, seed,
+            );
         }
     }
     Vec::new()
@@ -449,18 +487,19 @@ fn search_longtarget(
     use hmmer_pure_rs::simd::ssv_longtarget;
 
     // Phase 1: SSV longtarget filter — find candidate windows
-    let mut windows = unsafe {
-        ssv_longtarget::ssv_filter_longtarget(
-            &sq.dsq, sq.n, om, bg, 0.02, max_length,
-        )
-    };
+    let mut windows =
+        unsafe { ssv_longtarget::ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, 0.02, max_length) };
 
     if windows.is_empty() {
         return Vec::new();
     }
 
     // Extend and merge overlapping windows
-    let ml = if max_length > 0 { max_length as usize } else { hmm.m * 4 };
+    let ml = if max_length > 0 {
+        max_length as usize
+    } else {
+        hmm.m * 4
+    };
     ssv_longtarget::extend_and_merge_windows(&mut windows, ml, sq.n);
 
     // Phase 2: Run full pipeline on each window
@@ -470,7 +509,9 @@ fn search_longtarget(
         let win_start = win.n;
         let win_end = (win.n + win.length - 1).min(sq.n);
         let win_len = win_end - win_start + 1;
-        if win_len < hmm.m { continue; }
+        if win_len < hmm.m {
+            continue;
+        }
 
         // Create window sub-sequence
         let mut win_dsq = vec![DSQ_SENTINEL];

@@ -165,6 +165,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     // Configure thread pool
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.cpu)
+        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
         .build_global()
         .ok();
 
@@ -365,6 +366,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             .par_iter()
             .map_init(
                 || {
+                    hmmer_pure_rs::util::simd_env::init();
                     let local_gm = (*shared_gm).clone();
                     let mut local_pli = Pipeline::new();
                     local_pli.new_model(&local_gm);
@@ -384,35 +386,30 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
                 },
                 |(local_bg, local_gm, local_om, local_pli), sq| {
-                local_pli.n_targets = 0;
-                local_pli.n_past_msv = 0;
-                local_pli.n_past_bias = 0;
-                local_pli.n_past_vit = 0;
-                local_pli.n_past_fwd = 0;
+                    local_pli.n_targets = 0;
+                    local_pli.n_past_msv = 0;
+                    local_pli.n_past_bias = 0;
+                    local_pli.n_past_vit = 0;
+                    local_pli.n_past_fwd = 0;
 
-                local_bg.set_length(sq.n);
+                    local_bg.set_length(sq.n);
 
-                let mut local_th = TopHits::new();
-                let hit = if local_pli.run(
-                    local_gm,
-                    local_om,
-                    local_bg,
-                    hmm,
-                    sq,
-                    &mut local_th,
-                ) {
-                    local_th.hits.into_iter().next()
-                } else {
-                    None
-                };
-                (
-                    hit,
-                    local_pli.n_past_msv,
-                    local_pli.n_past_bias,
-                    local_pli.n_past_vit,
-                    local_pli.n_past_fwd,
-                )
-            })
+                    let mut local_th = TopHits::new();
+                    let hit = if local_pli.run(local_gm, local_om, local_bg, hmm, sq, &mut local_th)
+                    {
+                        local_th.hits.into_iter().next()
+                    } else {
+                        None
+                    };
+                    (
+                        hit,
+                        local_pli.n_past_msv,
+                        local_pli.n_past_bias,
+                        local_pli.n_past_vit,
+                        local_pli.n_past_fwd,
+                    )
+                },
+            )
             .collect();
 
         let mut th = TopHits::new();
@@ -487,16 +484,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             }
             any_reported = true;
             let evalue = z * hit.lnp.exp();
-            let dom_evalue = if !hit.dcl.is_empty() {
-                z * hit.dcl[0].lnp.exp()
-            } else {
-                evalue
-            };
-            let dom_score = if !hit.dcl.is_empty() {
-                hit.dcl[0].bitscore
-            } else {
-                hit.score
-            };
+            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
 
             writeln!(
                 out,
@@ -506,9 +497,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 hit.bias,
                 hmmer_pure_rs::output::fmt_evalue(dom_evalue),
                 dom_score,
-                hit.bias,
+                dom_bias,
                 hit.nexpected,
-                hit.ndom,
+                hit.nreported,
                 if show_acc && !hit.acc.is_empty() {
                     &hit.acc
                 } else {
@@ -552,7 +543,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 writeln!(out, "   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc").unwrap();
                 writeln!(out, " ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----").unwrap();
 
-                for (di, dom) in hit.dcl.iter().enumerate() {
+                let mut reported_idx = 0usize;
+                for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+                    reported_idx += 1;
                     let c_evalue = domz * dom.lnp.exp();
                     let i_evalue = z * dom.lnp.exp();
                     let indicator = if dom.is_included {
@@ -560,7 +553,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     } else if dom.is_reported {
                         '?'
                     } else {
-                        '!' // default to included
+                        '?'
                     };
 
                     let (hf, ht) = if let Some(ref ad) = dom.ad {
@@ -578,7 +571,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     writeln!(
                         out,
                         " {:3} {} {:6.1} {:5.1} {} {} {:7} {:7} {}{} {:7} {:7} {}{} {:7} {:7} {}{} {:.2}",
-                        di + 1,
+                        reported_idx,
                         indicator,
                         dom.bitscore,
                         dom.dombias,
@@ -599,11 +592,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 // Text alignments for each domain
                 if !args.noali {
                     writeln!(out, "  Alignments for each domain:").unwrap();
-                    for (di, dom) in hit.dcl.iter().enumerate() {
+                    let mut reported_idx = 0usize;
+                    for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+                        reported_idx += 1;
                         writeln!(
                             out,
                             "  == domain {}  score: {:.1} bits;  conditional E-value: {}",
-                            di + 1,
+                            reported_idx,
                             dom.bitscore,
                             hmmer_pure_rs::output::fmt_evalue(domz * dom.lnp.exp()).trim()
                         )

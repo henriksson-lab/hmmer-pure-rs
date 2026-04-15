@@ -23,6 +23,8 @@ pub struct ProbMx {
     pub xmx: Vec<f32>,
     /// Cumulative log-scale per position (f64 for precision)
     pub scale: Vec<f64>,
+    /// Per-row scale factor, matching P7_OMX xmx[p7X_SCALE].
+    pub row_scale: Vec<f32>,
     /// Full DP rows (optional): dp[(l+1) * (m+1) * 3]
     /// dp[i * row_width + k * 3 + s] for M(0)/I(1)/D(2) at position i, node k.
     pub dp: Vec<f32>,
@@ -33,6 +35,7 @@ pub struct ProbMx {
     striped_row_width: usize,
     q: usize,
     pub has_dp: bool,
+    pub has_own_scales: bool,
 }
 
 impl ProbMx {
@@ -43,12 +46,14 @@ impl ProbMx {
             l,
             xmx: vec![0.0; (l + 1) * NXCELLS],
             scale: vec![0.0; l + 1],
+            row_scale: vec![1.0; l + 1],
             dp: Vec::new(),
             striped_dp: Vec::new(),
             row_width: 0,
             striped_row_width: 0,
             q: 0,
             has_dp: false,
+            has_own_scales: false,
         }
     }
 
@@ -62,12 +67,14 @@ impl ProbMx {
             l,
             xmx: vec![0.0; (l + 1) * NXCELLS],
             scale: vec![0.0; l + 1],
+            row_scale: vec![1.0; l + 1],
             dp: Vec::new(),
             striped_dp: vec![0.0; (l + 1) * striped_row_width],
             row_width,
             striped_row_width,
             q,
             has_dp: true,
+            has_own_scales: false,
         }
     }
 
@@ -83,9 +90,11 @@ impl ProbMx {
         self.striped_row_width = striped_row_width;
         self.q = q;
         self.has_dp = true;
+        self.has_own_scales = false;
 
         self.xmx.resize((l + 1) * NXCELLS, 0.0);
         self.scale.resize(l + 1, 0.0);
+        self.row_scale.resize(l + 1, 1.0);
         self.dp.clear();
         self.striped_dp.resize((l + 1) * striped_row_width, 0.0);
     }
@@ -121,6 +130,18 @@ impl ProbMx {
             self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + 8 + lane]
         } else {
             self.dp[i * self.row_width + k * DP_CELLS_PER_K + 1]
+        }
+    }
+
+    /// Get D-state value at position i, node k.
+    #[inline]
+    pub fn dmx(&self, i: usize, k: usize) -> f32 {
+        if !self.striped_dp.is_empty() {
+            let qi = (k - 1) % self.q;
+            let lane = (k - 1) / self.q;
+            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + 4 + lane]
+        } else {
+            self.dp[i * self.row_width + k * DP_CELLS_PER_K + 2]
         }
     }
 
@@ -187,9 +208,7 @@ impl ProbMx {
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub unsafe fn striped_row_ptr(&mut self, i: usize) -> *mut f32 {
-        self.striped_dp
-            .as_mut_ptr()
-            .add(i * self.striped_row_width)
+        self.striped_dp.as_mut_ptr().add(i * self.striped_row_width)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -197,15 +216,80 @@ impl ProbMx {
     pub fn striped_row_width(&self) -> usize {
         self.striped_row_width
     }
+
+    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    pub fn q_count(&self) -> usize {
+        self.q
+    }
+
+    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    pub fn striped_row_state_sum(&self, i: usize, state: usize) -> f32 {
+        let mut sum = 0.0_f32;
+        let row_base = i * self.striped_row_width;
+        for qi in 0..self.q {
+            let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
+            for lane in 0..4 {
+                let k = qi + 1 + lane * self.q;
+                if k <= self.m {
+                    sum += self.striped_dp[off + lane];
+                }
+            }
+        }
+        sum
+    }
+
+    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    pub fn striped_row_state_sum_all_lanes(&self, i: usize, state: usize) -> f32 {
+        let mut sum = 0.0_f32;
+        let row_base = i * self.striped_row_width;
+        for qi in 0..self.q {
+            let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
+            for lane in 0..4 {
+                sum += self.striped_dp[off + lane];
+            }
+        }
+        sum
+    }
+
+    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    pub fn striped_row_state_vector(&self, i: usize, state: usize, qi: usize) -> [f32; 4] {
+        let off = i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + state * 4;
+        [
+            self.striped_dp[off],
+            self.striped_dp[off + 1],
+            self.striped_dp[off + 2],
+            self.striped_dp[off + 3],
+        ]
+    }
+
+    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    pub fn striped_row_state_q_range_sum(
+        &self,
+        i: usize,
+        state: usize,
+        q_start: usize,
+        q_end: usize,
+    ) -> f32 {
+        let mut sum = 0.0_f32;
+        let row_base = i * self.striped_row_width;
+        let q_end = q_end.min(self.q);
+        for qi in q_start.min(self.q)..q_end {
+            let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
+            for lane in 0..4 {
+                let k = qi + 1 + lane * self.q;
+                if k <= self.m {
+                    sum += self.striped_dp[off + lane];
+                }
+            }
+        }
+        sum
+    }
 }
 
 /// Domain decoding from probability-space Forward/Backward matrices.
 /// Port of p_domain_decoding() — computes btot, etot, mocc using the
 /// per-position specials and cumulative scales from parser-mode SIMD.
 ///
-/// Matches C's p7_DomainDecoding() normalization:
-///   inv_total = 1 / bck_N[0]
-///   b_scale = exp(fwd.scale[i-1] + bck.scale[i-1] - bck.scale[0]) * inv_total
 pub fn p_domain_decoding(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -217,30 +301,25 @@ pub fn p_domain_decoding(
     let c_loop = njc_loop[2];
 
     let bck_n0 = bck.xmx(0, PXN);
-    let inv_total = if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 };
-    let bck_scale0 = bck.scale[0];
+    let mut scaleproduct = if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 };
 
     let mut btot = vec![0.0_f32; l + 1];
     let mut etot = vec![0.0_f32; l + 1];
     let mut mocc = vec![0.0_f32; l + 1];
 
     for i in 1..=l {
-        // B: fwd[i-1][B] * bck[i-1][B], with scale correction
-        let b_scale = ((fwd.scale[i - 1] + bck.scale[i - 1] - bck_scale0) as f32).exp() * inv_total;
-        let b = fwd.xmx(i - 1, PXB) * bck.xmx(i - 1, PXB) * b_scale;
+        let b = fwd.xmx(i - 1, PXB) * bck.xmx(i - 1, PXB) * fwd.row_scale[i - 1] * scaleproduct;
         btot[i] = btot[i - 1] + b;
 
-        // E: fwd[i][E] * bck[i][E], with scale correction
-        let e_scale = ((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
-        let e = fwd.xmx(i, PXE) * bck.xmx(i, PXE) * e_scale;
+        scaleproduct *= fwd.row_scale[i - 1] / bck.row_scale[i - 1];
+
+        let e = fwd.xmx(i, PXE) * bck.xmx(i, PXE) * fwd.row_scale[i] * scaleproduct;
         etot[i] = etot[i - 1] + e;
 
-        // mocc = 1 - pN - pJ - pC (loop posteriors use fwd[i-1] * bck[i] * transition)
-        let sp_scale = ((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
-        let pn = fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * n_loop * sp_scale;
-        let pj = fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * j_loop * sp_scale;
-        let pc = fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * c_loop * sp_scale;
-        mocc[i] = (1.0 - pn - pj - pc).max(0.0);
+        let pn = fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * n_loop * scaleproduct;
+        let pj = fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * j_loop * scaleproduct;
+        let pc = fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * c_loop * scaleproduct;
+        mocc[i] = 1.0 - pn - pj - pc;
     }
 
     (btot, etot, mocc)
@@ -294,8 +373,9 @@ pub fn match_odds_from_rsc(rsc: &[Vec<f32>], k: usize, m: usize) -> Vec<f32> {
 }
 
 /// Posterior decoding from full-matrix probability-space Forward+Backward into
-/// a generic matrix. This mirrors `p7_GDecoding()` row normalization while
-/// reading the SIMD PMX layout directly.
+/// a generic matrix. This mirrors the SSE `p7_Decoding()` path, not generic
+/// `p7_GDecoding()`: rows are not renormalized, and a Backward matrix that was
+/// scaled with Forward row scales uses a constant scale product.
 pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3], pp: &mut Gmx) {
     if !fwd.striped_dp.is_empty() && !bck.striped_dp.is_empty() {
         p_decoding_to_gmx_striped(fwd, bck, m, njc_loop, pp);
@@ -305,7 +385,6 @@ pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3
     let l = fwd.l;
     let bck_n0 = bck.xmx(0, PXN);
     let inv_total = if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 };
-    let bck_scale0 = bck.scale[0];
 
     pp.m = m;
     pp.l = l;
@@ -321,9 +400,9 @@ pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3
     pp.set_xmx(0, P7G_B, 0.0);
     pp.set_xmx(0, P7G_C, 0.0);
 
+    let mut scaleproduct = inv_total;
     for i in 1..=l {
-        let dp_scale = ((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
-        let mut denom = 0.0_f32;
+        let dp_scale = scaleproduct * fwd.row_scale[i];
 
         pp.set_mmx(i, 0, 0.0);
         pp.set_imx(i, 0, 0.0);
@@ -335,37 +414,25 @@ pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3
             pp.set_mmx(i, node, mp);
             pp.set_imx(i, node, ip);
             pp.set_dmx(i, node, 0.0);
-            denom += mp + ip;
         }
 
         let mp = fwd.mmx(i, m) * bck.mmx(i, m) * dp_scale;
         pp.set_mmx(i, m, mp);
         pp.set_imx(i, m, 0.0);
         pp.set_dmx(i, m, 0.0);
-        denom += mp;
 
-        let sp_scale = ((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
-        let pn = fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * njc_loop[0] * sp_scale;
-        let pj = fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * njc_loop[1] * sp_scale;
-        let pc = fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * njc_loop[2] * sp_scale;
+        let pn = fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * njc_loop[0] * scaleproduct;
+        let pj = fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * njc_loop[1] * scaleproduct;
+        let pc = fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * njc_loop[2] * scaleproduct;
 
         pp.set_xmx(i, P7G_E, 0.0);
         pp.set_xmx(i, P7G_N, pn);
         pp.set_xmx(i, P7G_J, pj);
         pp.set_xmx(i, P7G_B, 0.0);
         pp.set_xmx(i, P7G_C, pc);
-        denom += pn + pj + pc;
 
-        if denom > 0.0 {
-            let inv = 1.0 / denom;
-            for node in 1..m {
-                pp.set_mmx(i, node, pp.mmx(i, node) * inv);
-                pp.set_imx(i, node, pp.imx(i, node) * inv);
-            }
-            pp.set_mmx(i, m, pp.mmx(i, m) * inv);
-            pp.set_xmx(i, P7G_N, pp.xmx(i, P7G_N) * inv);
-            pp.set_xmx(i, P7G_J, pp.xmx(i, P7G_J) * inv);
-            pp.set_xmx(i, P7G_C, pp.xmx(i, P7G_C) * inv);
+        if bck.has_own_scales {
+            scaleproduct *= fwd.row_scale[i] / bck.row_scale[i];
         }
     }
 }
@@ -382,14 +449,11 @@ fn p_decoding_to_gmx_striped(
     let bdp = bck.striped_dp.as_ptr();
     let fx = fwd.xmx.as_ptr();
     let bx = bck.xmx.as_ptr();
-    let fs = fwd.scale.as_ptr();
-    let bs = bck.scale.as_ptr();
     let ppdp = pp.dp_mem.as_mut_ptr();
     let ppx = pp.xmx.as_mut_ptr();
 
     let bck_n0 = unsafe { *bx.add(PXN) };
     let inv_total = if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 };
-    let bck_scale0 = unsafe { *bs };
     let q = fwd.q;
     let pp_w = pp.row_width();
     let pp_stride = pp_w * P7G_NSCELLS;
@@ -410,13 +474,13 @@ fn p_decoding_to_gmx_striped(
         *ppx.add(P7G_B) = 0.0;
         *ppx.add(P7G_C) = 0.0;
 
+        let mut scaleproduct = inv_total;
         for i in 1..=l {
-            let dp_scale = ((*fs.add(i) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
+            let dp_scale = scaleproduct * *fwd.row_scale.as_ptr().add(i);
             let frow = i * fwd.striped_row_width;
             let brow = i * bck.striped_row_width;
             let prow = i * pp_stride;
             let xrow = i * P7G_NXCELLS;
-            let mut denom = 0.0_f32;
 
             *ppdp.add(prow + P7G_M) = 0.0;
             *ppdp.add(prow + P7G_I) = 0.0;
@@ -432,13 +496,11 @@ fn p_decoding_to_gmx_striped(
                         let mp = *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale;
                         *ppdp.add(pidx + P7G_M) = mp;
                         *ppdp.add(pidx + P7G_D) = 0.0;
-                        denom += mp;
 
                         if node < m {
                             let ip =
                                 *fdp.add(fbase + 8 + lane) * *bdp.add(bbase + 8 + lane) * dp_scale;
                             *ppdp.add(pidx + P7G_I) = ip;
-                            denom += ip;
                         } else {
                             *ppdp.add(pidx + P7G_I) = 0.0;
                         }
@@ -446,32 +508,28 @@ fn p_decoding_to_gmx_striped(
                 }
             }
 
-            let sp_scale = ((*fs.add(i - 1) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
-            let pn =
-                *fx.add((i - 1) * NXCELLS + PXN) * *bx.add(i * NXCELLS + PXN) * njc_loop[0] * sp_scale;
-            let pj =
-                *fx.add((i - 1) * NXCELLS + PXJ) * *bx.add(i * NXCELLS + PXJ) * njc_loop[1] * sp_scale;
-            let pc =
-                *fx.add((i - 1) * NXCELLS + PXC) * *bx.add(i * NXCELLS + PXC) * njc_loop[2] * sp_scale;
+            let pn = *fx.add((i - 1) * NXCELLS + PXN)
+                * *bx.add(i * NXCELLS + PXN)
+                * njc_loop[0]
+                * scaleproduct;
+            let pj = *fx.add((i - 1) * NXCELLS + PXJ)
+                * *bx.add(i * NXCELLS + PXJ)
+                * njc_loop[1]
+                * scaleproduct;
+            let pc = *fx.add((i - 1) * NXCELLS + PXC)
+                * *bx.add(i * NXCELLS + PXC)
+                * njc_loop[2]
+                * scaleproduct;
 
             *ppx.add(xrow + P7G_E) = 0.0;
             *ppx.add(xrow + P7G_N) = pn;
             *ppx.add(xrow + P7G_J) = pj;
             *ppx.add(xrow + P7G_B) = 0.0;
             *ppx.add(xrow + P7G_C) = pc;
-            denom += pn + pj + pc;
 
-            if denom > 0.0 {
-                let inv = 1.0 / denom;
-                for node in 1..m {
-                    let pidx = prow + node * P7G_NSCELLS;
-                    *ppdp.add(pidx + P7G_M) *= inv;
-                    *ppdp.add(pidx + P7G_I) *= inv;
-                }
-                *ppdp.add(prow + m * P7G_NSCELLS + P7G_M) *= inv;
-                *ppx.add(xrow + P7G_N) *= inv;
-                *ppx.add(xrow + P7G_J) *= inv;
-                *ppx.add(xrow + P7G_C) *= inv;
+            if bck.has_own_scales {
+                scaleproduct *=
+                    *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
             }
         }
     }
@@ -594,6 +652,108 @@ pub fn p_null2_odds_from_pmx_reuse(
     }
 
     *null2 = p_null2_odds_from_pmx(fwd, bck, m, k, match_odds, njc_loop);
+}
+
+pub fn p_null2_odds_from_omx_expectation_reuse(
+    fwd: &ProbMx,
+    bck: &ProbMx,
+    k: usize,
+    rfv: &[Vec<[f32; 4]>],
+    njc_loop: [f32; 3],
+    null2: &mut Vec<f32>,
+    exp_m: &mut Vec<f32>,
+    exp_i: &mut Vec<f32>,
+) {
+    if fwd.striped_dp.is_empty() || bck.striped_dp.is_empty() {
+        return;
+    }
+
+    let ld = fwd.l;
+    let q = fwd.q;
+    let exp_len = q * 4;
+    exp_m.resize(exp_len, 0.0);
+    exp_i.resize(exp_len, 0.0);
+    exp_m.fill(0.0);
+    exp_i.fill(0.0);
+
+    let fdp = fwd.striped_dp.as_ptr();
+    let bdp = bck.striped_dp.as_ptr();
+    let fx = fwd.xmx.as_ptr();
+    let bx = bck.xmx.as_ptr();
+    let exp_m_ptr = exp_m.as_mut_ptr();
+    let exp_i_ptr = exp_i.as_mut_ptr();
+
+    let mut exp_n = 0.0_f32;
+    let mut exp_c = 0.0_f32;
+    let mut exp_j = 0.0_f32;
+    let mut scaleproduct = {
+        let bck_n0 = bck.xmx(0, PXN);
+        if bck_n0 > 0.0 { 1.0 / bck_n0 } else { 0.0 }
+    };
+
+    unsafe {
+        for i in 1..=ld {
+            let dp_scale = scaleproduct * *fwd.row_scale.as_ptr().add(i);
+            let frow = i * fwd.striped_row_width;
+            let brow = i * bck.striped_row_width;
+
+            for qi in 0..q {
+                let fbase = frow + qi * DP_CELLS_PER_K * 4;
+                let bbase = brow + qi * DP_CELLS_PER_K * 4;
+                let ebase = qi * 4;
+                for lane in 0..4 {
+                    *exp_m_ptr.add(ebase + lane) +=
+                        *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale;
+                    *exp_i_ptr.add(ebase + lane) +=
+                        *fdp.add(fbase + 8 + lane) * *bdp.add(bbase + 8 + lane) * dp_scale;
+                }
+            }
+
+            exp_n += *fx.add((i - 1) * NXCELLS + PXN)
+                * *bx.add(i * NXCELLS + PXN)
+                * njc_loop[0]
+                * scaleproduct;
+            exp_j += *fx.add((i - 1) * NXCELLS + PXJ)
+                * *bx.add(i * NXCELLS + PXJ)
+                * njc_loop[1]
+                * scaleproduct;
+            exp_c += *fx.add((i - 1) * NXCELLS + PXC)
+                * *bx.add(i * NXCELLS + PXC)
+                * njc_loop[2]
+                * scaleproduct;
+
+            if bck.has_own_scales {
+                scaleproduct *=
+                    *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
+            }
+        }
+
+        let norm = 1.0 / ld as f32;
+        for idx in 0..exp_len {
+            *exp_m_ptr.add(idx) *= norm;
+            *exp_i_ptr.add(idx) *= norm;
+        }
+        exp_n *= norm;
+        exp_c *= norm;
+        exp_j *= norm;
+        let xfactor = exp_n + exp_c + exp_j;
+
+        null2.resize(k, 1.0);
+        for x in 0..k {
+            let mut lanes = [0.0_f32; 4];
+            for qi in 0..q {
+                let ebase = qi * 4;
+                let odds = rfv[x][qi];
+                for lane in 0..4 {
+                    lanes[lane] += *exp_m_ptr.add(ebase + lane) * odds[lane];
+                    lanes[lane] += *exp_i_ptr.add(ebase + lane);
+                }
+            }
+            let h01 = lanes[0] + lanes[1];
+            let h23 = lanes[2] + lanes[3];
+            null2[x] = (h01 + h23) + xfactor;
+        }
+    }
 }
 
 pub fn p_null2_odds_from_gmx(pp: &Gmx, m: usize, k: usize, match_odds: &[f32]) -> Vec<f32> {
@@ -732,9 +892,8 @@ fn p_null2_odds_from_striped_pmx(
                     if node <= m {
                         denom += *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale;
                         if node < m {
-                            denom += *fdp.add(fbase + 8 + lane)
-                                * *bdp.add(bbase + 8 + lane)
-                                * dp_scale;
+                            denom +=
+                                *fdp.add(fbase + 8 + lane) * *bdp.add(bbase + 8 + lane) * dp_scale;
                         }
                     }
                 }
@@ -764,10 +923,8 @@ fn p_null2_odds_from_striped_pmx(
                     for lane in 0..4 {
                         let node = 1 + qi + lane * q;
                         if node <= m {
-                            *exp_m_ptr.add(ebase + lane) += *fdp.add(fbase + lane)
-                                * *bdp.add(bbase + lane)
-                                * dp_scale
-                                * inv;
+                            *exp_m_ptr.add(ebase + lane) +=
+                                *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale * inv;
                             if node < m {
                                 *exp_i_ptr.add(ebase + lane) += *fdp.add(fbase + 8 + lane)
                                     * *bdp.add(bbase + 8 + lane)
@@ -870,9 +1027,8 @@ fn p_null2_odds_from_striped_pmx_reuse(
                     if node <= m {
                         denom += *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale;
                         if node < m {
-                            denom += *fdp.add(fbase + 8 + lane)
-                                * *bdp.add(bbase + 8 + lane)
-                                * dp_scale;
+                            denom +=
+                                *fdp.add(fbase + 8 + lane) * *bdp.add(bbase + 8 + lane) * dp_scale;
                         }
                     }
                 }
@@ -902,10 +1058,8 @@ fn p_null2_odds_from_striped_pmx_reuse(
                     for lane in 0..4 {
                         let node = 1 + qi + lane * q;
                         if node <= m {
-                            *exp_m_ptr.add(ebase + lane) += *fdp.add(fbase + lane)
-                                * *bdp.add(bbase + lane)
-                                * dp_scale
-                                * inv;
+                            *exp_m_ptr.add(ebase + lane) +=
+                                *fdp.add(fbase + lane) * *bdp.add(bbase + lane) * dp_scale * inv;
                             if node < m {
                                 *exp_i_ptr.add(ebase + lane) += *fdp.add(fbase + 8 + lane)
                                     * *bdp.add(bbase + 8 + lane)

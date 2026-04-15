@@ -122,6 +122,136 @@ fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
+    use std::arch::x86_64::*;
+
+    const CEPHES_P0: f32 = 1.9875691500e-4;
+    const CEPHES_P1: f32 = 1.3981999507e-3;
+    const CEPHES_P2: f32 = 8.3334519073e-3;
+    const CEPHES_P3: f32 = 4.1665795894e-2;
+    const CEPHES_P4: f32 = 1.6666665459e-1;
+    const CEPHES_P5: f32 = 5.0000001201e-1;
+    const C0: f32 = 0.693359375;
+    const C1: f32 = -2.12194440e-4;
+    const LOG2R: f32 = 1.44269504088896341_f32;
+    const MAXLOGF: f32 = 88.3762626647949;
+    const MINLOGF: f32 = -88.3762626647949;
+
+    let mut xv = _mm_loadu_ps(x.as_ptr());
+    let maxmask = _mm_cmpgt_ps(xv, _mm_set1_ps(MAXLOGF));
+    let minmask = _mm_cmple_ps(xv, _mm_set1_ps(MINLOGF));
+
+    let mut fx = _mm_mul_ps(xv, _mm_set1_ps(LOG2R));
+    fx = _mm_add_ps(fx, _mm_set1_ps(0.5));
+
+    let mut k = _mm_cvttps_epi32(fx);
+    let tmp = _mm_cvtepi32_ps(k);
+    let mut mask = _mm_cmpgt_ps(tmp, fx);
+    mask = _mm_and_ps(mask, _mm_set1_ps(1.0));
+    fx = _mm_sub_ps(tmp, mask);
+    k = _mm_cvttps_epi32(fx);
+
+    let tmp = _mm_mul_ps(fx, _mm_set1_ps(C0));
+    let zc = _mm_mul_ps(fx, _mm_set1_ps(C1));
+    xv = _mm_sub_ps(xv, tmp);
+    xv = _mm_sub_ps(xv, zc);
+    let z = _mm_mul_ps(xv, xv);
+
+    let mut y = _mm_set1_ps(CEPHES_P0);
+    y = _mm_mul_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(CEPHES_P1));
+    y = _mm_mul_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(CEPHES_P2));
+    y = _mm_mul_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(CEPHES_P3));
+    y = _mm_mul_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(CEPHES_P4));
+    y = _mm_mul_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(CEPHES_P5));
+    y = _mm_mul_ps(y, z);
+    y = _mm_add_ps(y, xv);
+    y = _mm_add_ps(y, _mm_set1_ps(1.0));
+
+    k = _mm_add_epi32(k, _mm_set1_epi32(127));
+    k = _mm_slli_epi32(k, 23);
+    fx = _mm_castsi128_ps(k);
+    y = _mm_mul_ps(y, fx);
+
+    let infv = _mm_set1_ps(f32::INFINITY);
+    y = _mm_or_ps(_mm_and_ps(maxmask, infv), _mm_andnot_ps(maxmask, y));
+    y = _mm_andnot_ps(minmask, y);
+
+    let mut out = [0.0_f32; 4];
+    _mm_storeu_ps(out.as_mut_ptr(), y);
+    out
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
+    x.map(esl_sse_expf_lane)
+}
+
+/// Scalar fallback for Easel's `esl_sse_expf()` lane calculation.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn esl_sse_expf_lane(mut x: f32) -> f32 {
+    const CEPHES_P0: f32 = 1.9875691500e-4;
+    const CEPHES_P1: f32 = 1.3981999507e-3;
+    const CEPHES_P2: f32 = 8.3334519073e-3;
+    const CEPHES_P3: f32 = 4.1665795894e-2;
+    const CEPHES_P4: f32 = 1.6666665459e-1;
+    const CEPHES_P5: f32 = 5.0000001201e-1;
+    const C0: f32 = 0.693359375;
+    const C1: f32 = -2.12194440e-4;
+    const LOG2R: f32 = 1.44269504088896341_f32;
+    const MAXLOGF: f32 = 88.3762626647949;
+    const MINLOGF: f32 = -88.3762626647949;
+
+    if x > MAXLOGF {
+        return f32::INFINITY;
+    }
+    if x <= MINLOGF {
+        return 0.0;
+    }
+
+    let mut fx = x * LOG2R;
+    fx += 0.5;
+    let mut k = fx as i32;
+    let tmp = k as f32;
+    if tmp > fx {
+        fx = tmp - 1.0;
+        k -= 1;
+    } else {
+        fx = tmp;
+    }
+
+    let tmp = fx * C0;
+    let z = fx * C1;
+    x -= tmp;
+    x -= z;
+    let z = x * x;
+
+    let mut y = CEPHES_P0;
+    y *= x;
+    y += CEPHES_P1;
+    y *= x;
+    y += CEPHES_P2;
+    y *= x;
+    y += CEPHES_P3;
+    y *= x;
+    y += CEPHES_P4;
+    y *= x;
+    y += CEPHES_P5;
+    y *= z;
+    y += x;
+    y += 1.0;
+
+    let pow2 = f32::from_bits(((k + 127) as u32) << 23);
+    y * pow2
+}
+
 impl OProfile {
     /// Convert a generic Profile to an optimized OProfile for SSE2.
     pub fn convert(gm: &Profile) -> Self {
@@ -279,12 +409,19 @@ impl OProfile {
                 for z in 0..4 {
                     let node = ki + z * nqf;
                     tmp[z] = if node <= m {
-                        gm.msc(node, x).exp()
+                        gm.msc(node, x)
                     } else {
-                        0.0 // exp(-inf) = 0
+                        f32::NEG_INFINITY
                     };
                 }
-                rfv[x][qi] = tmp;
+                #[cfg(target_arch = "x86_64")]
+                {
+                    rfv[x][qi] = unsafe { esl_sse_expf4(tmp) };
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    rfv[x][qi] = esl_sse_expf4(tmp);
+                }
                 qi += 1;
                 ki += 1;
             }
@@ -309,12 +446,19 @@ impl OProfile {
                 for z in 0..4 {
                     let node = kb + z * nqf;
                     tmp[z] = if node < m {
-                        gm.tsc(node, tg).exp()
+                        gm.tsc(node, tg)
                     } else {
-                        0.0
+                        f32::NEG_INFINITY
                     };
                 }
-                tfv[j] = tmp;
+                #[cfg(target_arch = "x86_64")]
+                {
+                    tfv[j] = unsafe { esl_sse_expf4(tmp) };
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    tfv[j] = esl_sse_expf4(tmp);
+                }
                 j += 1;
             }
         }
@@ -325,12 +469,19 @@ impl OProfile {
             for z in 0..4 {
                 let node = ki + z * nqf;
                 tmp[z] = if node < m {
-                    gm.tsc(node, P7P_DD).exp()
+                    gm.tsc(node, P7P_DD)
                 } else {
-                    0.0
+                    f32::NEG_INFINITY
                 };
             }
-            tfv[j] = tmp;
+            #[cfg(target_arch = "x86_64")]
+            {
+                tfv[j] = unsafe { esl_sse_expf4(tmp) };
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                tfv[j] = esl_sse_expf4(tmp);
+            }
             j += 1;
         }
 
@@ -393,6 +544,34 @@ impl OProfile {
         self.xf[P7O_C][P7O_MOVE] = pmove;
         self.xf[P7O_J][P7O_LOOP] = ploop;
         self.xf[P7O_J][P7O_MOVE] = pmove;
+    }
+
+    /// Reconfigure the optimized profile into multihit mode for target length `l`.
+    /// Mirrors `p7_oprofile_ReconfigMultihit()` so callers do not rebuild via
+    /// generic log-space scores and lose low-bit parity.
+    pub fn reconfig_multihit(&mut self, l: i32) {
+        self.xf[P7O_E][P7O_MOVE] = 0.5;
+        self.xf[P7O_E][P7O_LOOP] = 0.5;
+        self.nj = 1.0;
+
+        let e = -std::f32::consts::LN_2;
+        self.xw[P7O_E][P7O_MOVE] = wordify(self.scale_w, e);
+        self.xw[P7O_E][P7O_LOOP] = wordify(self.scale_w, e);
+
+        self.reconfig_length(l);
+    }
+
+    /// Reconfigure the optimized profile into unihit mode for target length `l`.
+    /// Mirrors `p7_oprofile_ReconfigUnihit()`.
+    pub fn reconfig_unihit(&mut self, l: i32) {
+        self.xf[P7O_E][P7O_MOVE] = 1.0;
+        self.xf[P7O_E][P7O_LOOP] = 0.0;
+        self.nj = 0.0;
+
+        self.xw[P7O_E][P7O_MOVE] = 0;
+        self.xw[P7O_E][P7O_LOOP] = i16::MIN;
+
+        self.reconfig_length(l);
     }
 
     /// Access a transition score from the underlying profile data.

@@ -7,6 +7,605 @@ use std::arch::x86_64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_row_sums_q1e5(
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    let mut msum = 0.0_f32;
+    let mut dsum = 0.0_f32;
+    for qi in 0..q_count {
+        let mut mlanes = [0.0_f32; 4];
+        let mut dlanes = [0.0_f32; 4];
+        _mm_storeu_ps(mlanes.as_mut_ptr(), dp[qi * 3]);
+        _mm_storeu_ps(dlanes.as_mut_ptr(), dp[qi * 3 + 1]);
+        for lane in 0..4 {
+            let k = qi + 1 + lane * q_count;
+            if k <= m {
+                msum += mlanes[lane];
+                dsum += dlanes[lane];
+            }
+        }
+    }
+
+    let mut th = match row {
+        18 => tracehash::th_call!("simd_forward_engine_row18_msum_q1e5"),
+        19 => tracehash::th_call!("simd_forward_engine_row19_msum_q1e5"),
+        _ => tracehash::th_call!("simd_forward_engine_row20_msum_q1e5"),
+    };
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_f32_quant(msum, 1.0e-5);
+    th.finish();
+
+    let mut th = match row {
+        18 => tracehash::th_call!("simd_forward_engine_row18_dsum_q1e5"),
+        19 => tracehash::th_call!("simd_forward_engine_row19_dsum_q1e5"),
+        _ => tracehash::th_call!("simd_forward_engine_row20_dsum_q1e5"),
+    };
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_f32_quant(dsum, 1.0e-5);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_row_q1e5(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    let mut sums = [0.0_f32; 3];
+    for qi in 0..q_count {
+        for state in 0..3 {
+            let mut lanes = [0.0_f32; 4];
+            _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3 + state]);
+            for (lane, value) in lanes.iter().enumerate() {
+                let k = qi + 1 + lane * q_count;
+                if k <= m {
+                    sums[state] += *value;
+                }
+            }
+        }
+    }
+
+    macro_rules! emit_sum {
+        ($name:literal, $value:expr) => {{
+            let mut th = tracehash::th_call!($name);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.output_f32_quant($value, 1.0e-5);
+            th.finish();
+        }};
+    }
+    emit_sum!("simd_forward_engine_scale10_msum_q1e5", sums[0]);
+    emit_sum!("simd_forward_engine_scale10_dsum_q1e5", sums[1]);
+    emit_sum!("simd_forward_engine_scale10_isum_q1e5", sums[2]);
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_window_row_q1e5(
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    let mut sums = [0.0_f32; 3];
+    for qi in 0..q_count {
+        for state in 0..3 {
+            let mut lanes = [0.0_f32; 4];
+            _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3 + state]);
+            for (lane, value) in lanes.iter().enumerate() {
+                let k = qi + 1 + lane * q_count;
+                if k <= m {
+                    sums[state] += *value;
+                }
+            }
+        }
+    }
+
+    let mut th = tracehash::th_call!("simd_forward_engine_scale10_window_row_q1e5");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(row);
+    th.output_f32_quant(sums[0], 1.0e-5);
+    th.output_f32_quant(sums[1], 1.0e-5);
+    th.output_f32_quant(sums[2], 1.0e-5);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_window_row_bits(
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hashes = [FNV_OFFSET; 3];
+    for qi in 0..q_count {
+        for state in 0..3 {
+            let mut lanes = [0.0_f32; 4];
+            _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3 + state]);
+            for (lane, value) in lanes.iter().enumerate() {
+                let k = qi + 1 + lane * q_count;
+                if k <= m {
+                    hashes[state] ^= value.to_bits() as u64;
+                    hashes[state] = hashes[state].wrapping_mul(FNV_PRIME);
+                }
+            }
+        }
+    }
+
+    macro_rules! emit_state {
+        ($name:literal, $hash:expr) => {{
+            let mut th = tracehash::th_call!($name);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.input_usize(row);
+            th.output_u64($hash);
+            th.finish();
+        }};
+    }
+    emit_state!("simd_forward_engine_scale10_window_m_bits", hashes[0]);
+    emit_state!("simd_forward_engine_scale10_window_d_bits", hashes[1]);
+    emit_state!("simd_forward_engine_scale10_window_i_bits", hashes[2]);
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale_event_row_bits(
+    event: usize,
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hashes = [FNV_OFFSET; 3];
+    for qi in 0..q_count {
+        for state in 0..3 {
+            let mut lanes = [0.0_f32; 4];
+            _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3 + state]);
+            for (lane, value) in lanes.iter().enumerate() {
+                let k = qi + 1 + lane * q_count;
+                if k <= m {
+                    hashes[state] ^= value.to_bits() as u64;
+                    hashes[state] = hashes[state].wrapping_mul(FNV_PRIME);
+                }
+            }
+        }
+    }
+
+    let mut th = tracehash::th_call!("simd_forward_engine_scale_event_row_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(event);
+    th.output_u64(row as u64);
+    th.output_u64(hashes[0]);
+    th.output_u64(hashes[1]);
+    th.output_u64(hashes[2]);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_phase_q1e5(
+    name: &'static str,
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    let mut sums = [0.0_f32; 3];
+    for qi in 0..q_count {
+        for state in 0..3 {
+            let mut lanes = [0.0_f32; 4];
+            _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3 + state]);
+            for (lane, value) in lanes.iter().enumerate() {
+                let k = qi + 1 + lane * q_count;
+                if k <= m {
+                    sums[state] += *value;
+                }
+            }
+        }
+    }
+
+    macro_rules! emit_phase {
+        ($trace_name:literal) => {{
+            let mut th = tracehash::th_call!($trace_name);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.input_usize(row);
+            th.output_f32_quant(sums[0], 1.0e-5);
+            th.output_f32_quant(sums[1], 1.0e-5);
+            th.output_f32_quant(sums[2], 1.0e-5);
+            th.finish();
+        }};
+    }
+
+    match name {
+        "main" => emit_phase!("simd_forward_engine_scale10_phase_main_q1e5"),
+        _ => emit_phase!("simd_forward_engine_scale10_phase_dd_q1e5"),
+    }
+
+    if name == "main" {
+        macro_rules! emit_main_sum {
+            ($trace_name:literal, $value:expr) => {{
+                let mut th = tracehash::th_call!($trace_name);
+                th.input_usize(l);
+                th.input_usize(m);
+                th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+                th.input_usize(row);
+                th.output_f32_quant($value, 1.0e-5);
+                th.finish();
+            }};
+        }
+        emit_main_sum!("simd_forward_engine_scale10_phase_main_msum_q1e5", sums[0]);
+        emit_main_sum!("simd_forward_engine_scale10_phase_main_dsum_q1e5", sums[1]);
+        emit_main_sum!("simd_forward_engine_scale10_phase_main_isum_q1e5", sums[2]);
+    }
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
+    row: usize,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q_count: usize,
+    dp: &[__m128],
+) {
+    let mut buckets = [0.0_f32; 5];
+    for qi in 0..q_count {
+        let mut lanes = [0.0_f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), dp[qi * 3]);
+        let bucket = if qi < 8 {
+            0
+        } else if qi < 16 {
+            1
+        } else if qi < 32 {
+            2
+        } else if qi < 64 {
+            3
+        } else {
+            4
+        };
+        for (lane, value) in lanes.iter().enumerate() {
+            let k = qi + 1 + lane * q_count;
+            if k <= m {
+                buckets[bucket] += *value;
+            }
+        }
+    }
+
+    let mut th = tracehash::th_call!("simd_forward_engine_scale10_phase_main_m_buckets_q1e5");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(row);
+    for value in buckets {
+        th.output_f32_quant(value, 1.0e-5);
+    }
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_scale10_xev_bits(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    xev: __m128,
+) {
+    let mut lanes = [0.0_f32; 4];
+    _mm_storeu_ps(lanes.as_mut_ptr(), xev);
+    let mut th = tracehash::th_call!("simd_forward_engine_scale10_xev_lanes_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    for lane in lanes {
+        th.output_u64(lane.to_bits() as u64);
+    }
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_scale10_xe_bits(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    xe: f32,
+) {
+    let mut th = tracehash::th_call!("simd_forward_engine_scale10_xe_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_u64(xe.to_bits() as u64);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_scale10_row_start_bits(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    row: usize,
+    xn: f32,
+    xj: f32,
+    xb: f32,
+    xc: f32,
+) {
+    let mut th = tracehash::th_call!("simd_forward_engine_scale10_row_start_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(row);
+    th.output_u64(xn.to_bits() as u64);
+    th.output_u64(xj.to_bits() as u64);
+    th.output_u64(xb.to_bits() as u64);
+    th.output_u64(xc.to_bits() as u64);
+    th.finish();
+
+    macro_rules! emit_special {
+        ($name:literal, $value:expr) => {{
+            let mut th = tracehash::th_call!($name);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.input_usize(row);
+            th.output_u64($value.to_bits() as u64);
+            th.finish();
+        }};
+    }
+    emit_special!("simd_forward_engine_scale10_row_start_xn_bits", xn);
+    emit_special!("simd_forward_engine_scale10_row_start_xj_bits", xj);
+    emit_special!("simd_forward_engine_scale10_row_start_xb_bits", xb);
+    emit_special!("simd_forward_engine_scale10_row_start_xc_bits", xc);
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_forward_engine_row19_xev_bits(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    xev: __m128,
+) {
+    let mut lanes = [0.0_f32; 4];
+    _mm_storeu_ps(lanes.as_mut_ptr(), xev);
+    let mut th = tracehash::th_call!("simd_forward_engine_row19_xev_lanes_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    for lane in lanes {
+        th.output_u64(lane.to_bits() as u64);
+    }
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_row19_xe_bits(dsq: &[Dsq], dsq_offset: usize, l: usize, m: usize, xe: f32) {
+    let mut th = tracehash::th_call!("simd_forward_engine_row19_xe_bits");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_u64(xe.to_bits() as u64);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_first_scale_q1e5(
+    do_full: bool,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    row: usize,
+    pre_xe: f32,
+    xn: f32,
+    xj: f32,
+    xb: f32,
+    xc: f32,
+) {
+    let mut th = tracehash::th_call!("simd_forward_engine_first_scale_q1e5");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_u64(row as u64);
+    th.output_u64(pre_xe.to_bits() as u64);
+    th.output_f32_quant(xn, 1.0e-5);
+    th.output_f32_quant(xj, 1.0e-5);
+    th.output_f32_quant(xb, 1.0e-5);
+    th.output_f32_quant(xc, 1.0e-5);
+    th.finish();
+
+    let mut th = tracehash::th_call!("simd_forward_engine_first_scale_row");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_u64(row as u64);
+    th.finish();
+
+    let mut th = tracehash::th_call!("simd_forward_engine_first_scale_xe_bits");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_u64(pre_xe.to_bits() as u64);
+    th.finish();
+
+    let mut th = tracehash::th_call!("simd_forward_engine_first_scale_post_specials_q1e5");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_f32_quant(xn, 1.0e-5);
+    th.output_f32_quant(xj, 1.0e-5);
+    th.output_f32_quant(xb, 1.0e-5);
+    th.output_f32_quant(xc, 1.0e-5);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_scale_event_detail_q1e5(
+    event: usize,
+    do_full: bool,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    row: usize,
+    pre_xe: f32,
+    xn: f32,
+    xj: f32,
+    xb: f32,
+    xc: f32,
+) {
+    let mut th = tracehash::th_call!("simd_forward_engine_scale_event_detail");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(event);
+    th.output_u64(row as u64);
+    th.output_u64(pre_xe.to_bits() as u64);
+    th.output_f32_quant(xn, 1.0e-5);
+    th.output_f32_quant(xj, 1.0e-5);
+    th.output_f32_quant(xb, 1.0e-5);
+    th.output_f32_quant(xc, 1.0e-5);
+    th.finish();
+
+    let mut th = tracehash::th_call!("simd_forward_engine_scale_event_row");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(event);
+    th.output_u64(row as u64);
+    th.finish();
+
+    let mut th = tracehash::th_call!("simd_forward_engine_scale_event_xe_bits");
+    th.input_bool(do_full);
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.input_usize(event);
+    th.output_u64(pre_xe.to_bits() as u64);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_forward_engine_scale_event_q1e5(
+    event: usize,
+    do_full: bool,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    row: usize,
+    pre_xe: f32,
+    xn: f32,
+    xj: f32,
+    xb: f32,
+    xc: f32,
+) {
+    if event == 1 {
+        trace_forward_engine_first_scale_q1e5(
+            do_full, dsq, dsq_offset, l, m, row, pre_xe, xn, xj, xb, xc,
+        );
+        return;
+    }
+
+    macro_rules! trace_split {
+        ($row_name:literal, $xe_name:literal, $sp_name:literal) => {{
+            let mut th = tracehash::th_call!($row_name);
+            th.input_bool(do_full);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.output_u64(row as u64);
+            th.finish();
+
+            let mut th = tracehash::th_call!($xe_name);
+            th.input_bool(do_full);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.output_u64(pre_xe.to_bits() as u64);
+            th.finish();
+
+            let mut th = tracehash::th_call!($sp_name);
+            th.input_bool(do_full);
+            th.input_usize(l);
+            th.input_usize(m);
+            th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+            th.output_f32_quant(xn, 1.0e-5);
+            th.output_f32_quant(xj, 1.0e-5);
+            th.output_f32_quant(xb, 1.0e-5);
+            th.output_f32_quant(xc, 1.0e-5);
+            th.finish();
+        }};
+    }
+
+    match event {
+        2 => trace_split!(
+            "simd_forward_engine_scale2_row",
+            "simd_forward_engine_scale2_xe_bits",
+            "simd_forward_engine_scale2_post_specials_q1e5"
+        ),
+        3 => trace_split!(
+            "simd_forward_engine_scale3_row",
+            "simd_forward_engine_scale3_xe_bits",
+            "simd_forward_engine_scale3_post_specials_q1e5"
+        ),
+        4 => trace_split!(
+            "simd_forward_engine_scale4_row",
+            "simd_forward_engine_scale4_xe_bits",
+            "simd_forward_engine_scale4_post_specials_q1e5"
+        ),
+        _ => trace_split!(
+            "simd_forward_engine_scale_last_row",
+            "simd_forward_engine_scale_last_xe_bits",
+            "simd_forward_engine_scale_last_post_specials_q1e5"
+        ),
+    }
+}
+
 /// SSE Forward parser. Returns Forward score in nats.
 ///
 /// # Safety
@@ -185,10 +784,10 @@ pub unsafe fn forward_parser_offset(
         // Sparse rescaling when xE gets large
         if xe > 1.0e4 {
             let scale = 1.0 / xe;
-            xn *= scale;
-            xc *= scale;
-            xj *= scale;
-            xb *= scale;
+            xn /= xe;
+            xc /= xe;
+            xj /= xe;
+            xb /= xe;
             let scale_v = _mm_set1_ps(scale);
             for q in 0..q_count {
                 mmo!(q) = _mm_mul_ps(mmo!(q), scale_v);
@@ -247,7 +846,8 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     pmx: &mut super::probmx::ProbMx,
     dp: &mut Vec<__m128>,
 ) -> f32 {
-    if pmx.has_dp && canonical_run(dsq, dsq_offset, l, om.abc_kp) {
+    const USE_DIRECT_FULL_DP_FORWARD: bool = false;
+    if USE_DIRECT_FULL_DP_FORWARD && pmx.has_dp && canonical_run(dsq, dsq_offset, l, om.abc_kp) {
         return forward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx);
     }
 
@@ -270,6 +870,10 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     let mut xc: f32 = 0.0;
     let mut totscale: f64 = 0.0; // f64 precision for domain decoding
     let mut score_scale: f32 = 0.0; // C forward_engine-style score accumulation
+    #[cfg(feature = "tracehash")]
+    let mut trace_scale_event_count = 0usize;
+    #[cfg(feature = "tracehash")]
+    let mut trace_last_scale_event = None;
 
     macro_rules! mmo {
         ($q:expr) => {
@@ -294,6 +898,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     pmx.set_xmx(0, PXB, xb);
     pmx.set_xmx(0, PXC, 0.0);
     pmx.scale[0] = 0.0;
+    pmx.row_scale[0] = 1.0;
 
     for i in 1..=l {
         let xi = dsq[dsq_offset + i] as usize;
@@ -312,6 +917,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             pmx.set_xmx(i, PXB, xb);
             pmx.set_xmx(i, PXC, xc);
             pmx.scale[i] = totscale;
+            pmx.row_scale[i] = 1.0;
             continue;
         }
 
@@ -319,6 +925,12 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
         let xbv = _mm_set1_ps(xb);
         let mut dcv = zerov;
         let mut xev = zerov;
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && i == 919) || (l == 465 && i == 291) {
+            trace_forward_engine_scale10_row_start_bits(
+                dsq, dsq_offset, l, om.m, i, xn, xj, xb, xc,
+            );
+        }
 
         let mut mpv = rightshift_float(mmo!(q_count - 1));
         let mut dpv = rightshift_float(dmo!(q_count - 1));
@@ -357,6 +969,16 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             imo!(q_idx) = _mm_add_ps(_mm_mul_ps(mpv, tmi), _mm_mul_ps(ipv, tii));
         }
 
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && i == 919) || (l == 465 && i == 291) {
+            trace_forward_engine_scale10_phase_q1e5(
+                "main", i, dsq, dsq_offset, l, om.m, q_count, dp,
+            );
+            trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
+                i, dsq, dsq_offset, l, om.m, q_count, dp,
+            );
+        }
+
         // D->D wing unfolding
         {
             let dd_offset = 7 * q_count;
@@ -364,7 +986,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             dmo!(0) = zerov;
             for q_idx in 0..q_count {
                 let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
-                dmo!(q_idx) = _mm_add_ps(dmo!(q_idx), dcv);
+                dmo!(q_idx) = _mm_add_ps(dcv, dmo!(q_idx));
                 dcv = _mm_mul_ps(dmo!(q_idx), tdd);
             }
             if om.m < 100 {
@@ -372,7 +994,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                     dcv = rightshift_float(dcv);
                     for q_idx in 0..q_count {
                         let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
-                        dmo!(q_idx) = _mm_add_ps(dmo!(q_idx), dcv);
+                        dmo!(q_idx) = _mm_add_ps(dcv, dmo!(q_idx));
                         dcv = _mm_mul_ps(dcv, tdd);
                     }
                 }
@@ -382,7 +1004,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                     let mut cv = zerov;
                     for q_idx in 0..q_count {
                         let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
-                        let sv = _mm_add_ps(dmo!(q_idx), dcv);
+                        let sv = _mm_add_ps(dcv, dmo!(q_idx));
                         cv = _mm_or_ps(cv, _mm_cmpgt_ps(sv, dmo!(q_idx)));
                         dmo!(q_idx) = sv;
                         dcv = _mm_mul_ps(dcv, tdd);
@@ -394,9 +1016,39 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             }
         }
 
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && i == 919) || (l == 465 && i == 291) {
+            trace_forward_engine_scale10_phase_q1e5("dd", i, dsq, dsq_offset, l, om.m, q_count, dp);
+        }
+
         // E state = sum(M) + sum(D)
         for q_idx in 0..q_count {
             xev = _mm_add_ps(dmo!(q_idx), xev);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 18 || i == 19 || i == 20 {
+            trace_forward_engine_row_sums_q1e5(i, dsq, dsq_offset, l, om.m, q_count, dp);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 19 {
+            trace_forward_engine_row19_xev_bits(dsq, dsq_offset, l, om.m, xev);
+        }
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && i == 919) || (l == 465 && i == 292) {
+            trace_forward_engine_scale10_row_q1e5(dsq, dsq_offset, l, om.m, q_count, dp);
+            trace_forward_engine_scale10_xev_bits(dsq, dsq_offset, l, om.m, xev);
+        }
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && matches!(i, 847 | 860 | 880 | 900 | 918 | 919))
+            || (l == 465 && matches!(i, 232 | 240 | 260 | 280 | 285 | 288 | 289 | 290 | 291 | 292))
+        {
+            trace_forward_engine_scale10_window_row_q1e5(i, dsq, dsq_offset, l, om.m, q_count, dp);
+        }
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && matches!(i, 918 | 919))
+            || (l == 465 && matches!(i, 280 | 285 | 288 | 289 | 290 | 291 | 292))
+        {
+            trace_forward_engine_scale10_window_row_bits(i, dsq, dsq_offset, l, om.m, q_count, dp);
         }
         xev = _mm_add_ps(
             xev,
@@ -407,6 +1059,14 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(xev, xev),
         );
         _mm_store_ss(&mut xe, xev);
+        #[cfg(feature = "tracehash")]
+        if i == 19 {
+            trace_forward_engine_row19_xe_bits(dsq, dsq_offset, l, om.m, xe);
+        }
+        #[cfg(feature = "tracehash")]
+        if (l == 1130 && i == 919) || (l == 465 && i == 292) {
+            trace_forward_engine_scale10_xe_bits(dsq, dsq_offset, l, om.m, xe);
+        }
 
         // Special states
         xn *= om.xf[P7O_N][P7O_LOOP];
@@ -415,21 +1075,73 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
         xb = xj * om.xf[P7O_J][P7O_MOVE] + xn * om.xf[P7O_N][P7O_MOVE];
 
         // Sparse rescaling
-        if xe > 1.0e4 {
+        let row_scale = if xe > 1.0e4 {
+            let row_scale = xe;
             let inv_xe = 1.0 / xe;
             let scalev = _mm_set1_ps(inv_xe);
-            xn *= inv_xe;
-            xc *= inv_xe;
-            xj *= inv_xe;
-            xb *= inv_xe;
+            xn /= row_scale;
+            xc /= row_scale;
+            xj /= row_scale;
+            xb /= row_scale;
+            #[cfg(feature = "tracehash")]
+            {
+                trace_scale_event_count += 1;
+                trace_forward_engine_scale_event_detail_q1e5(
+                    trace_scale_event_count,
+                    pmx.has_dp,
+                    dsq,
+                    dsq_offset,
+                    l,
+                    om.m,
+                    i,
+                    row_scale,
+                    xn,
+                    xj,
+                    xb,
+                    xc,
+                );
+                if trace_scale_event_count <= 4 {
+                    trace_forward_engine_scale_event_q1e5(
+                        trace_scale_event_count,
+                        pmx.has_dp,
+                        dsq,
+                        dsq_offset,
+                        l,
+                        om.m,
+                        i,
+                        row_scale,
+                        xn,
+                        xj,
+                        xb,
+                        xc,
+                    );
+                }
+                trace_last_scale_event = Some((i, row_scale, xn, xj, xb, xc));
+            }
             for q_idx in 0..(q_count * nscells) {
                 let p = dp_ptr.add(q_idx);
                 *p = _mm_mul_ps(*p, scalev);
             }
+            #[cfg(feature = "tracehash")]
+            if matches!(l, 465 | 1130) && trace_scale_event_count <= 10 {
+                trace_forward_engine_scale_event_row_bits(
+                    trace_scale_event_count,
+                    i,
+                    dsq,
+                    dsq_offset,
+                    l,
+                    om.m,
+                    q_count,
+                    dp,
+                );
+            }
             totscale += (xe as f64).ln();
             score_scale += xe.ln();
             xe = 1.0;
-        }
+            row_scale
+        } else {
+            1.0
+        };
 
         // Store full DP row if requested (for posterior decoding / null2)
         if pmx.has_dp {
@@ -442,6 +1154,15 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
         pmx.set_xmx(i, PXB, xb);
         pmx.set_xmx(i, PXC, xc);
         pmx.scale[i] = totscale;
+        pmx.row_scale[i] = row_scale;
+    }
+
+    #[cfg(feature = "tracehash")]
+    if let Some((row, pre_xe, last_xn, last_xj, last_xb, last_xc)) = trace_last_scale_event {
+        trace_forward_engine_scale_event_q1e5(
+            0, pmx.has_dp, dsq, dsq_offset, l, om.m, row, pre_xe, last_xn, last_xj, last_xb,
+            last_xc,
+        );
     }
 
     let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
@@ -470,6 +1191,7 @@ unsafe fn forward_parser_pmx_offset_direct(
     let striped_ptr = pmx.striped_dp.as_mut_ptr();
     let xmx_ptr = pmx.xmx.as_mut_ptr();
     let scale_ptr = pmx.scale.as_mut_ptr();
+    let row_scale_ptr = pmx.row_scale.as_mut_ptr();
     let rfv_ptr = om.rfv.as_ptr();
     let tfv_ptr = om.tfv.as_ptr();
 
@@ -480,6 +1202,10 @@ unsafe fn forward_parser_pmx_offset_direct(
     let mut xc: f32 = 0.0;
     let mut totscale: f64 = 0.0;
     let mut score_scale: f32 = 0.0;
+    #[cfg(feature = "tracehash")]
+    let mut trace_scale_event_count = 0usize;
+    #[cfg(feature = "tracehash")]
+    let mut trace_last_scale_event = None;
 
     #[inline(always)]
     unsafe fn load_cell(row: *const f32, q: usize, s: usize) -> __m128 {
@@ -492,15 +1218,7 @@ unsafe fn forward_parser_pmx_offset_direct(
     }
 
     #[inline(always)]
-    unsafe fn store_xmx(
-        xmx: *mut f32,
-        i: usize,
-        xe: f32,
-        xn: f32,
-        xj: f32,
-        xb: f32,
-        xc: f32,
-    ) {
+    unsafe fn store_xmx(xmx: *mut f32, i: usize, xe: f32, xn: f32, xj: f32, xb: f32, xc: f32) {
         let row = xmx.add(i * 5);
         *row.add(PXE) = xe;
         *row.add(PXN) = xn;
@@ -511,6 +1229,7 @@ unsafe fn forward_parser_pmx_offset_direct(
 
     store_xmx(xmx_ptr, 0, 0.0, xn, 0.0, xb, 0.0);
     *scale_ptr = 0.0;
+    *row_scale_ptr = 1.0;
 
     for i in 1..=l {
         let prev_row = striped_ptr.add((i - 1) * row_width) as *const f32;
@@ -566,7 +1285,7 @@ unsafe fn forward_parser_pmx_offset_direct(
             store_cell(curr_row, 0, 1, zerov);
             for q_idx in 0..q_count {
                 let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
-                let d = _mm_add_ps(load_cell(curr_row, q_idx, 1), dcv);
+                let d = _mm_add_ps(dcv, load_cell(curr_row, q_idx, 1));
                 store_cell(curr_row, q_idx, 1, d);
                 dcv = _mm_mul_ps(d, tdd);
             }
@@ -575,7 +1294,7 @@ unsafe fn forward_parser_pmx_offset_direct(
                     dcv = rightshift_float(dcv);
                     for q_idx in 0..q_count {
                         let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
-                        let d = _mm_add_ps(load_cell(curr_row, q_idx, 1), dcv);
+                        let d = _mm_add_ps(dcv, load_cell(curr_row, q_idx, 1));
                         store_cell(curr_row, q_idx, 1, d);
                         dcv = _mm_mul_ps(dcv, tdd);
                     }
@@ -587,7 +1306,7 @@ unsafe fn forward_parser_pmx_offset_direct(
                     for q_idx in 0..q_count {
                         let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                         let old_d = load_cell(curr_row, q_idx, 1);
-                        let d = _mm_add_ps(old_d, dcv);
+                        let d = _mm_add_ps(dcv, old_d);
                         cv = _mm_or_ps(cv, _mm_cmpgt_ps(d, old_d));
                         store_cell(curr_row, q_idx, 1, d);
                         dcv = _mm_mul_ps(dcv, tdd);
@@ -602,6 +1321,15 @@ unsafe fn forward_parser_pmx_offset_direct(
         for q_idx in 0..q_count {
             xev = _mm_add_ps(load_cell(curr_row, q_idx, 1), xev);
         }
+        #[cfg(feature = "tracehash")]
+        if i == 18 || i == 19 || i == 20 {
+            let row = std::slice::from_raw_parts(curr_row as *const __m128, q_count * 3);
+            trace_forward_engine_row_sums_q1e5(i, dsq, dsq_offset, l, om.m, q_count, row);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 19 {
+            trace_forward_engine_row19_xev_bits(dsq, dsq_offset, l, om.m, xev);
+        }
         xev = _mm_add_ps(
             xev,
             _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(xev, xev),
@@ -611,19 +1339,59 @@ unsafe fn forward_parser_pmx_offset_direct(
             _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(xev, xev),
         );
         _mm_store_ss(&mut xe, xev);
+        #[cfg(feature = "tracehash")]
+        if i == 19 {
+            trace_forward_engine_row19_xe_bits(dsq, dsq_offset, l, om.m, xe);
+        }
 
         xn *= om.xf[P7O_N][P7O_LOOP];
         xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
         xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
         xb = xj * om.xf[P7O_J][P7O_MOVE] + xn * om.xf[P7O_N][P7O_MOVE];
 
-        if xe > 1.0e4 {
+        let row_scale = if xe > 1.0e4 {
+            let row_scale = xe;
             let inv_xe = 1.0 / xe;
             let scalev = _mm_set1_ps(inv_xe);
-            xn *= inv_xe;
-            xc *= inv_xe;
-            xj *= inv_xe;
-            xb *= inv_xe;
+            xn /= row_scale;
+            xc /= row_scale;
+            xj /= row_scale;
+            xb /= row_scale;
+            #[cfg(feature = "tracehash")]
+            {
+                trace_scale_event_count += 1;
+                trace_forward_engine_scale_event_detail_q1e5(
+                    trace_scale_event_count,
+                    true,
+                    dsq,
+                    dsq_offset,
+                    l,
+                    om.m,
+                    i,
+                    row_scale,
+                    xn,
+                    xj,
+                    xb,
+                    xc,
+                );
+                if trace_scale_event_count <= 4 {
+                    trace_forward_engine_scale_event_q1e5(
+                        trace_scale_event_count,
+                        true,
+                        dsq,
+                        dsq_offset,
+                        l,
+                        om.m,
+                        i,
+                        row_scale,
+                        xn,
+                        xj,
+                        xb,
+                        xc,
+                    );
+                }
+                trace_last_scale_event = Some((i, row_scale, xn, xj, xb, xc));
+            }
             let mut off = 0;
             while off < row_width {
                 let p = curr_row.add(off);
@@ -633,10 +1401,21 @@ unsafe fn forward_parser_pmx_offset_direct(
             totscale += (xe as f64).ln();
             score_scale += xe.ln();
             xe = 1.0;
-        }
+            row_scale
+        } else {
+            1.0
+        };
 
         store_xmx(xmx_ptr, i, xe, xn, xj, xb, xc);
         *scale_ptr.add(i) = totscale;
+        *row_scale_ptr.add(i) = row_scale;
+    }
+
+    #[cfg(feature = "tracehash")]
+    if let Some((row, pre_xe, last_xn, last_xj, last_xb, last_xc)) = trace_last_scale_event {
+        trace_forward_engine_scale_event_q1e5(
+            0, true, dsq, dsq_offset, l, om.m, row, pre_xe, last_xn, last_xj, last_xb, last_xc,
+        );
     }
 
     if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
@@ -843,10 +1622,10 @@ pub unsafe fn forward_parser_with_specials(
         // Rescaling
         if xe > 1.0e4 {
             let scale = 1.0 / xe;
-            xn *= scale;
-            xc *= scale;
-            xj *= scale;
-            xb *= scale;
+            xn /= xe;
+            xc /= xe;
+            xj /= xe;
+            xb /= xe;
             let scale_v = _mm_set1_ps(scale);
             for q in 0..q_count {
                 mmo!(q) = _mm_mul_ps(mmo!(q), scale_v);

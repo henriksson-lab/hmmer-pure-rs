@@ -7,6 +7,205 @@ use crate::profile::*;
 use crate::trace::{State, Trace};
 use crate::util::random::MersenneTwister;
 
+#[cfg(target_arch = "x86_64")]
+use crate::simd::oprofile::*;
+#[cfg(target_arch = "x86_64")]
+use crate::simd::probmx::{ProbMx, PXB, PXC, PXE, PXJ, PXN};
+
+#[cfg(target_arch = "x86_64")]
+pub fn stochastic_trace_pmx(
+    rng: &mut MersenneTwister,
+    l: usize,
+    om: &OProfile,
+    ox: &ProbMx,
+) -> Trace {
+    let mut tr = Trace::new();
+    let mut i = l;
+    let mut k = 0usize;
+    tr.append(State::T, k, i);
+    tr.append(State::C, k, i);
+    let mut s0 = State::C;
+
+    while s0 != State::S {
+        let s1 = match s0 {
+            State::M => {
+                let next = select_m_pmx(rng, om, ox, i, k);
+                k -= 1;
+                i -= 1;
+                next
+            }
+            State::D => {
+                let next = select_d_pmx(rng, om, ox, i, k);
+                k -= 1;
+                next
+            }
+            State::I => {
+                let next = select_i_pmx(rng, om, ox, i, k);
+                i -= 1;
+                next
+            }
+            State::N => {
+                if i == 0 {
+                    State::S
+                } else {
+                    State::N
+                }
+            }
+            State::C => select_c_pmx(rng, om, ox, i),
+            State::J => select_j_pmx(rng, om, ox, i),
+            State::E => select_e_pmx(rng, om, ox, i, &mut k),
+            State::B => select_b_pmx(rng, om, ox, i),
+            _ => State::S,
+        };
+        tr.append(s1, k, i);
+        if matches!(s1, State::N | State::J | State::C) && s1 == s0 {
+            i -= 1;
+        }
+        s0 = s1;
+    }
+
+    tr.st.reverse();
+    tr.k.reverse();
+    tr.i.reverse();
+    tr
+}
+
+#[cfg(target_arch = "x86_64")]
+fn tfv(om: &OProfile, k: usize, t: usize) -> f32 {
+    let q = (k - 1) % nqf(om.m);
+    let lane = (k - 1) / nqf(om.m);
+    om.tfv[7 * q + t][lane]
+}
+
+#[cfg(target_arch = "x86_64")]
+fn tfv_dd(om: &OProfile, k: usize) -> f32 {
+    let q = (k - 1) % nqf(om.m);
+    let lane = (k - 1) / nqf(om.m);
+    om.tfv[7 * nqf(om.m) + q][lane]
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_m_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+    let prev_k = k - 1;
+    let bm = ox.xmx(i - 1, PXB) * tfv(om, k, P7O_BM);
+    let mm = if prev_k > 0 { ox.mmx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_MM);
+    let im = if prev_k > 0 { ox.imx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_IM);
+    let dm = if prev_k > 0 { ox.dmx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_DM);
+    match choose_probs(rng, &[bm, mm, im, dm]) {
+        0 => State::B,
+        1 => State::M,
+        2 => State::I,
+        _ => State::D,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_d_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+    let prev_k = k - 1;
+    let md = ox.mmx(i, prev_k) * tfv(om, prev_k, P7O_MD);
+    let dd = ox.dmx(i, prev_k) * tfv_dd(om, prev_k);
+    if choose_probs(rng, &[md, dd]) == 0 {
+        State::M
+    } else {
+        State::D
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_i_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+    let mi = ox.mmx(i - 1, k) * tfv(om, k, P7O_MI);
+    let ii = ox.imx(i - 1, k) * tfv(om, k, P7O_II);
+    if choose_probs(rng, &[mi, ii]) == 0 {
+        State::M
+    } else {
+        State::I
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_c_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
+    let c = ox.xmx(i - 1, PXC) * om.xf[P7O_C][P7O_LOOP];
+    let e = ox.xmx(i, PXE) * om.xf[P7O_E][P7O_MOVE] * ox.row_scale[i];
+    if choose_probs(rng, &[c, e]) == 0 {
+        State::C
+    } else {
+        State::E
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_j_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
+    let j = ox.xmx(i - 1, PXJ) * om.xf[P7O_J][P7O_LOOP];
+    let e = ox.xmx(i, PXE) * om.xf[P7O_E][P7O_LOOP] * ox.row_scale[i];
+    if choose_probs(rng, &[j, e]) == 0 {
+        State::J
+    } else {
+        State::E
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_b_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
+    let n = ox.xmx(i, PXN) * om.xf[P7O_N][P7O_MOVE];
+    let j = ox.xmx(i, PXJ) * om.xf[P7O_J][P7O_MOVE];
+    if choose_probs(rng, &[n, j]) == 0 {
+        State::N
+    } else {
+        State::J
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_e_pmx(
+    rng: &mut MersenneTwister,
+    om: &OProfile,
+    ox: &ProbMx,
+    i: usize,
+    ret_k: &mut usize,
+) -> State {
+    let q = nqf(om.m);
+    let roll = rng.next_f64();
+    let norm = 1.0 / ox.xmx(i, PXE) as f64;
+    let mut sum = 0.0_f64;
+    for qi in 0..q {
+        for lane in 0..4 {
+            let k = lane * q + qi + 1;
+            sum += ox.mmx(i, k) as f64 * norm;
+            if roll < sum {
+                *ret_k = k;
+                return State::M;
+            }
+        }
+        for lane in 0..4 {
+            let k = lane * q + qi + 1;
+            sum += ox.dmx(i, k) as f64 * norm;
+            if roll < sum {
+                *ret_k = k;
+                return State::D;
+            }
+        }
+    }
+    *ret_k = om.m;
+    State::M
+}
+
+#[cfg(target_arch = "x86_64")]
+fn choose_probs(rng: &mut MersenneTwister, probs: &[f32]) -> usize {
+    let total: f64 = probs.iter().map(|&p| p as f64).sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let roll = rng.next_f64();
+    let mut cumsum = 0.0_f64;
+    for (idx, &p) in probs.iter().enumerate() {
+        cumsum += p as f64;
+        if roll < cumsum / total {
+            return idx;
+        }
+    }
+    probs.len() - 1
+}
+
 /// Sample a stochastic traceback from a Forward DP matrix.
 /// Returns a Trace sampled from the posterior distribution of alignments.
 pub fn g_stochastic_trace(
@@ -35,68 +234,60 @@ pub fn g_stochastic_trace(
                 let c_sc = gx.xmx(i - 1, P7G_C) + gm.xsc[P7P_C][P7P_LOOP];
                 let e_sc = gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_MOVE];
                 if sample_two(rng, c_sc, e_sc) == 0 {
-                    i -= 1;
                     tr.append(State::C, 0, i);
+                    i -= 1;
                 } else {
                     cur_state = State::E;
                     tr.append(State::E, 0, i);
                 }
             }
             State::E => {
-                // E from any M_k or D_M (local mode)
-                let mut scores = Vec::with_capacity(m + 1);
+                // Local E connects from any M_k or any D_k for k=2..M.
+                let mut scores = vec![f32::NEG_INFINITY; 2 * m + 1];
                 for k in 1..=m {
-                    scores.push(gx.mmx(i, k));
+                    scores[k] = gx.mmx(i, k);
                 }
-                scores.push(gx.dmx(i, m));
+                for k in 2..=m {
+                    scores[k + m] = gx.dmx(i, k);
+                }
                 let choice = sample_from(rng, &scores);
-                if choice < m {
-                    let k = choice + 1;
+                if choice <= m {
+                    let k = choice;
                     cur_state = State::M;
                     tr.append(State::M, k, i);
                 } else {
+                    let k = choice - m;
                     cur_state = State::D;
-                    tr.append(State::D, m, 0);
+                    tr.append(State::D, k, i);
                 }
             }
             State::M => {
                 let k = *tr.k.last().unwrap();
-                if k == 0 || i == 0 {
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                    continue;
-                }
-                if k == 1 {
-                    i -= 1;
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                    continue;
-                }
                 // Predecessor scores weighted by transition probabilities
                 // (emission score is implicit in the Forward matrix values)
                 debug_assert!(i <= dsq.len() - 2, "sequence position out of bounds");
+                let bm = gx.xmx(i - 1, P7G_B) + gm.tsc(k - 1, P7P_BM);
                 let mm = gx.mmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_MM);
                 let im = gx.imx(i - 1, k - 1) + gm.tsc(k - 1, P7P_IM);
                 let dm = gx.dmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_DM);
-                let bm = gx.xmx(i - 1, P7G_B) + gm.tsc(k - 1, P7P_BM);
-                let choice = sample_from(rng, &[mm, im, dm, bm]);
+                let choice = sample_from(rng, &[bm, mm, im, dm]);
                 i -= 1;
                 match choice {
                     0 => {
+                        cur_state = State::B;
+                        tr.append(State::B, 0, i);
+                    }
+                    1 => {
                         cur_state = State::M;
                         tr.append(State::M, k - 1, i);
                     }
-                    1 => {
+                    2 => {
                         cur_state = State::I;
                         tr.append(State::I, k - 1, i);
                     }
-                    2 => {
-                        cur_state = State::D;
-                        tr.append(State::D, k - 1, 0);
-                    }
                     _ => {
-                        cur_state = State::B;
-                        tr.append(State::B, 0, i);
+                        cur_state = State::D;
+                        tr.append(State::D, k - 1, i);
                     }
                 }
             }
@@ -114,7 +305,7 @@ pub fn g_stochastic_trace(
                     tr.append(State::M, k - 1, i);
                 } else {
                     cur_state = State::D;
-                    tr.append(State::D, k - 1, 0);
+                    tr.append(State::D, k - 1, i);
                 }
             }
             State::I => {
@@ -149,15 +340,8 @@ pub fn g_stochastic_trace(
                     tr.append(State::S, 0, 0);
                     break;
                 }
-                let nn = gx.xmx(i - 1, P7G_N) + gm.xsc[P7P_N][P7P_LOOP];
-                let ns = 0.0; // S->N is implicit
-                if sample_two(rng, nn, ns) == 0 {
-                    i -= 1;
-                    tr.append(State::N, 0, i);
-                } else {
-                    tr.append(State::S, 0, 0);
-                    break;
-                }
+                tr.append(State::N, 0, i);
+                i -= 1;
             }
             State::J => {
                 if i == 0 {
@@ -168,8 +352,8 @@ pub fn g_stochastic_trace(
                 let jj = gx.xmx(i - 1, P7G_J) + gm.xsc[P7P_J][P7P_LOOP];
                 let je = gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_LOOP];
                 if sample_two(rng, jj, je) == 0 {
-                    i -= 1;
                     tr.append(State::J, 0, i);
+                    i -= 1;
                 } else {
                     cur_state = State::E;
                     tr.append(State::E, 0, i);

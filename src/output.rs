@@ -96,21 +96,15 @@ pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &T
             continue;
         }
         let evalue = z * hit.lnp.exp();
-        let dom_evalue = if !hit.dcl.is_empty() {
-            z * hit.dcl[0].lnp.exp()
-        } else {
-            evalue
-        };
-        let dom_score = if !hit.dcl.is_empty() {
-            hit.dcl[0].bitscore
-        } else {
-            hit.score
-        };
+        let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+        let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+        let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+        let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
         writeln!(f,
             "{:<19} {:<10} {:<20} {:<10} {:>9.2e} {:>6.1} {:>5.1} {:>9.2e} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
             hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc },
             qname, qacc.unwrap_or("-"),
-            evalue, hit.score, hit.bias, dom_evalue, dom_score, hit.bias,
+            evalue, hit.score, hit.bias, dom_evalue, dom_score, dom_bias,
             hit.nexpected, hit.ndom, 0, 0, hit.ndom, hit.ndom, hit.nreported, hit.nincluded,
             if hit.desc.is_empty() { "-" } else { &hit.desc },
         ).unwrap();

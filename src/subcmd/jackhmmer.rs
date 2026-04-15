@@ -19,7 +19,10 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 
 #[derive(Parser)]
-#[command(name = "jackhmmer", about = "Iteratively search a protein sequence against a protein database")]
+#[command(
+    name = "jackhmmer",
+    about = "Iteratively search a protein sequence against a protein database"
+)]
 struct Args {
     /// Query sequence file (FASTA)
     seqfile: PathBuf,
@@ -50,6 +53,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.cpu)
+        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
         .build_global()
         .ok();
 
@@ -59,9 +63,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "# jackhmmer :: iteratively search a protein sequence against a database").unwrap();
+    writeln!(
+        out,
+        "# jackhmmer :: iteratively search a protein sequence against a database"
+    )
+    .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
-    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // Read query sequence
@@ -191,10 +203,26 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         // Output results for this round
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
-        writeln!(out, "Scores for complete sequences (score includes all domains):").unwrap();
-        writeln!(out, "   --- full sequence ---   --- best 1 domain ---    -#dom-").unwrap();
-        writeln!(out, "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description").unwrap();
-        writeln!(out, "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------").unwrap();
+        writeln!(
+            out,
+            "Scores for complete sequences (score includes all domains):"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
+        )
+        .unwrap();
 
         let mut new_included = Vec::new();
         for hit in &th.hits {
@@ -202,27 +230,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 continue;
             }
             let evalue = z * hit.lnp.exp();
-            let dom_evalue = if !hit.dcl.is_empty() {
-                z * hit.dcl[0].lnp.exp()
-            } else {
-                evalue
-            };
-            let dom_score = if !hit.dcl.is_empty() {
-                hit.dcl[0].bitscore
-            } else {
-                hit.score
-            };
+            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
             writeln!(
                 out,
                 "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
                 hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score, hit.bias,
+                hit.score,
+                hit.bias,
                 hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score, hit.bias,
-                hit.nexpected, hit.ndom,
+                dom_score,
+                dom_bias,
+                hit.nexpected,
+                hit.nreported,
                 hit.name,
                 if hit.desc.is_empty() { "" } else { &hit.desc },
-            ).unwrap();
+            )
+            .unwrap();
 
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0 {
                 new_included.push(hit.name.clone());
@@ -230,12 +256,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
 
         if th.nreported == 0 {
-            writeln!(out, "   [No hits detected that satisfy reporting thresholds]").unwrap();
+            writeln!(
+                out,
+                "   [No hits detected that satisfy reporting thresholds]"
+            )
+            .unwrap();
         }
         writeln!(out).unwrap();
 
         // Check convergence
-        let n_new = new_included.iter()
+        let n_new = new_included
+            .iter()
             .filter(|name| !prev_included.contains(name))
             .count();
 
@@ -245,8 +276,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
 
         if iteration < args.max_iterations {
-            writeln!(out, "@@ {} included, {} new. Continuing to next round.",
-                new_included.len(), n_new).unwrap();
+            writeln!(
+                out,
+                "@@ {} included, {} new. Continuing to next round.",
+                new_included.len(),
+                n_new
+            )
+            .unwrap();
         }
 
         prev_included = new_included;

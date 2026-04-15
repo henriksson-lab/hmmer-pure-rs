@@ -55,36 +55,26 @@ pub fn cluster(
         return Vec::new();
     }
 
-    let n = segments.len();
-
-    // Single-linkage clustering via union-find
-    let mut parent: Vec<usize> = (0..n).collect();
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if segments_overlap(&segments[i], &segments[j], params) {
-                union(&mut parent, i, j);
-            }
-        }
-    }
-
-    // Collect clusters
-    let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
-    for i in 0..n {
-        let root = find(&parent, i);
-        cluster_map.entry(root).or_default().push(i);
-    }
+    let (assignments, nclusters) = single_linkage_assignments(segments, params);
 
     // For each cluster, compute posterior and C-style consensus endpoints.
     let mut envelopes = Vec::new();
-    for (_root, members) in &cluster_map {
-        // Count unique traces in this cluster.
-        let mut trace_set = std::collections::HashSet::new();
-        for &idx in members {
-            trace_set.insert(segments[idx].trace_idx);
+    #[cfg(feature = "tracehash")]
+    let mut accepted_ordinal = 0usize;
+    for cluster_idx in 0..nclusters {
+        let mut members = Vec::new();
+        let mut trace_count = 0usize;
+        let mut last_trace = None;
+        for (idx, segment) in segments.iter().enumerate() {
+            if assignments[idx] == cluster_idx {
+                members.push(idx);
+                if last_trace != Some(segment.trace_idx) {
+                    trace_count += 1;
+                }
+                last_trace = Some(segment.trace_idx);
+            }
         }
-        let posterior = trace_set.len() as f32 / ntraces as f32;
+        let posterior = trace_count as f32 / ntraces as f32;
 
         if posterior < params.min_posterior {
             continue;
@@ -99,7 +89,7 @@ pub fn cluster(
         let mut mmin = usize::MAX;
         let mut mmax = 0usize;
 
-        for &idx in members {
+        for &idx in &members {
             imin = imin.min(segments[idx].i);
             imax = imax.max(segments[idx].i);
             jmin = jmin.min(segments[idx].j);
@@ -110,13 +100,39 @@ pub fn cluster(
             mmax = mmax.max(segments[idx].m);
         }
 
-        let epc_threshold = ((trace_set.len() as f32) * params.min_endpointp).ceil() as usize;
+        let epc_threshold = ((trace_count as f32) * params.min_endpointp).ceil() as usize;
         let epc_threshold = epc_threshold.max(1);
 
-        let best_i = left_endpoint(members, segments, |s| s.i, imin, imax, epc_threshold);
-        let best_k = left_endpoint(members, segments, |s| s.k, kmin, kmax, epc_threshold);
-        let best_j = right_endpoint(members, segments, |s| s.j, jmin, jmax, epc_threshold);
-        let best_m = right_endpoint(members, segments, |s| s.m, mmin, mmax, epc_threshold);
+        let best_i = left_endpoint(&members, segments, |s| s.i, imin, imax, epc_threshold);
+        let best_k = left_endpoint(&members, segments, |s| s.k, kmin, kmax, epc_threshold);
+        let best_j = right_endpoint(&members, segments, |s| s.j, jmin, jmax, epc_threshold);
+        let best_m = right_endpoint(&members, segments, |s| s.m, mmin, mmax, epc_threshold);
+
+        #[cfg(feature = "tracehash")]
+        trace_cluster_candidate(
+            segments,
+            ntraces,
+            accepted_ordinal,
+            &members,
+            trace_count,
+            epc_threshold,
+            imin,
+            imax,
+            jmin,
+            jmax,
+            kmin,
+            kmax,
+            mmin,
+            mmax,
+            best_i,
+            best_j,
+            best_k,
+            best_m,
+        );
+        #[cfg(feature = "tracehash")]
+        {
+            accepted_ordinal += 1;
+        }
 
         if best_i > best_j || best_k > best_m {
             continue;
@@ -162,6 +178,90 @@ pub fn cluster(
         .enumerate()
         .filter_map(|(idx, env)| if dominated[idx] { None } else { Some(env) })
         .collect()
+}
+
+fn single_linkage_assignments(
+    segments: &[SegmentPair],
+    params: &ClusterParams,
+) -> (Vec<usize>, usize) {
+    let n = segments.len();
+    let mut available: Vec<usize> = (0..n).rev().collect();
+    let mut connected = Vec::with_capacity(n);
+    let mut assignments = vec![0usize; n];
+    let mut nclusters = 0usize;
+
+    while let Some(v) = available.pop() {
+        connected.push(v);
+        while let Some(v) = connected.pop() {
+            assignments[v] = nclusters;
+            let mut idx = available.len();
+            while idx > 0 {
+                idx -= 1;
+                if segments_overlap(&segments[v], &segments[available[idx]], params) {
+                    let w = available[idx];
+                    let last = available.pop().expect("available is non-empty");
+                    if idx < available.len() {
+                        available[idx] = last;
+                    }
+                    connected.push(w);
+                }
+            }
+        }
+        nclusters += 1;
+    }
+
+    (assignments, nclusters)
+}
+
+#[cfg(feature = "tracehash")]
+#[allow(clippy::too_many_arguments)]
+fn trace_cluster_candidate(
+    segments: &[SegmentPair],
+    ntraces: usize,
+    ordinal: usize,
+    members: &[usize],
+    trace_count: usize,
+    endpoint_threshold: usize,
+    imin: usize,
+    imax: usize,
+    jmin: usize,
+    jmax: usize,
+    kmin: usize,
+    kmax: usize,
+    mmin: usize,
+    mmax: usize,
+    best_i: usize,
+    best_j: usize,
+    best_k: usize,
+    best_m: usize,
+) {
+    let mut th = tracehash::th_call!("spensemble_cluster_candidate");
+    th.input_usize(ntraces);
+    th.input_usize(segments.len());
+    th.input_usize(ordinal);
+    for segment in segments {
+        th.input_usize(segment.trace_idx);
+        th.input_usize(segment.i);
+        th.input_usize(segment.j);
+        th.input_usize(segment.k);
+        th.input_usize(segment.m);
+    }
+    th.output_u64(members.len() as u64);
+    th.output_u64(trace_count as u64);
+    th.output_u64(endpoint_threshold as u64);
+    th.output_u64(imin as u64);
+    th.output_u64(imax as u64);
+    th.output_u64(jmin as u64);
+    th.output_u64(jmax as u64);
+    th.output_u64(kmin as u64);
+    th.output_u64(kmax as u64);
+    th.output_u64(mmin as u64);
+    th.output_u64(mmax as u64);
+    th.output_u64(best_i as u64);
+    th.output_u64(best_j as u64);
+    th.output_u64(best_k as u64);
+    th.output_u64(best_m as u64);
+    th.finish();
 }
 
 /// Check if two segments overlap sufficiently.
@@ -270,23 +370,6 @@ fn argmax_first(values: &[usize]) -> usize {
         }
     }
     best
-}
-
-/// Union-find: find root.
-fn find(parent: &[usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        x = parent[x];
-    }
-    x
-}
-
-/// Union-find: merge sets.
-fn union(parent: &mut [usize], a: usize, b: usize) {
-    let ra = find(parent, a);
-    let rb = find(parent, b);
-    if ra != rb {
-        parent[rb] = ra;
-    }
 }
 
 #[cfg(test)]

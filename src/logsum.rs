@@ -14,6 +14,8 @@ static mut FLOGSUM_LOOKUP: [f32; LOGSUM_TBL] = [0.0; LOGSUM_TBL];
 /// Initialize the lookup table. Must be called before `p7_flogsum()`.
 /// Safe to call multiple times; only initializes once.
 pub fn p7_flogsuminit() {
+    crate::util::simd_env::init();
+
     INIT.call_once(|| {
         // SAFETY: This is only called once via Once, so no data race.
         unsafe {

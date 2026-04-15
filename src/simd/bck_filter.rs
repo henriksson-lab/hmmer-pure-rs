@@ -8,6 +8,259 @@ use std::arch::x86_64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+fn trace_engine_sum_q1e5(
+    name: &'static str,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q: usize,
+    row: &[[f32; 4]],
+    state: usize,
+    q_start: usize,
+    q_end: usize,
+) {
+    let mut sum = 0.0_f32;
+    for qi in q_start.min(q)..q_end.min(q) {
+        let v = row[qi * 3 + state];
+        for (lane, val) in v.iter().enumerate() {
+            let k = qi + 1 + lane * q;
+            if k <= m {
+                sum += *val;
+            }
+        }
+    }
+
+    let mut th = match name {
+        "rowl_m" => tracehash::th_call!("simd_backward_engine_rowl_msum_q1e5"),
+        "rowl_d" => tracehash::th_call!("simd_backward_engine_rowl_dsum_q1e5"),
+        "rowl_i" => tracehash::th_call!("simd_backward_engine_rowl_isum_q1e5"),
+        "rowlm1_m" => tracehash::th_call!("simd_backward_engine_rowlm1_msum_q1e5"),
+        "rowlm1_d" => tracehash::th_call!("simd_backward_engine_rowlm1_dsum_q1e5"),
+        "rowlm1_i" => tracehash::th_call!("simd_backward_engine_rowlm1_isum_q1e5"),
+        "rowlm2_m" => tracehash::th_call!("simd_backward_engine_rowlm2_msum_q1e5"),
+        "rowlm2_d" => tracehash::th_call!("simd_backward_engine_rowlm2_dsum_q1e5"),
+        "rowlm2_i" => tracehash::th_call!("simd_backward_engine_rowlm2_isum_q1e5"),
+        "rowlm4_m" => tracehash::th_call!("simd_backward_engine_rowlm4_msum_q1e5"),
+        "rowlm4_d" => tracehash::th_call!("simd_backward_engine_rowlm4_dsum_q1e5"),
+        "rowlm4_i" => tracehash::th_call!("simd_backward_engine_rowlm4_isum_q1e5"),
+        "rowlm8_m" => tracehash::th_call!("simd_backward_engine_rowlm8_msum_q1e5"),
+        "rowlm8_d" => tracehash::th_call!("simd_backward_engine_rowlm8_dsum_q1e5"),
+        "rowlm8_i" => tracehash::th_call!("simd_backward_engine_rowlm8_isum_q1e5"),
+        "rowlm16_m" => tracehash::th_call!("simd_backward_engine_rowlm16_msum_q1e5"),
+        "rowlm16_d" => tracehash::th_call!("simd_backward_engine_rowlm16_dsum_q1e5"),
+        "rowlm16_i" => tracehash::th_call!("simd_backward_engine_rowlm16_isum_q1e5"),
+        "rowlm32_m" => tracehash::th_call!("simd_backward_engine_rowlm32_msum_q1e5"),
+        "rowlm32_d" => tracehash::th_call!("simd_backward_engine_rowlm32_dsum_q1e5"),
+        "rowlm32_i" => tracehash::th_call!("simd_backward_engine_rowlm32_isum_q1e5"),
+        "rowlm64_m" => tracehash::th_call!("simd_backward_engine_rowlm64_msum_q1e5"),
+        "rowlm64_d" => tracehash::th_call!("simd_backward_engine_rowlm64_dsum_q1e5"),
+        "rowlm64_i" => tracehash::th_call!("simd_backward_engine_rowlm64_isum_q1e5"),
+        "rowlm128_m" => tracehash::th_call!("simd_backward_engine_rowlm128_msum_q1e5"),
+        "rowlm128_d" => tracehash::th_call!("simd_backward_engine_rowlm128_dsum_q1e5"),
+        "rowlm128_i" => tracehash::th_call!("simd_backward_engine_rowlm128_isum_q1e5"),
+        "row128_m" => tracehash::th_call!("simd_backward_engine_row128_msum_q1e5"),
+        "row128_d" => tracehash::th_call!("simd_backward_engine_row128_dsum_q1e5"),
+        "row128_i" => tracehash::th_call!("simd_backward_engine_row128_isum_q1e5"),
+        "row64_m" => tracehash::th_call!("simd_backward_engine_row64_msum_q1e5"),
+        "row64_d" => tracehash::th_call!("simd_backward_engine_row64_dsum_q1e5"),
+        "row64_i" => tracehash::th_call!("simd_backward_engine_row64_isum_q1e5"),
+        "row32_m" => tracehash::th_call!("simd_backward_engine_row32_msum_q1e5"),
+        "row32_d" => tracehash::th_call!("simd_backward_engine_row32_dsum_q1e5"),
+        "row32_i" => tracehash::th_call!("simd_backward_engine_row32_isum_q1e5"),
+        "row16_m" => tracehash::th_call!("simd_backward_engine_row16_msum_q1e5"),
+        "row16_d" => tracehash::th_call!("simd_backward_engine_row16_dsum_q1e5"),
+        "row16_i" => tracehash::th_call!("simd_backward_engine_row16_isum_q1e5"),
+        "row8_m" => tracehash::th_call!("simd_backward_engine_row8_msum_q1e5"),
+        "row8_d" => tracehash::th_call!("simd_backward_engine_row8_dsum_q1e5"),
+        "row8_i" => tracehash::th_call!("simd_backward_engine_row8_isum_q1e5"),
+        "row4_m" => tracehash::th_call!("simd_backward_engine_row4_msum_q1e5"),
+        "row4_d" => tracehash::th_call!("simd_backward_engine_row4_dsum_q1e5"),
+        "row4_i" => tracehash::th_call!("simd_backward_engine_row4_isum_q1e5"),
+        "row2_m" => tracehash::th_call!("simd_backward_engine_row2_msum_q1e5"),
+        "row2_d" => tracehash::th_call!("simd_backward_engine_row2_dsum_q1e5"),
+        "row2_i" => tracehash::th_call!("simd_backward_engine_row2_isum_q1e5"),
+        "m" => tracehash::th_call!("simd_backward_engine_row1_msum_q1e5"),
+        "d" => tracehash::th_call!("simd_backward_engine_row1_dsum_q1e5"),
+        "i" => tracehash::th_call!("simd_backward_engine_row1_isum_q1e5"),
+        "phase1_m" => tracehash::th_call!("simd_backward_engine_row1_phase1_msum_q1e5"),
+        "phase1_d" => tracehash::th_call!("simd_backward_engine_row1_phase1_dsum_q1e5"),
+        "phase1_i" => tracehash::th_call!("simd_backward_engine_row1_phase1_isum_q1e5"),
+        "phase3_m" => tracehash::th_call!("simd_backward_engine_row1_phase3_msum_q1e5"),
+        "phase3_d" => tracehash::th_call!("simd_backward_engine_row1_phase3_dsum_q1e5"),
+        "phase4_d" => tracehash::th_call!("simd_backward_engine_row1_phase4_dsum_q1e5"),
+        "phase5_m" => tracehash::th_call!("simd_backward_engine_row1_phase5_msum_q1e5"),
+        "m_q0_8" => tracehash::th_call!("simd_backward_engine_row1_m_q0_8_sum_q1e5"),
+        "m_q8_16" => tracehash::th_call!("simd_backward_engine_row1_m_q8_16_sum_q1e5"),
+        "m_q16_32" => tracehash::th_call!("simd_backward_engine_row1_m_q16_32_sum_q1e5"),
+        _ => tracehash::th_call!("simd_backward_engine_row1_m_q32_end_sum_q1e5"),
+    };
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
+    th.output_f32_quant(sum, 1.0e-5);
+    th.finish();
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_engine_row_final_q1e5(
+    row_label: &'static str,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q: usize,
+    dpc_buf: &[__m128],
+) {
+    let mut row = Vec::with_capacity(dpc_buf.len());
+    for v in dpc_buf {
+        let mut lanes = [0.0_f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), *v);
+        row.push(lanes);
+    }
+
+    match row_label {
+        "rowl" => {
+            trace_engine_sum_q1e5("rowl_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowl_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowl_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm1" => {
+            trace_engine_sum_q1e5("rowlm1_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm1_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm1_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm2" => {
+            trace_engine_sum_q1e5("rowlm2_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm2_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm2_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm4" => {
+            trace_engine_sum_q1e5("rowlm4_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm4_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm4_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm8" => {
+            trace_engine_sum_q1e5("rowlm8_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm8_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm8_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm16" => {
+            trace_engine_sum_q1e5("rowlm16_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm16_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm16_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm32" => {
+            trace_engine_sum_q1e5("rowlm32_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm32_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm32_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm64" => {
+            trace_engine_sum_q1e5("rowlm64_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm64_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm64_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "rowlm128" => {
+            trace_engine_sum_q1e5("rowlm128_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("rowlm128_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("rowlm128_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        label => {
+            let m_name = match label {
+                "row128" => "row128_m",
+                "row64" => "row64_m",
+                "row32" => "row32_m",
+                "row16" => "row16_m",
+                "row8" => "row8_m",
+                "row4" => "row4_m",
+                _ => "row2_m",
+            };
+            let d_name = match label {
+                "row128" => "row128_d",
+                "row64" => "row64_d",
+                "row32" => "row32_d",
+                "row16" => "row16_d",
+                "row8" => "row8_d",
+                "row4" => "row4_d",
+                _ => "row2_d",
+            };
+            let i_name = match label {
+                "row128" => "row128_i",
+                "row64" => "row64_i",
+                "row32" => "row32_i",
+                "row16" => "row16_i",
+                "row8" => "row8_i",
+                "row4" => "row4_i",
+                _ => "row2_i",
+            };
+            trace_engine_sum_q1e5(m_name, dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5(d_name, dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5(i_name, dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+    }
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_engine_row1_q1e5(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q: usize,
+    dpc_buf: &[__m128],
+) {
+    let mut row = Vec::with_capacity(dpc_buf.len());
+    for v in dpc_buf {
+        let mut lanes = [0.0_f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), *v);
+        row.push(lanes);
+    }
+    trace_engine_sum_q1e5("m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+    trace_engine_sum_q1e5("d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+    trace_engine_sum_q1e5("i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+    trace_engine_sum_q1e5("m_q0_8", dsq, dsq_offset, l, m, q, &row, 0, 0, 8);
+    trace_engine_sum_q1e5("m_q8_16", dsq, dsq_offset, l, m, q, &row, 0, 8, 16);
+    trace_engine_sum_q1e5("m_q16_32", dsq, dsq_offset, l, m, q, &row, 0, 16, 32);
+    trace_engine_sum_q1e5("m_q32_end", dsq, dsq_offset, l, m, q, &row, 0, 32, q);
+}
+
+#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+unsafe fn trace_engine_row1_checkpoint_q1e5(
+    label: &'static str,
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    m: usize,
+    q: usize,
+    dpc_buf: &[__m128],
+) {
+    let mut row = Vec::with_capacity(dpc_buf.len());
+    for v in dpc_buf {
+        let mut lanes = [0.0_f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), *v);
+        row.push(lanes);
+    }
+
+    match label {
+        "phase1" => {
+            trace_engine_sum_q1e5("phase1_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("phase1_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+            trace_engine_sum_q1e5("phase1_i", dsq, dsq_offset, l, m, q, &row, 2, 0, q);
+        }
+        "phase3" => {
+            trace_engine_sum_q1e5("phase3_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+            trace_engine_sum_q1e5("phase3_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+        }
+        "phase4" => {
+            trace_engine_sum_q1e5("phase4_d", dsq, dsq_offset, l, m, q, &row, 1, 0, q);
+        }
+        _ => {
+            trace_engine_sum_q1e5("phase5_m", dsq, dsq_offset, l, m, q, &row, 0, 0, q);
+        }
+    }
+}
+
 /// SSE Backward parser. Returns Backward score in nats.
 ///
 /// # Safety
@@ -55,6 +308,33 @@ pub unsafe fn backward_parser_pmx_offset(
         om,
         _fwd_sc,
         pmx,
+        None,
+        &mut dpp_buf,
+        &mut dpc_buf,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn backward_parser_pmx_offset_with_fwd_scales(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    om: &OProfile,
+    _fwd_sc: f32,
+    pmx: &mut super::probmx::ProbMx,
+    fwd_row_scales: &[f32],
+) -> f32 {
+    let mut dpp_buf: Vec<__m128> = Vec::new();
+    let mut dpc_buf: Vec<__m128> = Vec::new();
+    backward_parser_pmx_offset_with_scratch(
+        dsq,
+        dsq_offset,
+        l,
+        om,
+        _fwd_sc,
+        pmx,
+        Some(fwd_row_scales),
         &mut dpp_buf,
         &mut dpc_buf,
     )
@@ -69,11 +349,12 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     om: &OProfile,
     _fwd_sc: f32,
     pmx: &mut super::probmx::ProbMx,
+    fwd_row_scales: Option<&[f32]>,
     dpp_buf: &mut Vec<__m128>,
     dpc_buf: &mut Vec<__m128>,
 ) -> f32 {
     if pmx.has_dp && canonical_run(dsq, dsq_offset, l, om.abc_kp) {
-        return backward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx);
+        return backward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx, fwd_row_scales);
     }
 
     use super::probmx::*;
@@ -108,6 +389,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     let mut x_b: f32 = 0.0;
     let mut x_n: f32 = 0.0;
     let mut totscale: f64 = 0.0;
+    let mut has_own_scales = fwd_row_scales.is_none();
 
     // Initialize row L: M(L,k)->E->C->T and D(L,k)->E->C->T
     {
@@ -121,15 +403,16 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
 
         // D->D wing unfolding at row L (right to left in striped layout)
         {
-            let mut dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(
+            let mut dpv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(
                 *dp.add((q - 1) * 3 + 1),
             )));
+            let mut dcv = zerov;
             for qi in (0..q).rev() {
                 let tdd = load_tfv_dd(om, qi);
-                dcv = _mm_mul_ps(dcv, tdd);
+                dcv = _mm_mul_ps(dpv, tdd);
                 let d_ptr = dp.add(qi * 3 + 1);
                 *d_ptr = _mm_add_ps(*d_ptr, dcv);
-                dcv = *d_ptr;
+                dpv = *d_ptr;
             }
             for _ in 0..3 {
                 dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dcv)));
@@ -154,6 +437,21 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         }
     }
 
+    let row_scale_l = fwd_row_scales.map(|s| s[l]).unwrap_or(1.0);
+    if row_scale_l > 1.0 {
+        let inv = 1.0 / row_scale_l;
+        let scalev = _mm_set1_ps(inv);
+        x_e *= inv;
+        x_n *= inv;
+        x_j *= inv;
+        x_b *= inv;
+        x_c *= inv;
+        for v in dpp_buf.iter_mut() {
+            *v = _mm_mul_ps(*v, scalev);
+        }
+        totscale += (row_scale_l as f64).ln();
+    }
+
     if pmx.has_dp {
         pmx.write_simd_row(&dpp_buf, q, om.m, l);
     }
@@ -164,7 +462,11 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.set_xmx(l, PXJ, 0.0);
     pmx.set_xmx(l, PXB, 0.0);
     pmx.set_xmx(l, PXC, x_c);
-    pmx.scale[l] = 0.0;
+    pmx.scale[l] = totscale;
+    pmx.row_scale[l] = row_scale_l;
+
+    #[cfg(feature = "tracehash")]
+    trace_engine_row_final_q1e5("rowl", dsq, dsq_offset, l, om.m, q, &dpp_buf);
 
     // Main recursion: i = L-1 down to 1
     for i in (1..l).rev() {
@@ -184,6 +486,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
             pmx.set_xmx(i, PXB, x_b);
             pmx.set_xmx(i, PXC, x_c);
             pmx.scale[i] = totscale;
+            pmx.row_scale[i] = fwd_row_scales.map(|s| s[i]).unwrap_or(1.0);
             if pmx.has_dp {
                 pmx.zero_simd_row(i);
             }
@@ -217,10 +520,13 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
 
             // M(i,k) = I(i+1,k)*MI + M(i+1,k+1)*e(x_{i+1})*MM, partial.
             let tmi = load_tfv(om, qi, 5);
-            *dpc.add(qi * 3) = _mm_add_ps(_mm_mul_ps(ipv, tmi), _mm_mul_ps(mpv, tmmv));
+            let mcv = _mm_add_ps(_mm_mul_ps(ipv, tmi), _mm_mul_ps(mpv, tmmv));
 
-            // Next mpv: M(i+1,k) * emission(k, x_{i+1})
-            mpv = _mm_mul_ps(*dpp.add(qi * 3), load_rfv(om, xi_next, qi));
+            // Next mpv: M(i+1,k) * emission(k, x_{i+1}). C reads this
+            // before storing M(i,k), because its parser row is in-place.
+            let next_mpv = _mm_mul_ps(*dpp.add(qi * 3), load_rfv(om, xi_next, qi));
+            *dpc.add(qi * 3) = mcv;
+            mpv = next_mpv;
 
             // B->M contribution to xB uses the newly obtained M(i+1,k) term.
             let tbm = load_tfv(om, qi, 0);
@@ -229,6 +535,11 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
             tdmv = load_tfv(om, qi, 3);
             timv = load_tfv(om, qi, 2);
             tmmv = load_tfv(om, qi, 1);
+        }
+
+        #[cfg(feature = "tracehash")]
+        if i == 1 {
+            trace_engine_row1_checkpoint_q1e5("phase1", dsq, dsq_offset, l, om.m, q, &dpc_buf);
         }
 
         // Horizontal sum xBv -> xB
@@ -253,9 +564,10 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         {
             let mut dpv = _mm_add_ps(*dpc.add(1), x_ev);
             dpv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dpv)));
+            let mut dcv = zerov;
             for qi in (0..q).rev() {
                 let tdd = load_tfv_dd(om, qi);
-                let dcv = _mm_mul_ps(dpv, tdd);
+                dcv = _mm_mul_ps(dpv, tdd);
                 let d_ptr = dpc.add(qi * 3 + 1);
                 *d_ptr = _mm_add_ps(*d_ptr, _mm_add_ps(dcv, x_ev));
                 dpv = *d_ptr;
@@ -263,8 +575,12 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                 *m_ptr = _mm_add_ps(*m_ptr, x_ev);
             }
 
+            #[cfg(feature = "tracehash")]
+            if i == 1 {
+                trace_engine_row1_checkpoint_q1e5("phase3", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+            }
+
             // 3 more D->D passes for convergence
-            let mut dcv = dpv;
             for _ in 0..3 {
                 dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dcv)));
                 for qi in (0..q).rev() {
@@ -273,6 +589,11 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                     let d_ptr = dpc.add(qi * 3 + 1);
                     *d_ptr = _mm_add_ps(*d_ptr, dcv);
                 }
+            }
+
+            #[cfg(feature = "tracehash")]
+            if i == 1 {
+                trace_engine_row1_checkpoint_q1e5("phase4", dsq, dsq_offset, l, om.m, q, &dpc_buf);
             }
         }
 
@@ -285,11 +606,28 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                 *m_ptr = _mm_add_ps(*m_ptr, _mm_mul_ps(dcv, tmd));
                 dcv = *dpc.add(qi * 3 + 1);
             }
+
+            #[cfg(feature = "tracehash")]
+            if i == 1 {
+                trace_engine_row1_checkpoint_q1e5("phase5", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+            }
         }
 
         // Sparse rescaling.
-        if x_b > 1.0e4 {
-            let inv_xb = 1.0 / x_b;
+        if x_b > 1.0e16 {
+            has_own_scales = true;
+        }
+        let row_scale = if has_own_scales {
+            if x_b > 1.0e4 {
+                x_b
+            } else {
+                1.0
+            }
+        } else {
+            fwd_row_scales.unwrap()[i]
+        };
+        if row_scale > 1.0 {
+            let inv_xb = 1.0 / row_scale;
             let scalev = _mm_set1_ps(inv_xb);
             x_e *= inv_xb;
             x_n *= inv_xb;
@@ -299,8 +637,12 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                 let p = dpc.add(qi);
                 *p = _mm_mul_ps(*p, scalev);
             }
-            totscale += (1.0 / inv_xb as f64).ln();
-            x_b = 1.0;
+            totscale += (row_scale as f64).ln();
+            if has_own_scales {
+                x_b = 1.0;
+            } else {
+                x_b *= inv_xb;
+            }
         }
 
         // Store full DP row if requested
@@ -315,6 +657,72 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         pmx.set_xmx(i, PXB, x_b);
         pmx.set_xmx(i, PXC, x_c);
         pmx.scale[i] = totscale;
+        pmx.row_scale[i] = row_scale;
+
+        #[cfg(feature = "tracehash")]
+        if i == 1 {
+            trace_engine_row1_q1e5(dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 2 {
+            trace_engine_row_final_q1e5("row2", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 1 == l {
+            trace_engine_row_final_q1e5("rowlm1", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 2 == l {
+            trace_engine_row_final_q1e5("rowlm2", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 4 == l {
+            trace_engine_row_final_q1e5("rowlm4", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 8 == l {
+            trace_engine_row_final_q1e5("rowlm8", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 16 == l {
+            trace_engine_row_final_q1e5("rowlm16", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 32 == l {
+            trace_engine_row_final_q1e5("rowlm32", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 64 == l {
+            trace_engine_row_final_q1e5("rowlm64", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i + 128 == l {
+            trace_engine_row_final_q1e5("rowlm128", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 4 {
+            trace_engine_row_final_q1e5("row4", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 8 {
+            trace_engine_row_final_q1e5("row8", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 16 {
+            trace_engine_row_final_q1e5("row16", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 32 {
+            trace_engine_row_final_q1e5("row32", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 64 {
+            trace_engine_row_final_q1e5("row64", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
+        #[cfg(feature = "tracehash")]
+        if i == 128 {
+            trace_engine_row_final_q1e5("row128", dsq, dsq_offset, l, om.m, q, &dpc_buf);
+        }
 
         std::mem::swap(dpp_buf, dpc_buf);
     }
@@ -349,6 +757,8 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.set_xmx(0, PXB, x_b);
     pmx.set_xmx(0, PXC, 0.0);
     pmx.scale[0] = totscale;
+    pmx.row_scale[0] = 1.0;
+    pmx.has_own_scales = has_own_scales;
 
     (totscale + (x_n as f64).ln()) as f32
 }
@@ -361,6 +771,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     l: usize,
     om: &OProfile,
     pmx: &mut super::probmx::ProbMx,
+    fwd_row_scales: Option<&[f32]>,
 ) -> f32 {
     use super::probmx::*;
 
@@ -371,6 +782,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     let striped_ptr = pmx.striped_dp.as_mut_ptr();
     let xmx_ptr = pmx.xmx.as_mut_ptr();
     let scale_ptr = pmx.scale.as_mut_ptr();
+    let row_scale_ptr = pmx.row_scale.as_mut_ptr();
 
     let c_move = om.xf[P7O_C][P7O_MOVE];
     let c_loop = om.xf[P7O_C][P7O_LOOP];
@@ -387,6 +799,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     let mut x_b: f32 = 0.0;
     let mut x_n: f32 = 0.0;
     let mut totscale: f64 = 0.0;
+    let mut has_own_scales = fwd_row_scales.is_none();
 
     #[inline(always)]
     unsafe fn load_cell(row: *const f32, q: usize, s: usize) -> __m128 {
@@ -399,15 +812,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     }
 
     #[inline(always)]
-    unsafe fn store_xmx(
-        xmx: *mut f32,
-        i: usize,
-        xe: f32,
-        xn: f32,
-        xj: f32,
-        xb: f32,
-        xc: f32,
-    ) {
+    unsafe fn store_xmx(xmx: *mut f32, i: usize, xe: f32, xn: f32, xj: f32, xb: f32, xc: f32) {
         let row = xmx.add(i * 5);
         *row.add(PXE) = xe;
         *row.add(PXN) = xn;
@@ -426,16 +831,18 @@ unsafe fn backward_parser_pmx_offset_direct(
         }
 
         {
-            let mut dcv =
-                _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(
-                    row_l, q - 1, 1,
-                ))));
+            let mut dpv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(
+                row_l,
+                q - 1,
+                1,
+            ))));
+            let mut dcv = zerov;
             for qi in (0..q).rev() {
                 let tdd = load_tfv_dd(om, qi);
-                dcv = _mm_mul_ps(dcv, tdd);
+                dcv = _mm_mul_ps(dpv, tdd);
                 let d = _mm_add_ps(load_cell(row_l, qi, 1), dcv);
                 store_cell(row_l, qi, 1, d);
-                dcv = d;
+                dpv = d;
             }
             for _ in 0..3 {
                 dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dcv)));
@@ -449,10 +856,9 @@ unsafe fn backward_parser_pmx_offset_direct(
         }
 
         {
-            let mut dcv =
-                _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(
-                    row_l, 0, 1,
-                ))));
+            let mut dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(
+                row_l, 0, 1,
+            ))));
             for qi in (0..q).rev() {
                 let tmd = load_tfv(om, qi, 4);
                 let m = _mm_add_ps(load_cell(row_l, qi, 0), _mm_mul_ps(dcv, tmd));
@@ -462,8 +868,28 @@ unsafe fn backward_parser_pmx_offset_direct(
         }
     }
 
+    let row_scale_l = fwd_row_scales.map(|s| s[l]).unwrap_or(1.0);
+    if row_scale_l > 1.0 {
+        let inv = 1.0 / row_scale_l;
+        let scalev = _mm_set1_ps(inv);
+        x_e *= inv;
+        x_n *= inv;
+        x_j *= inv;
+        x_b *= inv;
+        x_c *= inv;
+        let row_l = striped_ptr.add(l * row_width);
+        let mut off = 0;
+        while off < row_width {
+            let p = row_l.add(off);
+            _mm_storeu_ps(p, _mm_mul_ps(_mm_loadu_ps(p), scalev));
+            off += 4;
+        }
+        totscale += (row_scale_l as f64).ln();
+    }
+
     store_xmx(xmx_ptr, l, x_e, 0.0, 0.0, 0.0, x_c);
-    *scale_ptr.add(l) = 0.0;
+    *scale_ptr.add(l) = totscale;
+    *row_scale_ptr.add(l) = row_scale_l;
 
     for i in (1..l).rev() {
         let dpp = striped_ptr.add((i + 1) * row_width) as *const f32;
@@ -472,12 +898,9 @@ unsafe fn backward_parser_pmx_offset_direct(
 
         let mpv_init = _mm_mul_ps(load_cell(dpp, 0, 0), load_rfv(om, xi_next, 0));
         let mut mpv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(mpv_init)));
-        let mut tmmv =
-            _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 1))));
-        let mut timv =
-            _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 2))));
-        let mut tdmv =
-            _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 3))));
+        let mut tmmv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 1))));
+        let mut timv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 2))));
+        let mut tdmv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_tfv(om, 0, 3))));
 
         let mut x_bv = zerov;
 
@@ -528,9 +951,10 @@ unsafe fn backward_parser_pmx_offset_direct(
         {
             let mut dpv = _mm_add_ps(load_cell(dpc, 0, 1), x_ev);
             dpv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dpv)));
+            let mut dcv = zerov;
             for qi in (0..q).rev() {
                 let tdd = load_tfv_dd(om, qi);
-                let dcv = _mm_mul_ps(dpv, tdd);
+                dcv = _mm_mul_ps(dpv, tdd);
                 let d = _mm_add_ps(load_cell(dpc, qi, 1), _mm_add_ps(dcv, x_ev));
                 store_cell(dpc, qi, 1, d);
                 dpv = d;
@@ -538,7 +962,6 @@ unsafe fn backward_parser_pmx_offset_direct(
                 store_cell(dpc, qi, 0, m);
             }
 
-            let mut dcv = dpv;
             for _ in 0..3 {
                 dcv = _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(dcv)));
                 for qi in (0..q).rev() {
@@ -552,9 +975,7 @@ unsafe fn backward_parser_pmx_offset_direct(
 
         {
             let mut dcv =
-                _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(
-                    dpc, 0, 1,
-                ))));
+                _mm_castsi128_ps(_mm_srli_si128::<4>(_mm_castps_si128(load_cell(dpc, 0, 1))));
             for qi in (0..q).rev() {
                 let tmd = load_tfv(om, qi, 4);
                 let m = _mm_add_ps(load_cell(dpc, qi, 0), _mm_mul_ps(dcv, tmd));
@@ -563,8 +984,20 @@ unsafe fn backward_parser_pmx_offset_direct(
             }
         }
 
-        if x_b > 1.0e4 {
-            let inv_xb = 1.0 / x_b;
+        if x_b > 1.0e16 {
+            has_own_scales = true;
+        }
+        let row_scale = if has_own_scales {
+            if x_b > 1.0e4 {
+                x_b
+            } else {
+                1.0
+            }
+        } else {
+            fwd_row_scales.unwrap()[i]
+        };
+        if row_scale > 1.0 {
+            let inv_xb = 1.0 / row_scale;
             let scalev = _mm_set1_ps(inv_xb);
             x_e *= inv_xb;
             x_n *= inv_xb;
@@ -576,12 +1009,17 @@ unsafe fn backward_parser_pmx_offset_direct(
                 _mm_storeu_ps(p, _mm_mul_ps(_mm_loadu_ps(p), scalev));
                 off += 4;
             }
-            totscale += (1.0 / inv_xb as f64).ln();
-            x_b = 1.0;
+            totscale += (row_scale as f64).ln();
+            if has_own_scales {
+                x_b = 1.0;
+            } else {
+                x_b *= inv_xb;
+            }
         }
 
         store_xmx(xmx_ptr, i, x_e, x_n, x_j, x_b, x_c);
         *scale_ptr.add(i) = totscale;
+        *row_scale_ptr.add(i) = row_scale;
     }
 
     {
@@ -607,6 +1045,8 @@ unsafe fn backward_parser_pmx_offset_direct(
 
     store_xmx(xmx_ptr, 0, 0.0, x_n, 0.0, x_b, 0.0);
     *scale_ptr = totscale;
+    *row_scale_ptr = 1.0;
+    pmx.has_own_scales = has_own_scales;
 
     (totscale + (x_n as f64).ln()) as f32
 }

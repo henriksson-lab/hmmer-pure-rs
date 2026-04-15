@@ -5,6 +5,8 @@ use std::process::ExitCode;
 mod subcmd;
 
 fn main() -> ExitCode {
+    hmmer_pure_rs::util::simd_env::init();
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {

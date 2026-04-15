@@ -24,6 +24,10 @@ thiserror = "2"
 rayon = "1"
 divsufsort = "2"
 flate2 = "1"
+tracehash = { path = "tracehash", optional = true }
+
+[features]
+tracehash = ["dep:tracehash"]
 
 [[bin]]
 name = "hmmer"
