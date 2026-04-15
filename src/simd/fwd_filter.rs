@@ -19,38 +19,15 @@ fn c_log_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
-fn forward_score_from_totscale(totscale: f32, xc: f32, c_move: f32) -> f32 {
+fn forward_score_from_row_scales(row_scale: &[f32], l: usize, xc: f32, c_move: f32) -> f32 {
+    let mut scale = 0.0_f32;
+    for &s in &row_scale[1..=l] {
+        if s > 1.0 {
+            scale = (scale as f64 + c_log_f64(s as f64)) as f32;
+        }
+    }
     let product = xc * c_move;
-    (totscale as f64 + c_log_f64(product as f64)) as f32
-}
-
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
-unsafe fn trace_forward_engine_final_score_q1e5(
-    do_full: bool,
-    dsq: &[Dsq],
-    dsq_offset: usize,
-    l: usize,
-    m: usize,
-    totscale: f32,
-    xc: f32,
-    c_move: f32,
-    score: f32,
-) {
-    let mut th = tracehash::th_call!("simd_forward_engine_final_score_q1e5");
-    th.input_bool(do_full);
-    th.input_usize(l);
-    th.input_usize(m);
-    th.input_bytes(&dsq[dsq_offset + 1..=dsq_offset + l]);
-    th.output_f32(totscale);
-    th.output_f32(c_move);
-    th.output_f32(xc);
-    th.output_f32((xc * c_move).ln());
-    th.output_f32(score);
-    th.output_f32_quant(totscale, 1.0e-5);
-    th.output_f32_quant(c_move, 1.0e-5);
-    th.output_f32_quant(xc, 1.0e-5);
-    th.output_f32_quant(score, 1.0e-5);
-    th.finish();
+    (scale as f64 + c_log_f64(product as f64)) as f32
 }
 
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
@@ -941,7 +918,6 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
     let mut xc: f32 = 0.0;
     let mut totscale: f64 = 0.0; // f64 precision for domain decoding
-    let mut totscale_f32: f32 = 0.0;
     #[cfg(feature = "tracehash")]
     let mut trace_scale_event_count = 0usize;
     #[cfg(feature = "tracehash")]
@@ -1210,7 +1186,6 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                 );
             }
             totscale += (xe as f64).ln();
-            totscale_f32 = (totscale_f32 as f64 + c_log_f64(xe as f64)) as f32;
             xe = 1.0;
             row_scale
         } else {
@@ -1255,20 +1230,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         f32::NEG_INFINITY
     } else {
-        let score = forward_score_from_totscale(totscale_f32, xc, om.xf[P7O_C][P7O_MOVE]);
-        #[cfg(feature = "tracehash")]
-        trace_forward_engine_final_score_q1e5(
-            true,
-            dsq,
-            dsq_offset,
-            l,
-            om.m,
-            totscale_f32,
-            xc,
-            om.xf[P7O_C][P7O_MOVE],
-            score,
-        );
-        score
+        forward_score_from_row_scales(&pmx.row_scale, l, xc, om.xf[P7O_C][P7O_MOVE])
     };
     score
 }
@@ -1301,7 +1263,6 @@ unsafe fn forward_parser_pmx_offset_direct(
     let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
     let mut xc: f32 = 0.0;
     let mut totscale: f64 = 0.0;
-    let mut totscale_f32: f32 = 0.0;
     #[cfg(feature = "tracehash")]
     let mut trace_scale_event_count = 0usize;
     #[cfg(feature = "tracehash")]
@@ -1499,7 +1460,6 @@ unsafe fn forward_parser_pmx_offset_direct(
                 off += 4;
             }
             totscale += (xe as f64).ln();
-            totscale_f32 = (totscale_f32 as f64 + c_log_f64(xe as f64)) as f32;
             xe = 1.0;
             row_scale
         } else {
@@ -1521,20 +1481,8 @@ unsafe fn forward_parser_pmx_offset_direct(
     if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         f32::NEG_INFINITY
     } else {
-        let score = forward_score_from_totscale(totscale_f32, xc, om.xf[P7O_C][P7O_MOVE]);
-        #[cfg(feature = "tracehash")]
-        trace_forward_engine_final_score_q1e5(
-            true,
-            dsq,
-            dsq_offset,
-            l,
-            om.m,
-            totscale_f32,
-            xc,
-            om.xf[P7O_C][P7O_MOVE],
-            score,
-        );
-        score
+        let row_scales = std::slice::from_raw_parts(row_scale_ptr, l + 1);
+        forward_score_from_row_scales(row_scales, l, xc, om.xf[P7O_C][P7O_MOVE])
     }
 }
 

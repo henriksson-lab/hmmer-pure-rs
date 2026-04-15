@@ -40,6 +40,35 @@ fn trace_pipeline_decision(
 }
 
 #[cfg(feature = "tracehash")]
+fn trace_pipeline_full_seq_bias_detail(
+    dsq: &[u8],
+    l: usize,
+    m: usize,
+    do_null2: bool,
+    seq_correction_sum: f32,
+    seq_correction_fsum: f32,
+    omega: f32,
+    log_omega: f64,
+    bias_arg: f32,
+    flogsum_index: u64,
+    seqbias: f32,
+) {
+    let mut th = tracehash::th_call!("pipeline_full_seq_bias_detail");
+    th.input_usize(l);
+    th.input_usize(m);
+    th.input_bytes(&dsq[1..=l]);
+    th.output_u64(do_null2 as u64);
+    th.output_f32(seq_correction_sum);
+    th.output_f32(seq_correction_fsum);
+    th.output_f32(omega);
+    th.output_u64(log_omega.to_bits());
+    th.output_f32(bias_arg);
+    th.output_u64(flogsum_index);
+    th.output_f32(seqbias);
+    th.finish();
+}
+
+#[cfg(feature = "tracehash")]
 #[allow(clippy::too_many_arguments)]
 fn trace_pipeline_score_components(
     dsq: &[u8],
@@ -104,6 +133,15 @@ fn trace_pipeline_score_components(
     th.output_u64(ld as u64);
     th.output_u64(ndom as u64);
     th.finish();
+}
+
+#[cfg(feature = "tracehash")]
+fn flogsum_index_for_zero_arg(value: f32) -> u64 {
+    if value == f32::NEG_INFINITY || value.abs() >= 15.7 {
+        u64::MAX
+    } else {
+        (value.abs() * 1000.0) as u64
+    }
 }
 
 #[cfg(feature = "tracehash")]
@@ -523,7 +561,13 @@ impl Pipeline {
         self.n_past_fwd += 1;
 
         // Sequence passes all filters — run domain definition
-        let (mut domains, nexpected, seq_correction_sum, domain_stats) =
+        let (
+            mut domains,
+            nexpected,
+            seq_correction_sum,
+            pipeline_seq_correction_sum,
+            domain_stats,
+        ) =
             crate::domaindef::define_domains(
                 &sq.dsq,
                 l,
@@ -541,6 +585,8 @@ impl Pipeline {
                 self.do_alignment,
                 self.do_alignment_display,
             );
+        #[cfg(not(feature = "tracehash"))]
+        let _ = seq_correction_sum;
         if domains.is_empty() {
             return false;
         }
@@ -551,14 +597,36 @@ impl Pipeline {
         // 2. a reconstruction score from individually rescored domains
         let omega = 1.0_f32 / 256.0;
         let mut pre_score = nats_to_bits_from_scores(fwd_sc, null_sc);
+        #[cfg(feature = "tracehash")]
+        let seqbias_log_omega = (omega as f64).ln();
+        #[cfg(feature = "tracehash")]
+        let seqbias_arg = if self.do_null2 {
+            (seqbias_log_omega + pipeline_seq_correction_sum as f64) as f32
+        } else {
+            0.0
+        };
         let seqbias = if self.do_null2 {
             crate::logsum::p7_flogsum(
                 0.0,
-                ((omega as f64).ln() + seq_correction_sum as f64) as f32,
+                ((omega as f64).ln() + pipeline_seq_correction_sum as f64) as f32,
             )
         } else {
             0.0
         };
+        #[cfg(feature = "tracehash")]
+        trace_pipeline_full_seq_bias_detail(
+            &sq.dsq,
+            l,
+            gm.m,
+            self.do_null2,
+            seq_correction_sum,
+            pipeline_seq_correction_sum,
+            omega,
+            seqbias_log_omega,
+            seqbias_arg,
+            flogsum_index_for_zero_arg(seqbias_arg),
+            seqbias,
+        );
         let mut seq_score = nats_to_bits_from_scores(fwd_sc, null_sc + seqbias);
         let direct_seq_score = seq_score;
         #[cfg(not(feature = "tracehash"))]

@@ -32,6 +32,19 @@ fn c_fsum(values: &[f32]) -> f32 {
     sum
 }
 
+#[inline(always)]
+fn esl_vec_fsum(values: &[f32]) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut c = 0.0_f32;
+    for &value in values {
+        let y = value - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DomainDefinitionStats {
     pub nregions: usize,
@@ -2006,7 +2019,7 @@ fn trace_define_domains_summary(
 
 /// Run domain definition on a sequence that passed Forward filter.
 /// Port of p7_domaindef_ByPosteriorHeuristics().
-/// Returns (domains, nexpected, seq_bias_nats, stats).
+/// Returns (domains, nexpected, simple_seq_bias_nats, pipeline_seq_bias_nats, stats).
 pub fn define_domains(
     dsq: &[Dsq],
     l: usize,
@@ -2020,7 +2033,7 @@ pub fn define_domains(
     seed: u32,
     make_alignment: bool,
     make_alignment_display: bool,
-) -> (Vec<Domain>, f32, f32, DomainDefinitionStats) {
+) -> (Vec<Domain>, f32, f32, f32, DomainDefinitionStats) {
     crate::logsum::p7_flogsuminit();
 
     // Phase 1: Domain decoding (btot/etot/mocc) — SIMD when available
@@ -2256,13 +2269,14 @@ pub fn define_domains(
             );
             stats.nenvelopes += 1;
             let seq_bias = c_fsum(&n2sc);
+            let seq_bias_fsum = esl_vec_fsum(&n2sc);
             #[cfg(feature = "tracehash")]
             trace_define_domains_summary(l, gm.m, 1, nexpected, seq_bias, stats);
-            return (vec![dom], nexpected, seq_bias, stats);
+            return (vec![dom], nexpected, seq_bias, seq_bias_fsum, stats);
         }
         #[cfg(feature = "tracehash")]
         trace_define_domains_summary(l, gm.m, 0, nexpected, 0.0, stats);
-        return (Vec::new(), nexpected, 0.0, stats);
+        return (Vec::new(), nexpected, 0.0, 0.0, stats);
     }
 
     let mut domains = Vec::new();
@@ -2514,7 +2528,8 @@ pub fn define_domains(
     domains.sort_by_key(|d| d.ienv);
 
     let seq_bias = c_fsum(&n2sc);
+    let seq_bias_fsum = esl_vec_fsum(&n2sc);
     #[cfg(feature = "tracehash")]
     trace_define_domains_summary(l, gm.m, domains.len(), nexpected, seq_bias, stats);
-    (domains, nexpected, seq_bias, stats)
+    (domains, nexpected, seq_bias, seq_bias_fsum, stats)
 }
