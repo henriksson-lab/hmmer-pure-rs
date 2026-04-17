@@ -115,8 +115,8 @@ pub unsafe fn avx2_msv_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2) -> Avx2M
         let mut mpv = _mm256_slli_si256::<1>(last);
         // Zero the first byte (cross-lane behavior)
         let mask = _mm256_set_epi8(
-            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1i8,
-            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1i8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
         );
         mpv = _mm256_andnot_si256(mask, mpv);
 

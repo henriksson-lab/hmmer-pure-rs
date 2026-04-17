@@ -10,8 +10,7 @@ use crate::hmm::*;
 
 /// Read all HMMs from an HMM file.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| HmmerError::Io(e))?;
+    let file = std::fs::File::open(path).map_err(|e| HmmerError::Io(e))?;
     let reader = BufReader::new(file);
     read_hmms(reader)
 }
@@ -32,9 +31,7 @@ pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
 }
 
 /// Read a single HMM from a line iterator. Returns None at EOF.
-fn read_one_hmm<B: BufRead>(
-    lines: &mut std::io::Lines<B>,
-) -> HmmerResult<Option<Hmm>> {
+fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option<Hmm>> {
     // Find the format header line
     let header = loop {
         match lines.next() {
@@ -137,12 +134,7 @@ fn read_one_hmm<B: BufRead>(
                     "amino" => AlphabetType::Amino,
                     "DNA" => AlphabetType::Dna,
                     "RNA" => AlphabetType::Rna,
-                    _ => {
-                        return Err(HmmerError::Format(format!(
-                            "Unknown alphabet: {}",
-                            value
-                        )))
-                    }
+                    _ => return Err(HmmerError::Format(format!("Unknown alphabet: {}", value))),
                 };
             }
             "RF" => rf_flag = value == "yes",
@@ -154,7 +146,10 @@ fn read_one_hmm<B: BufRead>(
             "COM" => {
                 // COM lines may be numbered: "COM   [1] hmmbuild ..."
                 let cmd = if value.starts_with('[') {
-                    value.split_once(']').map(|(_, r)| r.trim()).unwrap_or(value)
+                    value
+                        .split_once(']')
+                        .map(|(_, r)| r.trim())
+                        .unwrap_or(value)
                 } else {
                     value
                 };
@@ -523,11 +518,48 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         AlphabetType::Unknown => "unknown",
     };
     writeln!(w, "ALPH  {}", alph).map_err(HmmerError::Io)?;
-    writeln!(w, "RF    {}", if hmm.flags & P7H_RF != 0 { "yes" } else { "no" }).map_err(HmmerError::Io)?;
-    writeln!(w, "MM    {}", if hmm.flags & P7H_MMASK != 0 { "yes" } else { "no" }).map_err(HmmerError::Io)?;
-    writeln!(w, "CONS  {}", if hmm.flags & P7H_CONS != 0 { "yes" } else { "no" }).map_err(HmmerError::Io)?;
-    writeln!(w, "CS    {}", if hmm.flags & P7H_CS != 0 { "yes" } else { "no" }).map_err(HmmerError::Io)?;
-    writeln!(w, "MAP   {}", if hmm.flags & P7H_MAP != 0 { "yes" } else { "no" }).map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "RF    {}",
+        if hmm.flags & P7H_RF != 0 { "yes" } else { "no" }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "MM    {}",
+        if hmm.flags & P7H_MMASK != 0 {
+            "yes"
+        } else {
+            "no"
+        }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "CONS  {}",
+        if hmm.flags & P7H_CONS != 0 {
+            "yes"
+        } else {
+            "no"
+        }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "CS    {}",
+        if hmm.flags & P7H_CS != 0 { "yes" } else { "no" }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "MAP   {}",
+        if hmm.flags & P7H_MAP != 0 {
+            "yes"
+        } else {
+            "no"
+        }
+    )
+    .map_err(HmmerError::Io)?;
     if let Some(ref ctime) = hmm.ctime {
         writeln!(w, "DATE  {}", ctime).map_err(HmmerError::Io)?;
     }
@@ -541,9 +573,24 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         writeln!(w, "CKSUM {}", hmm.checksum).map_err(HmmerError::Io)?;
     }
     if hmm.flags & P7H_STATS != 0 {
-        writeln!(w, "STATS LOCAL MSV       {:.4}  {:.5}", hmm.evparam[P7_MMU], hmm.evparam[P7_MLAMBDA]).map_err(HmmerError::Io)?;
-        writeln!(w, "STATS LOCAL VITERBI   {:.4}  {:.5}", hmm.evparam[P7_VMU], hmm.evparam[P7_VLAMBDA]).map_err(HmmerError::Io)?;
-        writeln!(w, "STATS LOCAL FORWARD   {:.4}  {:.5}", hmm.evparam[P7_FTAU], hmm.evparam[P7_FLAMBDA]).map_err(HmmerError::Io)?;
+        writeln!(
+            w,
+            "STATS LOCAL MSV       {:.4}  {:.5}",
+            hmm.evparam[P7_MMU], hmm.evparam[P7_MLAMBDA]
+        )
+        .map_err(HmmerError::Io)?;
+        writeln!(
+            w,
+            "STATS LOCAL VITERBI   {:.4}  {:.5}",
+            hmm.evparam[P7_VMU], hmm.evparam[P7_VLAMBDA]
+        )
+        .map_err(HmmerError::Io)?;
+        writeln!(
+            w,
+            "STATS LOCAL FORWARD   {:.4}  {:.5}",
+            hmm.evparam[P7_FTAU], hmm.evparam[P7_FLAMBDA]
+        )
+        .map_err(HmmerError::Io)?;
     }
 
     // Alphabet header
@@ -555,7 +602,11 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     writeln!(w).map_err(HmmerError::Io)?;
 
     // Transition label line
-    writeln!(w, "            m->m     m->i     m->d     i->m     i->i     d->m     d->d").map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "            m->m     m->i     m->d     i->m     i->i     d->m     d->d"
+    )
+    .map_err(HmmerError::Io)?;
 
     // COMPO line
     if hmm.flags & P7H_COMPO != 0 {

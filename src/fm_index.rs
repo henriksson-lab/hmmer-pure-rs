@@ -47,7 +47,12 @@ impl FmIndex {
         }
 
         let orig_n = text.len();
-        FmIndex { bwt, sa, c, n: orig_n }
+        FmIndex {
+            bwt,
+            sa,
+            c,
+            n: orig_n,
+        }
     }
 
     /// Count occurrences of a pattern in the indexed text.

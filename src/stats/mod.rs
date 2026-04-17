@@ -1,2 +1,2 @@
-pub mod gumbel;
 pub mod exponential;
+pub mod gumbel;

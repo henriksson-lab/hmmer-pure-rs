@@ -133,12 +133,15 @@ pub fn domain_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx) -> (Vec<f32>, Vec<f32
         etot[i] = etot[i - 1] + e_post;
 
         // mocc = 1 - P(N loop) - P(J loop) - P(C loop)
-        let n_post = (fwd.xmx(i - 1, P7G_N) + bck.xmx(i, P7G_N)
-            + gm.xsc[P7P_N][P7P_LOOP] - overall_sc).exp();
-        let j_post = (fwd.xmx(i - 1, P7G_J) + bck.xmx(i, P7G_J)
-            + gm.xsc[P7P_J][P7P_LOOP] - overall_sc).exp();
-        let c_post = (fwd.xmx(i - 1, P7G_C) + bck.xmx(i, P7G_C)
-            + gm.xsc[P7P_C][P7P_LOOP] - overall_sc).exp();
+        let n_post = (fwd.xmx(i - 1, P7G_N) + bck.xmx(i, P7G_N) + gm.xsc[P7P_N][P7P_LOOP]
+            - overall_sc)
+            .exp();
+        let j_post = (fwd.xmx(i - 1, P7G_J) + bck.xmx(i, P7G_J) + gm.xsc[P7P_J][P7P_LOOP]
+            - overall_sc)
+            .exp();
+        let c_post = (fwd.xmx(i - 1, P7G_C) + bck.xmx(i, P7G_C) + gm.xsc[P7P_C][P7P_LOOP]
+            - overall_sc)
+            .exp();
         mocc[i] = 1.0 - (n_post + j_post + c_post);
     }
 

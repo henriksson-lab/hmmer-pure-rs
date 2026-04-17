@@ -126,15 +126,25 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
     let nscells = 3;
     let mut dp: Vec<__m256i> = vec![_mm256_set1_epi16(-32768); q_count * nscells];
 
-    macro_rules! mmx { ($q:expr) => { dp[$q * nscells + 0] }; }
-    macro_rules! dmx { ($q:expr) => { dp[$q * nscells + 1] }; }
-    macro_rules! imx { ($q:expr) => { dp[$q * nscells + 2] }; }
+    macro_rules! mmx {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmx {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imx {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
 
     let neg_inf_16 = _mm256_set1_epi16(-32768);
     // For cross-lane shift: need -32768 in lowest word only
-    let neg_inf_v = _mm256_insert_epi16::<0>(
-        _mm256_setzero_si256(), -32768
-    );
+    let neg_inf_v = _mm256_insert_epi16::<0>(_mm256_setzero_si256(), -32768);
 
     let mut xn: i16 = om.base_w;
     let mut xb: i16 = xn.saturating_add(om.xw[P7O_N][P7O_MOVE]);
@@ -143,7 +153,9 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
 
     for i in 1..=l {
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp { continue; }
+        if xi >= om.abc_kp {
+            continue;
+        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = neg_inf_16;
@@ -162,10 +174,14 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
 
         let mut tsc_idx = 0;
         for q in 0..q_count {
-            let tsc_bm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
-            let tsc_mm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
-            let tsc_im = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
-            let tsc_dm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
+            let tsc_bm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
+            let tsc_mm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
+            let tsc_im = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
+            let tsc_dm = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
 
             let mut sv = _mm256_adds_epi16(xbv, tsc_bm);
             sv = _mm256_max_epi16(sv, _mm256_adds_epi16(mpv, tsc_mm));
@@ -183,12 +199,15 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
             mmx!(q) = sv;
             dmx!(q) = dcv;
 
-            let tsc_md = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
+            let tsc_md = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
             dcv = _mm256_adds_epi16(sv, tsc_md);
             dmaxv = _mm256_max_epi16(dcv, dmaxv);
 
-            let tsc_mi = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
-            let tsc_ii = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i); tsc_idx += 1;
+            let tsc_mi = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
+            let tsc_ii = _mm256_loadu_si256(om.twv[tsc_idx].as_ptr() as *const __m256i);
+            tsc_idx += 1;
             imx!(q) = _mm256_max_epi16(
                 _mm256_adds_epi16(mpv, tsc_mi),
                 _mm256_adds_epi16(ipv, tsc_ii),
@@ -197,7 +216,9 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
 
         // Horizontal max of xev (16x i16 → scalar)
         let xe = hmax_epi16_avx2(xev);
-        if xe >= 32767 { return Avx2VitResult::Overflow; }
+        if xe >= 32767 {
+            return Avx2VitResult::Overflow;
+        }
 
         xn = xn.saturating_add(om.xw[P7O_N][P7O_LOOP]);
         xc = (xc.saturating_add(om.xw[P7O_C][P7O_LOOP]))
@@ -225,13 +246,16 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
                     if _mm256_movemask_epi8(cmp) != 0 {
                         any = true;
                         dmx!(q) = _mm256_max_epi16(dcv, dmx!(q));
-                        let tdd = _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
+                        let tdd =
+                            _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
                         dcv = _mm256_adds_epi16(dmx!(q), tdd);
                     } else {
                         break;
                     }
                 }
-                if !any { break; }
+                if !any {
+                    break;
+                }
             }
         } else {
             dcv = cross_lane_shift_epi16(dcv);
@@ -257,7 +281,7 @@ unsafe fn cross_lane_shift_epi16(v: __m256i) -> __m256i {
     // alignr within each lane, then fix the cross-lane boundary
     let hi = _mm256_permute2x128_si256::<0x08>(v, v); // lane0 = zero, lane1 = old lane0
     let shifted = _mm256_alignr_epi8::<2>(v, hi); // shift right by 2 bytes across lanes
-    // Set lowest word to -32768
+                                                  // Set lowest word to -32768
     _mm256_insert_epi16::<0>(shifted, -32768)
 }
 

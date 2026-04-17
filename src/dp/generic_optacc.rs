@@ -180,7 +180,10 @@ pub fn g_optimal_accuracy_with_deltas(
             let n = x_n_loop * (*oxx.add(xprev + P7G_N) + pp_n);
             *oxx.add(xrow + P7G_N) = n;
 
-            let b = cmax(x_n_move * *oxx.add(xrow + P7G_N), x_j_move * *oxx.add(xrow + P7G_J));
+            let b = cmax(
+                x_n_move * *oxx.add(xrow + P7G_N),
+                x_j_move * *oxx.add(xrow + P7G_J),
+            );
             *oxx.add(xrow + P7G_B) = b;
         }
 

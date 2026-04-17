@@ -23,10 +23,14 @@ fn read_hmm_from_cm(cm_path: &Path) -> hmmer_pure_rs::hmm::Hmm {
     let mut in_hmm = false;
     for line in reader.lines() {
         let line = line.unwrap();
-        if line.starts_with("HMMER3/") { in_hmm = true; }
+        if line.starts_with("HMMER3/") {
+            in_hmm = true;
+        }
         if in_hmm {
             hmm_lines.push(line);
-            if hmm_lines.last().map(|l| l.trim()) == Some("//") { break; }
+            if hmm_lines.last().map(|l| l.trim()) == Some("//") {
+                break;
+            }
         }
     }
     assert!(!hmm_lines.is_empty(), "No HMMER3 section in CM file");
@@ -163,7 +167,11 @@ fn domain_envelope_short_trna_is_tight() {
     let (ienv, jenv, _score) = &domains[0];
     // Envelope should cover most of the sequence since it IS the tRNA
     assert!(*ienv <= 10, "ienv should be near start, got {}", ienv);
-    assert!(*jenv >= 50, "jenv should be near end of 76bp tRNA, got {}", jenv);
+    assert!(
+        *jenv >= 50,
+        "jenv should be near end of 76bp tRNA, got {}",
+        jenv
+    );
 }
 
 // ============================================================
@@ -177,15 +185,23 @@ fn domain_envelope_embedded_trna_is_narrow() {
 
     // Read first sequence from 1k-tRNA.fa (tRNA at ~860-930 in 1000bp)
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() { return; }
+    if !fa_path.exists() {
+        return;
+    }
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
-        if line.starts_with('>') { break; }
+        if line.starts_with('>') {
+            break;
+        }
         seq.extend_from_slice(line.trim().as_bytes());
     }
-    assert!(seq.len() >= 900, "Sequence should be ~1000bp, got {}", seq.len());
+    assert!(
+        seq.len() >= 900,
+        "Sequence should be ~1000bp, got {}",
+        seq.len()
+    );
 
     let domains = run_p7_pipeline(&hmm, &seq);
 
@@ -194,8 +210,10 @@ fn domain_envelope_embedded_trna_is_narrow() {
         println!("  ienv={} jenv={} score={:.1}", i, j, sc);
     }
 
-    assert!(!domains.is_empty(),
-        "P7 should find tRNA embedded in 1000bp sequence");
+    assert!(
+        !domains.is_empty(),
+        "P7 should find tRNA embedded in 1000bp sequence"
+    );
 
     // The critical test: envelope should be narrow around the hit,
     // NOT spanning the entire sequence.
@@ -205,16 +223,26 @@ fn domain_envelope_embedded_trna_is_narrow() {
     let (ienv, jenv, _score) = &domains[0];
     let envelope_len = jenv - ienv + 1;
 
-    println!("Envelope: {}-{} ({}bp) for {}bp sequence",
-        ienv, jenv, envelope_len, seq.len());
+    println!(
+        "Envelope: {}-{} ({}bp) for {}bp sequence",
+        ienv,
+        jenv,
+        envelope_len,
+        seq.len()
+    );
 
     // FAILING EXPECTATION: this is the bug we're tracking.
     // If envelope covers >50% of the sequence, the domain definition
     // is not narrowing properly.
-    assert!(envelope_len < seq.len() / 2,
+    assert!(
+        envelope_len < seq.len() / 2,
         "BUG: P7 domain envelope is too wide: {}-{} ({}bp) covers >50% of {}bp sequence. \
          Expected a narrow envelope (~100-200bp) around the tRNA hit at ~860-930.",
-        ienv, jenv, envelope_len, seq.len());
+        ienv,
+        jenv,
+        envelope_len,
+        seq.len()
+    );
 }
 
 // ============================================================
@@ -240,13 +268,20 @@ fn domain_envelope_random_sequence_no_hits() {
 
     let domains = run_p7_pipeline(&hmm, seq);
 
-    println!("Random sequence ({}bp) domains: {}", seq.len(), domains.len());
+    println!(
+        "Random sequence ({}bp) domains: {}",
+        seq.len(),
+        domains.len()
+    );
     // Random sequence may or may not pass — but if it does,
     // the score should be low
     for (i, j, sc) in &domains {
         println!("  ienv={} jenv={} score={:.1}", i, j, sc);
-        assert!(*sc < 20.0,
-            "Random sequence should not have high-scoring P7 hit: {:.1}", sc);
+        assert!(
+            *sc < 20.0,
+            "Random sequence should not have high-scoring P7 hit: {:.1}",
+            sc
+        );
     }
 }
 
@@ -277,8 +312,14 @@ fn domain_envelope_multiple_hits_separate_envelopes() {
     let trna2_end = seq.len();
     seq.extend_from_slice(random);
 
-    println!("Constructed {}bp sequence with tRNAs at {}-{} and {}-{}",
-        seq.len(), trna1_start, trna1_end, trna2_start, trna2_end);
+    println!(
+        "Constructed {}bp sequence with tRNAs at {}-{} and {}-{}",
+        seq.len(),
+        trna1_start,
+        trna1_end,
+        trna2_start,
+        trna2_end
+    );
 
     let domains = run_p7_pipeline(&hmm, &seq);
 
@@ -288,15 +329,23 @@ fn domain_envelope_multiple_hits_separate_envelopes() {
     }
 
     // Should find at least 2 domains
-    assert!(domains.len() >= 2,
-        "Should find at least 2 tRNA domains, got {}", domains.len());
+    assert!(
+        domains.len() >= 2,
+        "Should find at least 2 tRNA domains, got {}",
+        domains.len()
+    );
 
     // Each envelope should be narrow, not spanning the whole sequence
     for (ienv, jenv, _sc) in &domains {
         let env_len = jenv - ienv + 1;
-        assert!(env_len < seq.len() / 3,
+        assert!(
+            env_len < seq.len() / 3,
             "BUG: Domain envelope {}-{} ({}bp) is too wide for {}bp sequence",
-            ienv, jenv, env_len, seq.len());
+            ienv,
+            jenv,
+            env_len,
+            seq.len()
+        );
     }
 }
 
@@ -315,8 +364,10 @@ fn domain_scores_positive_for_true_trna() {
 
     println!("Score test — short tRNA (76bp):");
     for r in &results {
-        println!("  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
-            r.ienv, r.jenv, r.dom_bitscore, r.hit_score);
+        println!(
+            "  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
+            r.ienv, r.jenv, r.dom_bitscore, r.hit_score
+        );
     }
 
     assert!(!results.is_empty(), "Should find tRNA hit");
@@ -324,15 +375,19 @@ fn domain_scores_positive_for_true_trna() {
     let r = &results[0];
     // Domain bitscore should be positive for a true tRNA hit.
     // C HMMER reports ~30 bits for this sequence against the tRNA P7 HMM.
-    assert!(r.dom_bitscore > 0.0,
+    assert!(
+        r.dom_bitscore > 0.0,
         "BUG: Domain bitscore should be positive for true tRNA hit, got {:.1}. \
          C HMMER gives ~30 bits.",
-        r.dom_bitscore);
+        r.dom_bitscore
+    );
 
     // Hit-level score should also be positive
-    assert!(r.hit_score > 0.0,
+    assert!(
+        r.hit_score > 0.0,
         "BUG: Hit score should be positive for true tRNA hit, got {:.1}",
-        r.hit_score);
+        r.hit_score
+    );
 }
 
 // ============================================================
@@ -346,12 +401,16 @@ fn domain_scores_positive_for_embedded_trna() {
 
     // Read first sequence from 1k-tRNA.fa
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() { return; }
+    if !fa_path.exists() {
+        return;
+    }
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
-        if line.starts_with('>') { break; }
+        if line.starts_with('>') {
+            break;
+        }
         seq.extend_from_slice(line.trim().as_bytes());
     }
 
@@ -359,21 +418,27 @@ fn domain_scores_positive_for_embedded_trna() {
 
     println!("Score test — embedded tRNA ({}bp):", seq.len());
     for r in &results {
-        println!("  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
-            r.ienv, r.jenv, r.dom_bitscore, r.hit_score);
+        println!(
+            "  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
+            r.ienv, r.jenv, r.dom_bitscore, r.hit_score
+        );
     }
 
     // Find the domain near the tRNA position (~860-930)
     let trna_domain = results.iter().find(|r| r.ienv >= 800 && r.ienv <= 900);
 
-    assert!(trna_domain.is_some(),
-        "Should find a domain near position 860-930");
+    assert!(
+        trna_domain.is_some(),
+        "Should find a domain near position 860-930"
+    );
 
     let td = trna_domain.unwrap();
-    assert!(td.dom_bitscore > 0.0,
+    assert!(
+        td.dom_bitscore > 0.0,
         "BUG: Domain bitscore for true tRNA should be positive, got {:.1}. \
          C HMMER gives ~30 bits for the tRNA P7 HMM.",
-        td.dom_bitscore);
+        td.dom_bitscore
+    );
 }
 
 // ============================================================
@@ -391,20 +456,27 @@ fn hit_score_matches_c_hmmer_approximately() {
     assert!(!results.is_empty(), "Should find tRNA hit");
 
     let r = &results[0];
-    println!("Hit score: {:.1}, Domain score: {:.1}", r.hit_score, r.dom_bitscore);
+    println!(
+        "Hit score: {:.1}, Domain score: {:.1}",
+        r.hit_score, r.dom_bitscore
+    );
 
     // C HMMER hmmsearch with tRNA P7 HMM against this sequence gives
     // a hit score of approximately 30 bits (±5 for different configs).
     // Allow wide tolerance since exact value depends on profile config.
-    assert!(r.hit_score > 10.0 && r.hit_score < 60.0,
+    assert!(
+        r.hit_score > 10.0 && r.hit_score < 60.0,
         "BUG: Hit score {:.1} is outside expected range 10-60 bits. \
          C HMMER gives ~30 bits.",
-        r.hit_score);
+        r.hit_score
+    );
 
-    assert!(r.dom_bitscore > 10.0 && r.dom_bitscore < 60.0,
+    assert!(
+        r.dom_bitscore > 10.0 && r.dom_bitscore < 60.0,
         "BUG: Domain bitscore {:.1} is outside expected range 10-60 bits. \
          C HMMER gives ~30 bits.",
-        r.dom_bitscore);
+        r.dom_bitscore
+    );
 }
 
 // ============================================================
@@ -418,12 +490,16 @@ fn no_false_positive_domains_in_random_flanks() {
 
     // Read first sequence from 1k-tRNA.fa (tRNA at ~860-930 in 1000bp)
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() { return; }
+    if !fa_path.exists() {
+        return;
+    }
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
-        if line.starts_with('>') { break; }
+        if line.starts_with('>') {
+            break;
+        }
         seq.extend_from_slice(line.trim().as_bytes());
     }
 
@@ -431,8 +507,10 @@ fn no_false_positive_domains_in_random_flanks() {
 
     println!("False-positive test — embedded tRNA ({}bp):", seq.len());
     for r in &results {
-        println!("  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
-            r.ienv, r.jenv, r.dom_bitscore, r.hit_score);
+        println!(
+            "  ienv={} jenv={} dom_score={:.1} hit_score={:.1}",
+            r.ienv, r.jenv, r.dom_bitscore, r.hit_score
+        );
     }
 
     // Only domains overlapping the true tRNA region (~860-930) should have
@@ -443,19 +521,23 @@ fn no_false_positive_domains_in_random_flanks() {
     // Any domain outside the tRNA region with score > 10 bits is a
     // false positive that would cause unnecessary (expensive) CM scoring
     // in the Infernal pipeline.
-    let false_positives: Vec<_> = results.iter()
+    let false_positives: Vec<_> = results
+        .iter()
         .filter(|r| r.ienv < 800 || r.ienv > 950) // outside tRNA region
-        .filter(|r| r.dom_bitscore > 10.0)          // significant score
+        .filter(|r| r.dom_bitscore > 10.0) // significant score
         .collect();
 
-    assert!(false_positives.is_empty(),
+    assert!(
+        false_positives.is_empty(),
         "BUG: {} false-positive domain(s) with score > 10 bits outside tRNA region. \
          These cause unnecessary CYK scoring in the Infernal pipeline, making \
          genome-scale search extremely slow. Domains: {:?}",
         false_positives.len(),
-        false_positives.iter()
+        false_positives
+            .iter()
             .map(|r| format!("{}-{}: {:.1} bits", r.ienv, r.jenv, r.dom_bitscore))
-            .collect::<Vec<_>>());
+            .collect::<Vec<_>>()
+    );
 }
 
 // ============================================================
@@ -469,12 +551,16 @@ fn embedded_trna_domain_count_matches_c_hmmer() {
 
     // Read first sequence from 1k-tRNA.fa
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() { return; }
+    if !fa_path.exists() {
+        return;
+    }
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
-        if line.starts_with('>') { break; }
+        if line.starts_with('>') {
+            break;
+        }
         seq.extend_from_slice(line.trim().as_bytes());
     }
 
@@ -482,28 +568,39 @@ fn embedded_trna_domain_count_matches_c_hmmer() {
 
     println!("Domain count test ({}bp seq with 1 tRNA):", seq.len());
     for r in &results {
-        println!("  ienv={} jenv={} dom_score={:.1}", r.ienv, r.jenv, r.dom_bitscore);
+        println!(
+            "  ienv={} jenv={} dom_score={:.1}",
+            r.ienv, r.jenv, r.dom_bitscore
+        );
     }
 
     // C HMMER finds exactly 1 domain for this sequence (the tRNA at ~860-930).
     // Reporting extra spurious domains wastes time in downstream CM scoring.
-    let significant: Vec<_> = results.iter()
-        .filter(|r| r.dom_bitscore > 10.0)
-        .collect();
+    let significant: Vec<_> = results.iter().filter(|r| r.dom_bitscore > 10.0).collect();
 
-    assert_eq!(significant.len(), 1,
+    assert_eq!(
+        significant.len(),
+        1,
         "BUG: Expected 1 significant domain (the tRNA), got {}. \
          C HMMER reports exactly 1 domain for this sequence. \
          Extra domains: {:?}",
         significant.len(),
-        significant.iter()
+        significant
+            .iter()
             .map(|r| format!("{}-{}: {:.1} bits", r.ienv, r.jenv, r.dom_bitscore))
-            .collect::<Vec<_>>());
+            .collect::<Vec<_>>()
+    );
 
     // The one significant domain should be near 860-930
     let d = &significant[0];
-    assert!(d.ienv >= 830 && d.ienv <= 890,
-        "Domain start {} should be near 860", d.ienv);
-    assert!(d.jenv >= 900 && d.jenv <= 960,
-        "Domain end {} should be near 930", d.jenv);
+    assert!(
+        d.ienv >= 830 && d.ienv <= 890,
+        "Domain start {} should be near 860",
+        d.ienv
+    );
+    assert!(
+        d.jenv >= 900 && d.jenv <= 960,
+        "Domain end {} should be near 930",
+        d.jenv
+    );
 }

@@ -118,5 +118,4 @@ mod tests {
         assert_eq!(rng.next_u32(), 3_613_595_717);
         assert_eq!(rng.next_u32(), 2_598_039_618);
     }
-
 }

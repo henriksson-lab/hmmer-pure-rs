@@ -20,9 +20,21 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
     let neg_inf = -32768i16;
     let mut dp: Vec<int16x8_t> = vec![vdupq_n_s16(neg_inf); q_count * nscells];
 
-    macro_rules! mmx { ($q:expr) => { dp[$q * nscells + 0] }; }
-    macro_rules! dmx { ($q:expr) => { dp[$q * nscells + 1] }; }
-    macro_rules! imx { ($q:expr) => { dp[$q * nscells + 2] }; }
+    macro_rules! mmx {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmx {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imx {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
 
     let mut xn: i16 = om.base_w;
     let mut xb: i16 = xn.saturating_add(om.xw[P7O_N][P7O_MOVE]);
@@ -31,7 +43,9 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
 
     for i in 1..=l {
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp { continue; }
+        if xi >= om.abc_kp {
+            continue;
+        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = vdupq_n_s16(neg_inf);
@@ -45,10 +59,14 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
 
         let mut tsc_idx = 0;
         for q in 0..q_count {
-            let tsc_bm = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tsc_mm = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tsc_im = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tsc_dm = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tsc_bm = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tsc_mm = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tsc_im = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tsc_dm = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
 
             let mut sv = vqaddq_s16(xbv, tsc_bm);
             sv = vmaxq_s16(sv, vqaddq_s16(mpv, tsc_mm));
@@ -66,17 +84,22 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
             mmx!(q) = sv;
             dmx!(q) = dcv;
 
-            let tsc_md = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tsc_md = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
             dcv = vqaddq_s16(sv, tsc_md);
             dmaxv = vmaxq_s16(dcv, dmaxv);
 
-            let tsc_mi = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tsc_ii = vld1q_s16(om.twv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tsc_mi = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tsc_ii = vld1q_s16(om.twv[tsc_idx].as_ptr());
+            tsc_idx += 1;
             imx!(q) = vmaxq_s16(vqaddq_s16(mpv, tsc_mi), vqaddq_s16(ipv, tsc_ii));
         }
 
         let xe = vmaxvq_s16(xev);
-        if xe >= 32767 { return NeonVitResult::Overflow; }
+        if xe >= 32767 {
+            return NeonVitResult::Overflow;
+        }
 
         xn = xn.saturating_add(om.xw[P7O_N][P7O_LOOP]);
         xc = (xc.saturating_add(om.xw[P7O_C][P7O_LOOP]))

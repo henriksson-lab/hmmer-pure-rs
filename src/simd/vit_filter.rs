@@ -38,9 +38,21 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
     let mut xj: i16 = -32768;
     let mut xc: i16 = -32768;
 
-    macro_rules! mmx { ($q:expr) => { dp[$q * nscells + 0] }; }
-    macro_rules! dmx { ($q:expr) => { dp[$q * nscells + 1] }; }
-    macro_rules! imx { ($q:expr) => { dp[$q * nscells + 2] }; }
+    macro_rules! mmx {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmx {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imx {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
 
     for i in 1..=l {
         let xi = dsq[i] as usize;
@@ -66,10 +78,14 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
 
         for q in 0..q_count {
             // Match state: max(B+tBM, M+tMM, I+tIM, D+tDM) + emission
-            let tsc_bm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
-            let tsc_mm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
-            let tsc_im = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
-            let tsc_dm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
+            let tsc_bm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_mm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_im = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_dm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
 
             let mut sv = _mm_adds_epi16(xbv, tsc_bm);
             sv = _mm_max_epi16(sv, _mm_adds_epi16(mpv, tsc_mm));
@@ -90,17 +106,17 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
             dmx!(q) = dcv;
 
             // Calculate next D partially (M->D only)
-            let tsc_md = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
+            let tsc_md = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
             dcv = _mm_adds_epi16(sv, tsc_md);
             dmaxv = _mm_max_epi16(dcv, dmaxv);
 
             // Calculate and store I
-            let tsc_mi = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
-            let tsc_ii = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i); tsc_idx += 1;
-            let isv = _mm_max_epi16(
-                _mm_adds_epi16(mpv, tsc_mi),
-                _mm_adds_epi16(ipv, tsc_ii),
-            );
+            let tsc_mi = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_ii = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let isv = _mm_max_epi16(_mm_adds_epi16(mpv, tsc_mi), _mm_adds_epi16(ipv, tsc_ii));
             imx!(q) = isv;
         }
 
@@ -170,8 +186,14 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn hmax_epi16(a: __m128i) -> i16 {
-    let a = _mm_max_epi16(a, _mm_shuffle_epi32::<{ super::shuffle_mask(1, 0, 3, 2) }>(a));
-    let a = _mm_max_epi16(a, _mm_shufflelo_epi16::<{ super::shuffle_mask(1, 0, 3, 2) }>(a));
+    let a = _mm_max_epi16(
+        a,
+        _mm_shuffle_epi32::<{ super::shuffle_mask(1, 0, 3, 2) }>(a),
+    );
+    let a = _mm_max_epi16(
+        a,
+        _mm_shufflelo_epi16::<{ super::shuffle_mask(1, 0, 3, 2) }>(a),
+    );
     let a = _mm_max_epi16(a, _mm_srli_epi32::<16>(a));
     _mm_cvtsi128_si32(a) as i16
 }

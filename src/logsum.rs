@@ -61,7 +61,10 @@ mod tests {
         p7_flogsuminit();
         assert_eq!(p7_flogsum(0.0, f32::NEG_INFINITY), 0.0);
         assert_eq!(p7_flogsum(f32::NEG_INFINITY, 0.0), 0.0);
-        assert_eq!(p7_flogsum(f32::NEG_INFINITY, f32::NEG_INFINITY), f32::NEG_INFINITY);
+        assert_eq!(
+            p7_flogsum(f32::NEG_INFINITY, f32::NEG_INFINITY),
+            f32::NEG_INFINITY
+        );
     }
 
     #[test]
@@ -74,7 +77,9 @@ mod tests {
         // Simple LCG for reproducibility (matches esl_random with seed 42 behavior)
         let mut rng_state: u64 = 42;
         let mut next_rand = || -> f32 {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((rng_state >> 33) as f32) / (u32::MAX as f32 / 2.0)
         };
 
@@ -111,5 +116,4 @@ mod tests {
             );
         }
     }
-
 }

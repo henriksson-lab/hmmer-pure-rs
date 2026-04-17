@@ -91,14 +91,20 @@ pub fn read_h3f_record<R: Read>(r: &mut R) -> HmmerResult<Option<MsvFilterData>>
     let msv_scores = read_bytes(r, msv_bytes)?;
 
     let mut evparam = [0.0f32; 6];
-    for i in 0..6 { evparam[i] = read_f32_ne(r)?; }
+    for i in 0..6 {
+        evparam[i] = read_f32_ne(r)?;
+    }
 
     // offs (3 off_t values)
-    for _ in 0..3 { read_bytes(r, std::mem::size_of::<i64>())?; }
+    for _ in 0..3 {
+        read_bytes(r, std::mem::size_of::<i64>())?;
+    }
 
     let mut compo = [0.0f32; 20];
     let compo_k = if abc_type == 3 { 20 } else { 4 };
-    for i in 0..compo_k { compo[i] = read_f32_ne(r)?; }
+    for i in 0..compo_k {
+        compo[i] = read_f32_ne(r)?;
+    }
 
     // Footer magic
     let footer = read_u32_ne(r)?;
@@ -107,9 +113,19 @@ pub fn read_h3f_record<R: Read>(r: &mut R) -> HmmerResult<Option<MsvFilterData>>
     }
 
     Ok(Some(MsvFilterData {
-        name, m, abc_type, max_length,
-        tbm_b, tec_b, tjb_b, scale_b, base_b, bias_b,
-        msv_scores, evparam, compo,
+        name,
+        m,
+        abc_type,
+        max_length,
+        tbm_b,
+        tec_b,
+        tjb_b,
+        scale_b,
+        base_b,
+        bias_b,
+        msv_scores,
+        evparam,
+        compo,
     }))
 }
 
@@ -166,14 +182,18 @@ pub fn read_h3p_record<R: Read>(r: &mut R) -> HmmerResult<Option<ProfileData>> {
     let acc = if acc_len > 0 {
         let b = read_bytes(r, acc_len + 1)?;
         String::from_utf8_lossy(&b[..acc_len]).to_string()
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // Description
     let desc_len = read_i32_ne(r)? as usize;
     let desc = if desc_len > 0 {
         let b = read_bytes(r, desc_len + 1)?;
         String::from_utf8_lossy(&b[..desc_len]).to_string()
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // RF, MM, CS, consensus strings
     for _ in 0..4 {
@@ -217,7 +237,9 @@ pub fn read_h3p_record<R: Read>(r: &mut R) -> HmmerResult<Option<ProfileData>> {
 
     // Cutoffs
     let mut cutoff = [0.0f32; 6];
-    for i in 0..6 { cutoff[i] = read_f32_ne(r)?; }
+    for i in 0..6 {
+        cutoff[i] = read_f32_ne(r)?;
+    }
 
     let nj = read_f32_ne(r)?;
     let mode = read_i32_ne(r)?;
@@ -230,9 +252,20 @@ pub fn read_h3p_record<R: Read>(r: &mut R) -> HmmerResult<Option<ProfileData>> {
     }
 
     Ok(Some(ProfileData {
-        name, acc, desc, m, abc_type,
-        viterbi_data, forward_data,
-        xw, xf, scale_w, base_w,
-        cutoff, nj, mode, l,
+        name,
+        acc,
+        desc,
+        m,
+        abc_type,
+        viterbi_data,
+        forward_data,
+        xw,
+        xf,
+        scale_w,
+        base_w,
+        cutoff,
+        nj,
+        mode,
+        l,
     }))
 }

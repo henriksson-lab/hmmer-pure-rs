@@ -2,8 +2,8 @@
 //! Generates random sequences and scores them against an HMM for calibration analysis.
 
 use std::io::Write;
-use std::process::ExitCode;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 
@@ -59,7 +59,12 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "# hmmsim: {} random sequences of length {} against {}", args.n, args.l, hmm.name).unwrap();
+    writeln!(
+        out,
+        "# hmmsim: {} random sequences of length {} against {}",
+        args.n, args.l, hmm.name
+    )
+    .unwrap();
     writeln!(out, "# seed={}", args.seed).unwrap();
 
     for _ in 0..args.n {

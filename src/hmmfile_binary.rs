@@ -1,7 +1,7 @@
 //! Binary HMM file I/O — reading C HMMER's .h3m format.
 //! Enables interoperability with C hmmpress output.
 
-use std::io::{Read, BufReader};
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use crate::alphabet::AlphabetType;
@@ -51,7 +51,11 @@ fn read_string<R: Read>(r: &mut R) -> HmmerResult<String> {
 
 fn read_string_optional<R: Read>(r: &mut R) -> HmmerResult<Option<String>> {
     let s = read_string(r)?;
-    if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
 }
 
 /// Read a single HMM from a binary .h3m stream.
@@ -65,7 +69,12 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     let has_maxl = match magic {
         MAGIC_3A | MAGIC_3B => false,
         MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F => true,
-        _ => return Err(HmmerError::Format(format!("Bad binary HMM magic: {:#x}", magic))),
+        _ => {
+            return Err(HmmerError::Format(format!(
+                "Bad binary HMM magic: {:#x}",
+                magic
+            )))
+        }
     };
 
     let flags = read_i32(r)? as u32;
@@ -221,13 +230,16 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     let k = hmm.abc_k;
 
     // Magic number (3/f format)
-    w.write_all(&MAGIC_3F.to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&MAGIC_3F.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // Flags
-    w.write_all(&(hmm.flags as i32).to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&(hmm.flags as i32).to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // M
-    w.write_all(&(hmm.m as i32).to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&(hmm.m as i32).to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // Alphabet type
     let abc_int: i32 = match hmm.abc_type {
@@ -236,26 +248,30 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
         AlphabetType::Amino => 3,
         _ => 3,
     };
-    w.write_all(&abc_int.to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&abc_int.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // Match emissions
     for node in 1..=hmm.m {
         for x in 0..k {
-            w.write_all(&hmm.mat[node][x].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.mat[node][x].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
     // Insert emissions
     for node in 0..=hmm.m {
         for x in 0..k {
-            w.write_all(&hmm.ins[node][x].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.ins[node][x].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
     // Transitions
     for node in 0..=hmm.m {
         for t in 0..NTRANSITIONS {
-            w.write_all(&hmm.t[node][t].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.t[node][t].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
@@ -273,27 +289,41 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     // Annotation strings
     fn write_annotation<W: std::io::Write>(w: &mut W, data: &Option<Vec<u8>>) -> HmmerResult<()> {
         if let Some(ref d) = data {
-            w.write_all(&(d.len() as i32).to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&(d.len() as i32).to_ne_bytes())
+                .map_err(HmmerError::Io)?;
             w.write_all(d).map_err(HmmerError::Io)?;
         }
         Ok(())
     }
 
-    if hmm.flags & P7H_RF != 0 { write_annotation(w, &hmm.rf)?; }
-    if hmm.flags & P7H_MMASK != 0 { write_annotation(w, &hmm.mm)?; }
-    if hmm.flags & P7H_CONS != 0 { write_annotation(w, &hmm.consensus)?; }
-    if hmm.flags & P7H_CS != 0 { write_annotation(w, &hmm.cs)?; }
-    if hmm.flags & P7H_CA != 0 { write_annotation(w, &hmm.ca)?; }
+    if hmm.flags & P7H_RF != 0 {
+        write_annotation(w, &hmm.rf)?;
+    }
+    if hmm.flags & P7H_MMASK != 0 {
+        write_annotation(w, &hmm.mm)?;
+    }
+    if hmm.flags & P7H_CONS != 0 {
+        write_annotation(w, &hmm.consensus)?;
+    }
+    if hmm.flags & P7H_CS != 0 {
+        write_annotation(w, &hmm.cs)?;
+    }
+    if hmm.flags & P7H_CA != 0 {
+        write_annotation(w, &hmm.ca)?;
+    }
 
     // Command log
     write_string(w, hmm.comlog.as_deref().unwrap_or(""))?;
 
     // nseq, eff_nseq
-    w.write_all(&hmm.nseq.to_ne_bytes()).map_err(HmmerError::Io)?;
-    w.write_all(&hmm.eff_nseq.to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&hmm.nseq.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
+    w.write_all(&hmm.eff_nseq.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // max_length
-    w.write_all(&hmm.max_length.to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&hmm.max_length.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // Creation time
     write_string(w, hmm.ctime.as_deref().unwrap_or(""))?;
@@ -302,32 +332,37 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     if hmm.flags & P7H_MAP != 0 {
         if let Some(ref map) = hmm.map {
             for node in 1..=hmm.m {
-                w.write_all(&map[node].to_ne_bytes()).map_err(HmmerError::Io)?;
+                w.write_all(&map[node].to_ne_bytes())
+                    .map_err(HmmerError::Io)?;
             }
         }
     }
 
     // Checksum
-    w.write_all(&hmm.checksum.to_ne_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&hmm.checksum.to_ne_bytes())
+        .map_err(HmmerError::Io)?;
 
     // E-value params
     if hmm.flags & P7H_STATS != 0 {
         for i in 0..NEVPARAM {
-            w.write_all(&hmm.evparam[i].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.evparam[i].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
     // Cutoffs
     if hmm.flags & (P7H_GA | P7H_TC | P7H_NC) != 0 {
         for i in 0..NCUTOFFS {
-            w.write_all(&hmm.cutoff[i].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.cutoff[i].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
     // Composition
     if hmm.flags & P7H_COMPO != 0 {
         for i in 0..k.min(MAXABET) {
-            w.write_all(&hmm.compo[i].to_ne_bytes()).map_err(HmmerError::Io)?;
+            w.write_all(&hmm.compo[i].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
         }
     }
 
@@ -376,7 +411,8 @@ mod tests {
                 assert!(
                     (hmm.mat[node][x] - hmm2.mat[node][x]).abs() < 1e-6,
                     "mat[{}][{}] mismatch",
-                    node, x
+                    node,
+                    x
                 );
             }
         }

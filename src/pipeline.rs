@@ -4,7 +4,7 @@ use crate::bg::Bg;
 use crate::profile::*;
 use crate::sequence::Sequence;
 #[cfg(target_arch = "x86_64")]
-use crate::simd::msv_filter::{msv_filter, MsvResult};
+use crate::simd::msv_filter::MsvResult;
 use crate::simd::oprofile::OProfile;
 #[cfg(target_arch = "x86_64")]
 use crate::simd::vit_filter::{viterbi_filter, VitResult};
@@ -236,6 +236,13 @@ pub struct Pipeline {
 
     // E-value parameters (from HMM)
     pub evparam: [f32; 6],
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "tracehash")))]
+    msv_dp: Vec<std::arch::x86_64::__m128i>,
+    #[cfg(target_arch = "x86_64")]
+    fwd_pmx: crate::simd::probmx::ProbMx,
+    #[cfg(target_arch = "x86_64")]
+    domain_scratch: crate::domaindef::DomainSimdScratch,
 }
 
 impl Pipeline {
@@ -273,6 +280,12 @@ impl Pipeline {
             z_setby: ZSetBy::Ntargets,
             domz_setby: ZSetBy::Ntargets,
             evparam: [0.0; 6],
+            #[cfg(all(target_arch = "x86_64", not(feature = "tracehash")))]
+            msv_dp: Vec::new(),
+            #[cfg(target_arch = "x86_64")]
+            fwd_pmx: crate::simd::probmx::ProbMx::new(0),
+            #[cfg(target_arch = "x86_64")]
+            domain_scratch: crate::domaindef::DomainSimdScratch::new(),
         }
     }
 
@@ -373,12 +386,8 @@ impl Pipeline {
         // Null model score
         let null_sc = bg.null_one(l);
 
-        // Compute bias filter score (used as null baseline when bias filter is on)
-        let filtersc = if self.do_biasfilter {
-            bg.filter_score(&sq.dsq, l)
-        } else {
-            null_sc
-        };
+        // C HMMER runs the bias filter only after MSV passes; keep it lazy.
+        let mut filtersc = null_sc;
 
         if !self.do_max {
             let mut filter_p = 0.0_f64;
@@ -388,7 +397,23 @@ impl Pipeline {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("sse2") {
-                    usc = match unsafe { msv_filter(&sq.dsq, l, om) } {
+                    #[cfg(feature = "tracehash")]
+                    let msv_result = unsafe { crate::simd::msv_filter::msv_filter(&sq.dsq, l, om) };
+                    #[cfg(not(feature = "tracehash"))]
+                    let msv_result =
+                        match unsafe { crate::simd::ssv_filter::ssv_filter_q17(&sq.dsq, l, om) } {
+                            crate::simd::ssv_filter::SsvResult::Ok(sc) => MsvResult::Ok(sc),
+                            crate::simd::ssv_filter::SsvResult::Overflow => MsvResult::Overflow,
+                            crate::simd::ssv_filter::SsvResult::NoResult => unsafe {
+                                crate::simd::msv_filter::msv_filter_with_scratch(
+                                    &sq.dsq,
+                                    l,
+                                    om,
+                                    &mut self.msv_dp,
+                                )
+                            },
+                        };
+                    usc = match msv_result {
                         MsvResult::Ok(sc) => sc,
                         MsvResult::Overflow => f32::INFINITY,
                     };
@@ -429,7 +454,8 @@ impl Pipeline {
             self.n_past_msv += 1;
 
             // Stage 1b: Bias composition filter
-            if self.do_biasfilter && usc != f32::INFINITY {
+            if self.do_biasfilter {
+                filtersc = bg.filter_score(&sq.dsq, l);
                 let bias_pval = msv_pvalue(usc, filtersc, &self.evparam);
                 if bias_pval > self.f1 {
                     #[cfg(feature = "tracehash")]
@@ -538,11 +564,11 @@ impl Pipeline {
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("sse2") {
-                let mut fwd_pmx = crate::simd::probmx::ProbMx::new(l);
+                self.fwd_pmx.resize_parser(l);
                 fwd_sc = unsafe {
-                    crate::simd::fwd_filter::forward_parser_pmx(&sq.dsq, l, om, &mut fwd_pmx)
+                    crate::simd::fwd_filter::forward_parser_pmx(&sq.dsq, l, om, &mut self.fwd_pmx)
                 };
-                fwd_pmx_for_domains = Some(fwd_pmx);
+                fwd_pmx_for_domains = Some(&self.fwd_pmx);
             } else {
                 let mut gx = crate::dp::gmx::Gmx::new(gm.m, l);
                 fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
@@ -561,20 +587,14 @@ impl Pipeline {
         self.n_past_fwd += 1;
 
         // Sequence passes all filters — run domain definition
-        let (
-            mut domains,
-            nexpected,
-            seq_correction_sum,
-            pipeline_seq_correction_sum,
-            domain_stats,
-        ) =
+        let (mut domains, nexpected, seq_correction_sum, pipeline_seq_correction_sum, domain_stats) =
             crate::domaindef::define_domains(
                 &sq.dsq,
                 l,
                 gm,
                 Some(om),
                 #[cfg(target_arch = "x86_64")]
-                fwd_pmx_for_domains.as_ref(),
+                fwd_pmx_for_domains,
                 #[cfg(not(target_arch = "x86_64"))]
                 None,
                 Some(fwd_sc),
@@ -582,6 +602,8 @@ impl Pipeline {
                 bg,
                 null_sc,
                 self.seed,
+                #[cfg(target_arch = "x86_64")]
+                &mut self.domain_scratch,
                 self.do_alignment,
                 self.do_alignment_display,
             );
@@ -662,8 +684,7 @@ impl Pipeline {
             }
         }
         let len_ratio = l as f32 / (l as f32 + 3.0);
-        let sum_score_nats =
-            (sum_env as f64 + (l - ld) as f64 * (len_ratio as f64).ln()) as f32;
+        let sum_score_nats = (sum_env as f64 + (l - ld) as f64 * (len_ratio as f64).ln()) as f32;
         let sum_bias = if self.do_null2 {
             crate::logsum::p7_flogsum(0.0, ((omega as f64).ln() + sum_correction as f64) as f32)
         } else {
@@ -704,15 +725,15 @@ impl Pipeline {
                 let length_correction = ((l - env_len) as f64 * (len_ratio as f64).ln()) as f32;
                 dom.dombias = 0.0;
                 dom.bitscore = nats_to_bits_from_scores(dom.envsc + length_correction, null_sc);
-                dom.lnp = crate::stats::exponential::surv(dom.bitscore as f64, tau, lambda).ln();
+                dom.lnp = crate::stats::exponential::logsurv(dom.bitscore as f64, tau, lambda);
             }
         }
 
         // P-values
         let mu_f = self.evparam[crate::hmm::P7_FTAU] as f64;
         let lam_f = self.evparam[crate::hmm::P7_FLAMBDA] as f64;
-        let lnp = stats::exponential::surv(seq_score as f64, mu_f, lam_f).ln();
-        let pre_lnp = stats::exponential::surv(pre_score as f64, mu_f, lam_f).ln();
+        let lnp = stats::exponential::logsurv(seq_score as f64, mu_f, lam_f);
+        let pre_lnp = stats::exponential::logsurv(pre_score as f64, mu_f, lam_f);
 
         let hit = th.create_next_hit();
         hit.name = sq.name.clone();
@@ -725,7 +746,7 @@ impl Pipeline {
         hit.sum_score = sum_score;
         hit.lnp = lnp;
         hit.pre_lnp = pre_lnp;
-        hit.sum_lnp = stats::exponential::surv(sum_score as f64, mu_f, lam_f).ln();
+        hit.sum_lnp = stats::exponential::logsurv(sum_score as f64, mu_f, lam_f);
         hit.sortkey = lnp;
         hit.nexpected = nexpected;
         hit.nregions = domain_stats.nregions;
@@ -738,6 +759,7 @@ impl Pipeline {
         true
     }
 }
+
 
 /// Calculate MSV p-value from raw score.
 fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {

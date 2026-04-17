@@ -20,9 +20,21 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     let mut dp: Vec<float32x4_t> = vec![vdupq_n_f32(0.0); q_count * nscells];
     let zerov = vdupq_n_f32(0.0);
 
-    macro_rules! mmo { ($q:expr) => { dp[$q * nscells + 0] }; }
-    macro_rules! dmo { ($q:expr) => { dp[$q * nscells + 1] }; }
-    macro_rules! imo { ($q:expr) => { dp[$q * nscells + 2] }; }
+    macro_rules! mmo {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmo {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imo {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
 
     let mut xe: f32 = 0.0;
     let mut xn: f32 = 1.0;
@@ -33,7 +45,9 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 
     for i in 1..=l {
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp { continue; }
+        if xi >= om.abc_kp {
+            continue;
+        }
         let rsc = &om.rfv[xi];
 
         let mut dcv = zerov;
@@ -46,10 +60,14 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 
         let mut tsc_idx = 0;
         for q in 0..q_count {
-            let tbm = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tmm = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tim = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tdm = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tbm = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tmm = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tim = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tdm = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
 
             let mut sv = vmulq_f32(xbv, tbm);
             sv = vaddq_f32(sv, vmulq_f32(mpv, tmm));
@@ -66,11 +84,14 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
             mmo!(q) = sv;
             dmo!(q) = dcv;
 
-            let tmd = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tmd = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
             dcv = vmulq_f32(sv, tmd);
 
-            let tmi = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tii = vld1q_f32(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tmi = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tii = vld1q_f32(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
             imo!(q) = vaddq_f32(vmulq_f32(mpv, tmi), vmulq_f32(ipv, tii));
         }
 
@@ -92,7 +113,9 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
             }
         }
 
-        for q in 0..q_count { xev = vaddq_f32(dmo!(q), xev); }
+        for q in 0..q_count {
+            xev = vaddq_f32(dmo!(q), xev);
+        }
 
         // Horizontal sum
         xe = vaddvq_f32(xev);
@@ -104,7 +127,10 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 
         if xe > 1.0e4 {
             let scale = 1.0 / xe;
-            xn *= scale; xc *= scale; xj *= scale; xb *= scale;
+            xn *= scale;
+            xc *= scale;
+            xj *= scale;
+            xb *= scale;
             let sv = vdupq_n_f32(scale);
             for q in 0..q_count {
                 mmo!(q) = vmulq_f32(mmo!(q), sv);

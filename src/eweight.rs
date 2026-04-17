@@ -101,7 +101,11 @@ mod tests {
         let bg = Bg::new(&abc);
 
         let neff = entropy_weight(&mut hmm, &bg, None);
-        assert!(neff > 0.0 && neff <= hmm.nseq as f32,
-            "Neff {} should be between 0 and nseq={}", neff, hmm.nseq);
+        assert!(
+            neff > 0.0 && neff <= hmm.nseq as f32,
+            "Neff {} should be between 0 and nseq={}",
+            neff,
+            hmm.nseq
+        );
     }
 }

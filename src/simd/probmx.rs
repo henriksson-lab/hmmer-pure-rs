@@ -13,6 +13,24 @@ pub const PXC: usize = 4;
 const NXCELLS: usize = 5;
 const DP_CELLS_PER_K: usize = 3; // M, I, D
 
+fn aligned_f32_offset(v: &[f32]) -> usize {
+    let misalignment = (v.as_ptr() as usize) & 15;
+    if misalignment == 0 {
+        0
+    } else {
+        (16 - misalignment) / std::mem::size_of::<f32>()
+    }
+}
+
+fn aligned_striped_storage(len: usize) -> (Vec<f32>, usize) {
+    if len == 0 {
+        return (Vec::new(), 0);
+    }
+    let v = vec![0.0; len + 4];
+    let offset = aligned_f32_offset(&v);
+    (v, offset)
+}
+
 /// Probability-space DP matrix for SIMD Forward/Backward.
 /// Stores per-position special states + cumulative scale (always).
 /// Optionally stores full per-M-state DP rows (for posterior decoding / null2).
@@ -31,6 +49,7 @@ pub struct ProbMx {
     /// Full DP rows in HMMER's striped SIMD layout:
     /// striped_dp[i * striped_row_width + q * 12 + s * 4 + lane].
     pub striped_dp: Vec<f32>,
+    pub striped_dp_offset: usize,
     row_width: usize,
     striped_row_width: usize,
     q: usize,
@@ -49,6 +68,7 @@ impl ProbMx {
             row_scale: vec![1.0; l + 1],
             dp: Vec::new(),
             striped_dp: Vec::new(),
+            striped_dp_offset: 0,
             row_width: 0,
             striped_row_width: 0,
             q: 0,
@@ -62,6 +82,7 @@ impl ProbMx {
         let row_width = (m + 1) * DP_CELLS_PER_K;
         let q = m.div_ceil(4);
         let striped_row_width = q * DP_CELLS_PER_K * 4;
+        let (striped_dp, striped_dp_offset) = aligned_striped_storage((l + 1) * striped_row_width);
         ProbMx {
             m,
             l,
@@ -69,13 +90,32 @@ impl ProbMx {
             scale: vec![0.0; l + 1],
             row_scale: vec![1.0; l + 1],
             dp: Vec::new(),
-            striped_dp: vec![0.0; (l + 1) * striped_row_width],
+            striped_dp,
+            striped_dp_offset,
             row_width,
             striped_row_width,
             q,
             has_dp: true,
             has_own_scales: false,
         }
+    }
+
+    /// Reuse this matrix as parser-only storage (specials + scales, no DP rows).
+    pub fn resize_parser(&mut self, l: usize) {
+        self.m = 0;
+        self.l = l;
+        self.row_width = 0;
+        self.striped_row_width = 0;
+        self.q = 0;
+        self.has_dp = false;
+        self.has_own_scales = false;
+
+        self.xmx.resize((l + 1) * NXCELLS, 0.0);
+        self.scale.resize(l + 1, 0.0);
+        self.row_scale.resize(l + 1, 1.0);
+        self.dp.clear();
+        self.striped_dp.clear();
+        self.striped_dp_offset = 0;
     }
 
     /// Reuse this matrix as a full parser DP matrix.
@@ -96,7 +136,18 @@ impl ProbMx {
         self.scale.resize(l + 1, 0.0);
         self.row_scale.resize(l + 1, 1.0);
         self.dp.clear();
-        self.striped_dp.resize((l + 1) * striped_row_width, 0.0);
+        let needed = (l + 1) * striped_row_width + 4;
+        // Hot Forward/Backward paths overwrite every active DP row. Avoid the
+        // full matrix memset on same-size reuse, but preserve Forward's
+        // all-zero row-0 invariant below. Newly grown capacity is still
+        // initialized so the Vec never contains invalid values.
+        self.striped_dp.resize(needed, 0.0);
+        self.striped_dp_offset = aligned_f32_offset(&self.striped_dp);
+        if striped_row_width > 0 {
+            let row0_start = self.striped_dp_offset;
+            let row0_end = row0_start + striped_row_width;
+            self.striped_dp[row0_start..row0_end].fill(0.0);
+        }
     }
 
     #[inline]
@@ -115,7 +166,10 @@ impl ProbMx {
         if !self.striped_dp.is_empty() {
             let qi = (k - 1) % self.q;
             let lane = (k - 1) / self.q;
-            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + lane]
+            self.striped_dp[self.striped_dp_offset
+                + i * self.striped_row_width
+                + qi * DP_CELLS_PER_K * 4
+                + lane]
         } else {
             self.dp[i * self.row_width + k * DP_CELLS_PER_K]
         }
@@ -127,7 +181,11 @@ impl ProbMx {
         if !self.striped_dp.is_empty() {
             let qi = (k - 1) % self.q;
             let lane = (k - 1) / self.q;
-            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + 8 + lane]
+            self.striped_dp[self.striped_dp_offset
+                + i * self.striped_row_width
+                + qi * DP_CELLS_PER_K * 4
+                + 8
+                + lane]
         } else {
             self.dp[i * self.row_width + k * DP_CELLS_PER_K + 1]
         }
@@ -139,7 +197,11 @@ impl ProbMx {
         if !self.striped_dp.is_empty() {
             let qi = (k - 1) % self.q;
             let lane = (k - 1) / self.q;
-            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + 4 + lane]
+            self.striped_dp[self.striped_dp_offset
+                + i * self.striped_row_width
+                + qi * DP_CELLS_PER_K * 4
+                + 4
+                + lane]
         } else {
             self.dp[i * self.row_width + k * DP_CELLS_PER_K + 2]
         }
@@ -151,7 +213,10 @@ impl ProbMx {
         if !self.striped_dp.is_empty() && k > 0 {
             let qi = (k - 1) % self.q;
             let lane = (k - 1) / self.q;
-            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + lane] = val;
+            self.striped_dp[self.striped_dp_offset
+                + i * self.striped_row_width
+                + qi * DP_CELLS_PER_K * 4
+                + lane] = val;
         } else if !self.dp.is_empty() {
             let idx = i * self.row_width + k * DP_CELLS_PER_K;
             self.dp[idx] = val;
@@ -164,7 +229,11 @@ impl ProbMx {
         if !self.striped_dp.is_empty() && k > 0 {
             let qi = (k - 1) % self.q;
             let lane = (k - 1) / self.q;
-            self.striped_dp[i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + 8 + lane] = val;
+            self.striped_dp[self.striped_dp_offset
+                + i * self.striped_row_width
+                + qi * DP_CELLS_PER_K * 4
+                + 8
+                + lane] = val;
         } else if !self.dp.is_empty() {
             let idx = i * self.row_width + k * DP_CELLS_PER_K + 1;
             self.dp[idx] = val;
@@ -182,25 +251,22 @@ impl ProbMx {
         i: usize,
     ) {
         use std::arch::x86_64::*;
-        let row_base = i * self.striped_row_width;
+        let row_base = self.striped_dp_offset + i * self.striped_row_width;
+        let dst = self.striped_dp.as_mut_ptr().add(row_base);
+        let src = dp_simd.as_ptr();
         for qi in 0..q {
-            let off = row_base + qi * DP_CELLS_PER_K * 4;
-            _mm_storeu_ps(self.striped_dp.as_mut_ptr().add(off), dp_simd[qi * 3]);
-            _mm_storeu_ps(
-                self.striped_dp.as_mut_ptr().add(off + 4),
-                dp_simd[qi * 3 + 1],
-            );
-            _mm_storeu_ps(
-                self.striped_dp.as_mut_ptr().add(off + 8),
-                dp_simd[qi * 3 + 2],
-            );
+            let dst_q = dst.add(qi * DP_CELLS_PER_K * 4);
+            let src_q = src.add(qi * DP_CELLS_PER_K);
+            _mm_store_ps(dst_q, *src_q);
+            _mm_store_ps(dst_q.add(4), *src_q.add(1));
+            _mm_store_ps(dst_q.add(8), *src_q.add(2));
         }
     }
 
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn zero_simd_row(&mut self, i: usize) {
-        let row_base = i * self.striped_row_width;
+        let row_base = self.striped_dp_offset + i * self.striped_row_width;
         let row_end = row_base + self.striped_row_width;
         self.striped_dp[row_base..row_end].fill(0.0);
     }
@@ -208,7 +274,9 @@ impl ProbMx {
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub unsafe fn striped_row_ptr(&mut self, i: usize) -> *mut f32 {
-        self.striped_dp.as_mut_ptr().add(i * self.striped_row_width)
+        self.striped_dp
+            .as_mut_ptr()
+            .add(self.striped_dp_offset + i * self.striped_row_width)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -217,7 +285,8 @@ impl ProbMx {
         self.striped_row_width
     }
 
-    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
     pub fn q_count(&self) -> usize {
         self.q
     }
@@ -225,7 +294,7 @@ impl ProbMx {
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_sum(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
-        let row_base = i * self.striped_row_width;
+        let row_base = self.striped_dp_offset + i * self.striped_row_width;
         for qi in 0..self.q {
             let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
             for lane in 0..4 {
@@ -241,7 +310,7 @@ impl ProbMx {
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_sum_all_lanes(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
-        let row_base = i * self.striped_row_width;
+        let row_base = self.striped_dp_offset + i * self.striped_row_width;
         for qi in 0..self.q {
             let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
             for lane in 0..4 {
@@ -253,7 +322,10 @@ impl ProbMx {
 
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_vector(&self, i: usize, state: usize, qi: usize) -> [f32; 4] {
-        let off = i * self.striped_row_width + qi * DP_CELLS_PER_K * 4 + state * 4;
+        let off = self.striped_dp_offset
+            + i * self.striped_row_width
+            + qi * DP_CELLS_PER_K * 4
+            + state * 4;
         [
             self.striped_dp[off],
             self.striped_dp[off + 1],
@@ -271,7 +343,7 @@ impl ProbMx {
         q_end: usize,
     ) -> f32 {
         let mut sum = 0.0_f32;
-        let row_base = i * self.striped_row_width;
+        let row_base = self.striped_dp_offset + i * self.striped_row_width;
         let q_end = q_end.min(self.q);
         for qi in q_start.min(self.q)..q_end {
             let off = row_base + qi * DP_CELLS_PER_K * 4 + state * 4;
@@ -297,6 +369,23 @@ pub fn p_domain_decoding(
     l: usize,
     njc_loop: [f32; 3],
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut btot = Vec::new();
+    let mut etot = Vec::new();
+    let mut mocc = Vec::new();
+    p_domain_decoding_reuse(fwd, bck, m, l, njc_loop, &mut btot, &mut etot, &mut mocc);
+    (btot, etot, mocc)
+}
+
+pub fn p_domain_decoding_reuse(
+    fwd: &ProbMx,
+    bck: &ProbMx,
+    m: usize,
+    l: usize,
+    njc_loop: [f32; 3],
+    btot: &mut Vec<f32>,
+    etot: &mut Vec<f32>,
+    mocc: &mut Vec<f32>,
+) {
     #[cfg(not(feature = "tracehash"))]
     let _ = m;
     let n_loop = njc_loop[0];
@@ -310,9 +399,12 @@ pub fn p_domain_decoding(
         0.0
     };
 
-    let mut btot = vec![0.0_f32; l + 1];
-    let mut etot = vec![0.0_f32; l + 1];
-    let mut mocc = vec![0.0_f32; l + 1];
+    btot.resize(l + 1, 0.0);
+    etot.resize(l + 1, 0.0);
+    mocc.resize(l + 1, 0.0);
+    btot[0] = 0.0;
+    etot[0] = 0.0;
+    mocc[0] = 0.0;
 
     for i in 1..=l {
         #[cfg(feature = "tracehash")]
@@ -378,8 +470,6 @@ pub fn p_domain_decoding(
             th.finish();
         }
     }
-
-    (btot, etot, mocc)
 }
 
 /// Posterior decoding from full-matrix probability-space Forward+Backward.
@@ -502,8 +592,8 @@ fn p_decoding_to_gmx_striped(
     pp: &mut Gmx,
 ) {
     let l = fwd.l;
-    let fdp = fwd.striped_dp.as_ptr();
-    let bdp = bck.striped_dp.as_ptr();
+    let fdp = fwd.striped_dp.as_ptr().wrapping_add(fwd.striped_dp_offset);
+    let bdp = bck.striped_dp.as_ptr().wrapping_add(bck.striped_dp_offset);
     let fx = fwd.xmx.as_ptr();
     let bx = bck.xmx.as_ptr();
     let ppdp = pp.dp_mem.as_mut_ptr();
@@ -710,6 +800,103 @@ pub fn p_null2_odds_from_pmx_reuse(
     *null2 = p_null2_odds_from_pmx(fwd, bck, m, k, match_odds, njc_loop);
 }
 
+#[cfg(target_arch = "x86_64")]
+pub fn p_null2_odds_from_posteriors_reuse(
+    pp: &ProbMx,
+    k: usize,
+    rfv: &[Vec<[f32; 4]>],
+    null2: &mut Vec<f32>,
+    exp_m: &mut Vec<f32>,
+    exp_i: &mut Vec<f32>,
+) {
+    if pp.striped_dp.is_empty() || pp.l == 0 {
+        return;
+    }
+
+    let ld = pp.l;
+    let q = pp.q;
+    let exp_len = q * 4;
+    exp_m.resize(exp_len, 0.0);
+    exp_i.resize(exp_len, 0.0);
+
+    unsafe {
+        use core::arch::x86_64::{
+            _mm_add_ps, _mm_load_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_setzero_ps,
+            _mm_shuffle_ps, _mm_store_ss, _mm_storeu_ps,
+        };
+
+        let pdp = pp.striped_dp.as_ptr().wrapping_add(pp.striped_dp_offset);
+        let px = pp.xmx.as_ptr();
+        let exp_m_ptr = exp_m.as_mut_ptr();
+        let exp_i_ptr = exp_i.as_mut_ptr();
+
+        let row1 = pdp.add(pp.striped_row_width);
+        for qi in 0..q {
+            let ebase = qi * 4;
+            let pbase = qi * DP_CELLS_PER_K * 4;
+            _mm_storeu_ps(exp_m_ptr.add(ebase), _mm_load_ps(row1.add(pbase)));
+            _mm_storeu_ps(exp_i_ptr.add(ebase), _mm_load_ps(row1.add(pbase + 8)));
+        }
+        let mut exp_n = *px.add(NXCELLS + PXN);
+        let mut exp_c = *px.add(NXCELLS + PXC);
+        let mut exp_j = *px.add(NXCELLS + PXJ);
+
+        for i in 2..=ld {
+            let row = pdp.add(i * pp.striped_row_width);
+            for qi in 0..q {
+                let ebase = qi * 4;
+                let pbase = qi * DP_CELLS_PER_K * 4;
+                let m = _mm_add_ps(
+                    _mm_loadu_ps(exp_m_ptr.add(ebase)),
+                    _mm_load_ps(row.add(pbase)),
+                );
+                let ins = _mm_add_ps(
+                    _mm_loadu_ps(exp_i_ptr.add(ebase)),
+                    _mm_load_ps(row.add(pbase + 8)),
+                );
+                _mm_storeu_ps(exp_m_ptr.add(ebase), m);
+                _mm_storeu_ps(exp_i_ptr.add(ebase), ins);
+            }
+            let xrow = i * NXCELLS;
+            exp_n += *px.add(xrow + PXN);
+            exp_c += *px.add(xrow + PXC);
+            exp_j += *px.add(xrow + PXJ);
+        }
+
+        let norm = 1.0 / ld as f32;
+        let normv = _mm_set1_ps(norm);
+        for qi in 0..q {
+            let ebase = qi * 4;
+            let m = _mm_mul_ps(_mm_loadu_ps(exp_m_ptr.add(ebase)), normv);
+            let ins = _mm_mul_ps(_mm_loadu_ps(exp_i_ptr.add(ebase)), normv);
+            _mm_storeu_ps(exp_m_ptr.add(ebase), m);
+            _mm_storeu_ps(exp_i_ptr.add(ebase), ins);
+        }
+        exp_n *= norm;
+        exp_c *= norm;
+        exp_j *= norm;
+        let xfactor = exp_n + exp_c + exp_j;
+
+        null2.resize(k, 1.0);
+        for x in 0..k {
+            let mut sv = _mm_setzero_ps();
+            for qi in 0..q {
+                let ebase = qi * 4;
+                let odds = _mm_loadu_ps(rfv[x][qi].as_ptr());
+                let m = _mm_loadu_ps(exp_m_ptr.add(ebase));
+                let ins = _mm_loadu_ps(exp_i_ptr.add(ebase));
+                sv = _mm_add_ps(sv, _mm_mul_ps(m, odds));
+                sv = _mm_add_ps(sv, ins);
+            }
+            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b00_11_10_01));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b01_00_11_10));
+            let mut sum = 0.0_f32;
+            _mm_store_ss(&mut sum, sv);
+            null2[x] = sum + xfactor;
+        }
+    }
+}
+
 pub fn p_null2_odds_from_omx_expectation_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -732,8 +919,8 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
     exp_m.fill(0.0);
     exp_i.fill(0.0);
 
-    let fdp = fwd.striped_dp.as_ptr();
-    let bdp = bck.striped_dp.as_ptr();
+    let fdp = fwd.striped_dp.as_ptr().wrapping_add(fwd.striped_dp_offset);
+    let bdp = bck.striped_dp.as_ptr().wrapping_add(bck.striped_dp_offset);
     let fx = fwd.xmx.as_ptr();
     let bx = bck.xmx.as_ptr();
     let exp_m_ptr = exp_m.as_mut_ptr();
@@ -751,6 +938,90 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
         }
     };
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::{
+            _mm_add_ps, _mm_load_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_setzero_ps,
+            _mm_shuffle_ps, _mm_store_ss, _mm_storeu_ps,
+        };
+
+        for i in 1..=ld {
+            let dp_scale = scaleproduct * *fwd.row_scale.as_ptr().add(i);
+            let scalev = _mm_set1_ps(dp_scale);
+            let frow = i * fwd.striped_row_width;
+            let brow = i * bck.striped_row_width;
+
+            for qi in 0..q {
+                let fbase = frow + qi * DP_CELLS_PER_K * 4;
+                let bbase = brow + qi * DP_CELLS_PER_K * 4;
+                let ebase = qi * 4;
+
+                let fm = _mm_load_ps(fdp.add(fbase));
+                let bm = _mm_load_ps(bdp.add(bbase));
+                let row_m = _mm_mul_ps(_mm_mul_ps(fm, bm), scalev);
+                let old_m = _mm_loadu_ps(exp_m_ptr.add(ebase));
+                _mm_storeu_ps(exp_m_ptr.add(ebase), _mm_add_ps(row_m, old_m));
+
+                let fi = _mm_load_ps(fdp.add(fbase + 8));
+                let bi = _mm_load_ps(bdp.add(bbase + 8));
+                let row_i = _mm_mul_ps(_mm_mul_ps(fi, bi), scalev);
+                let old_i = _mm_loadu_ps(exp_i_ptr.add(ebase));
+                _mm_storeu_ps(exp_i_ptr.add(ebase), _mm_add_ps(row_i, old_i));
+            }
+
+            exp_n += *fx.add((i - 1) * NXCELLS + PXN)
+                * *bx.add(i * NXCELLS + PXN)
+                * njc_loop[0]
+                * scaleproduct;
+            exp_j += *fx.add((i - 1) * NXCELLS + PXJ)
+                * *bx.add(i * NXCELLS + PXJ)
+                * njc_loop[1]
+                * scaleproduct;
+            exp_c += *fx.add((i - 1) * NXCELLS + PXC)
+                * *bx.add(i * NXCELLS + PXC)
+                * njc_loop[2]
+                * scaleproduct;
+
+            if bck.has_own_scales {
+                scaleproduct *= *fwd.row_scale.as_ptr().add(i) / *bck.row_scale.as_ptr().add(i);
+            }
+        }
+
+        let norm = 1.0 / ld as f32;
+        let normv = _mm_set1_ps(norm);
+        for qi in 0..q {
+            let ebase = qi * 4;
+            let m = _mm_mul_ps(_mm_loadu_ps(exp_m_ptr.add(ebase)), normv);
+            let ins = _mm_mul_ps(_mm_loadu_ps(exp_i_ptr.add(ebase)), normv);
+            _mm_storeu_ps(exp_m_ptr.add(ebase), m);
+            _mm_storeu_ps(exp_i_ptr.add(ebase), ins);
+        }
+        exp_n *= norm;
+        exp_c *= norm;
+        exp_j *= norm;
+        let xfactor = exp_n + exp_c + exp_j;
+
+        null2.resize(k, 1.0);
+        for x in 0..k {
+            let mut sv = _mm_setzero_ps();
+            for qi in 0..q {
+                let ebase = qi * 4;
+                let odds = _mm_loadu_ps(rfv[x][qi].as_ptr());
+                let m = _mm_loadu_ps(exp_m_ptr.add(ebase));
+                let ins = _mm_loadu_ps(exp_i_ptr.add(ebase));
+                sv = _mm_add_ps(sv, _mm_mul_ps(m, odds));
+                sv = _mm_add_ps(sv, ins);
+            }
+            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b00_11_10_01));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b01_00_11_10));
+            let mut sum = 0.0_f32;
+            _mm_store_ss(&mut sum, sv);
+            null2[x] = sum + xfactor;
+        }
+        return;
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
     unsafe {
         for i in 1..=ld {
             let dp_scale = scaleproduct * *fwd.row_scale.as_ptr().add(i);
@@ -916,8 +1187,8 @@ fn p_null2_odds_from_striped_pmx(
     njc_loop: [f32; 3],
 ) -> Vec<f32> {
     let ld = fwd.l;
-    let fdp = fwd.striped_dp.as_ptr();
-    let bdp = bck.striped_dp.as_ptr();
+    let fdp = fwd.striped_dp.as_ptr().wrapping_add(fwd.striped_dp_offset);
+    let bdp = bck.striped_dp.as_ptr().wrapping_add(bck.striped_dp_offset);
     let fx = fwd.xmx.as_ptr();
     let bx = bck.xmx.as_ptr();
     let fs = fwd.scale.as_ptr();
@@ -1048,8 +1319,8 @@ fn p_null2_odds_from_striped_pmx_reuse(
     exp_i: &mut Vec<f32>,
 ) {
     let ld = fwd.l;
-    let fdp = fwd.striped_dp.as_ptr();
-    let bdp = bck.striped_dp.as_ptr();
+    let fdp = fwd.striped_dp.as_ptr().wrapping_add(fwd.striped_dp_offset);
+    let bdp = bck.striped_dp.as_ptr().wrapping_add(bck.striped_dp_offset);
     let fx = fwd.xmx.as_ptr();
     let bx = bck.xmx.as_ptr();
     let fs = fwd.scale.as_ptr();

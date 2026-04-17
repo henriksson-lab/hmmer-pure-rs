@@ -3,8 +3,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::process::ExitCode;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 
@@ -51,12 +51,15 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let bg = Bg::new(&abc);
 
     // Pre-build profiles
-    let profiles: Vec<(Profile, OProfile)> = hmms.iter().map(|hmm| {
-        let mut gm = Profile::new(hmm.m, &abc);
-        profile::profile_config(hmm, &bg, &mut gm, 400, P7_LOCAL);
-        let om = OProfile::convert(&gm);
-        (gm, om)
-    }).collect();
+    let profiles: Vec<(Profile, OProfile)> = hmms
+        .iter()
+        .map(|hmm| {
+            let mut gm = Profile::new(hmm.m, &abc);
+            profile::profile_config(hmm, &bg, &mut gm, 400, P7_LOCAL);
+            let om = OProfile::convert(&gm);
+            (gm, om)
+        })
+        .collect();
     eprintln!("Profiles built");
 
     // Start listening
@@ -108,14 +111,22 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         let mut pli = Pipeline::new();
                         pli.new_model(&local_gm);
                         let mut th = TopHits::new();
-                        if pli.run(&mut local_gm, &mut local_om, &local_bg, &hmms[i], &sq, &mut th) {
+                        if pli.run(
+                            &mut local_gm,
+                            &mut local_om,
+                            &local_bg,
+                            &hmms[i],
+                            &sq,
+                            &mut th,
+                        ) {
                             for hit in &th.hits {
                                 results.push((hmms[i].name.clone(), hit.score));
                             }
                         }
                     }
 
-                    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    results
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     let _ = writeln!(stream, "HITS {}", results.len());
                     for (name, score) in &results {
                         let _ = writeln!(stream, "{}\t{:.1}", name, score);

@@ -52,7 +52,7 @@ pub struct Hit {
     pub nclustered: usize,
     pub noverlaps: usize,
     pub nenvelopes: usize,
-    pub ndom: usize,    // actual number of domains
+    pub ndom: usize, // actual number of domains
     pub nreported: usize,
     pub nincluded: usize,
     pub dcl: Vec<Domain>,

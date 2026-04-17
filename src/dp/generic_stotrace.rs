@@ -20,6 +20,19 @@ pub fn stochastic_trace_pmx(
     ox: &ProbMx,
 ) -> Trace {
     let mut tr = Trace::new();
+    stochastic_trace_pmx_into(rng, l, om, ox, &mut tr);
+    tr
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn stochastic_trace_pmx_into(
+    rng: &mut MersenneTwister,
+    l: usize,
+    om: &OProfile,
+    ox: &ProbMx,
+    tr: &mut Trace,
+) {
+    tr.clear();
     let mut i = l;
     let mut k = 0usize;
     tr.append(State::T, k, i);
@@ -67,7 +80,6 @@ pub fn stochastic_trace_pmx(
     tr.st.reverse();
     tr.k.reverse();
     tr.i.reverse();
-    tr
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -85,12 +97,30 @@ fn tfv_dd(om: &OProfile, k: usize) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn select_m_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+fn select_m_pmx(
+    rng: &mut MersenneTwister,
+    om: &OProfile,
+    ox: &ProbMx,
+    i: usize,
+    k: usize,
+) -> State {
     let prev_k = k - 1;
     let bm = ox.xmx(i - 1, PXB) * tfv(om, k, P7O_BM);
-    let mm = if prev_k > 0 { ox.mmx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_MM);
-    let im = if prev_k > 0 { ox.imx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_IM);
-    let dm = if prev_k > 0 { ox.dmx(i - 1, prev_k) } else { 0.0 } * tfv(om, k, P7O_DM);
+    let mm = if prev_k > 0 {
+        ox.mmx(i - 1, prev_k)
+    } else {
+        0.0
+    } * tfv(om, k, P7O_MM);
+    let im = if prev_k > 0 {
+        ox.imx(i - 1, prev_k)
+    } else {
+        0.0
+    } * tfv(om, k, P7O_IM);
+    let dm = if prev_k > 0 {
+        ox.dmx(i - 1, prev_k)
+    } else {
+        0.0
+    } * tfv(om, k, P7O_DM);
     match choose_probs(rng, &[bm, mm, im, dm]) {
         0 => State::B,
         1 => State::M,
@@ -100,7 +130,13 @@ fn select_m_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
-fn select_d_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+fn select_d_pmx(
+    rng: &mut MersenneTwister,
+    om: &OProfile,
+    ox: &ProbMx,
+    i: usize,
+    k: usize,
+) -> State {
     let prev_k = k - 1;
     let md = ox.mmx(i, prev_k) * tfv(om, prev_k, P7O_MD);
     let dd = ox.dmx(i, prev_k) * tfv_dd(om, prev_k);
@@ -112,7 +148,13 @@ fn select_d_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
-fn select_i_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
+fn select_i_pmx(
+    rng: &mut MersenneTwister,
+    om: &OProfile,
+    ox: &ProbMx,
+    i: usize,
+    k: usize,
+) -> State {
     let mi = ox.mmx(i - 1, k) * tfv(om, k, P7O_MI);
     let ii = ox.imx(i - 1, k) * tfv(om, k, P7O_II);
     if choose_probs(rng, &[mi, ii]) == 0 {

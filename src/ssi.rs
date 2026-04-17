@@ -80,7 +80,11 @@ mod tests {
             "/hmmer/testsuite/minipfam.hmm"
         )))
         .unwrap();
-        assert!(idx.len() >= 10, "minipfam should have at least 10 HMMs, got {}", idx.len());
+        assert!(
+            idx.len() >= 10,
+            "minipfam should have at least 10 HMMs, got {}",
+            idx.len()
+        );
         assert!(idx.lookup("14-3-3").is_some());
     }
 }

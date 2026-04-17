@@ -158,10 +158,10 @@ impl Alphabet {
     fn set_case_insensitive(&mut self) {
         for lc in b'a'..=b'z' {
             let uc = lc.to_ascii_uppercase();
-            let lc_valid = self.inmap[lc as usize] != DSQ_ILLEGAL
-                && self.inmap[lc as usize] != DSQ_IGNORED;
-            let uc_valid = self.inmap[uc as usize] != DSQ_ILLEGAL
-                && self.inmap[uc as usize] != DSQ_IGNORED;
+            let lc_valid =
+                self.inmap[lc as usize] != DSQ_ILLEGAL && self.inmap[lc as usize] != DSQ_IGNORED;
+            let uc_valid =
+                self.inmap[uc as usize] != DSQ_ILLEGAL && self.inmap[uc as usize] != DSQ_IGNORED;
 
             if uc_valid && !lc_valid {
                 self.inmap[lc as usize] = self.inmap[uc as usize];
@@ -234,7 +234,7 @@ impl Alphabet {
         comp[2] = 1;
         comp[3] = 0;
         comp[4] = 4; // gap -> gap
-        // R<->Y, M<->K, S<->S, W<->W, H<->D, B<->V
+                     // R<->Y, M<->K, S<->S, W<->W, H<->D, B<->V
         comp[5] = 6;
         comp[6] = 5;
         comp[7] = 8;
@@ -350,7 +350,10 @@ impl Alphabet {
     /// Reverse complement a digital sequence in place (DNA/RNA only).
     /// dsq is 1-based: dsq[1..=n] are the residues.
     pub fn revcomp(&self, dsq: &mut [Dsq], n: usize) {
-        let comp = self.complement.as_ref().expect("revcomp requires DNA/RNA alphabet");
+        let comp = self
+            .complement
+            .as_ref()
+            .expect("revcomp requires DNA/RNA alphabet");
         // Reverse the sequence portion [1..=n]
         let mut i = 1;
         let mut j = n;

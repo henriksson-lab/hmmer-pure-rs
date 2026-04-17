@@ -13,7 +13,11 @@ use crate::profile::*;
 /// exclusive of emitting residue x_i.
 pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
-    let esc: f32 = if gm.is_local() { 0.0 } else { f32::NEG_INFINITY };
+    let esc: f32 = if gm.is_local() {
+        0.0
+    } else {
+        f32::NEG_INFINITY
+    };
 
     crate::logsum::p7_flogsuminit();
 
@@ -22,11 +26,7 @@ pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     gx.set_xmx(l, P7G_B, f32::NEG_INFINITY);
     gx.set_xmx(l, P7G_N, f32::NEG_INFINITY);
     gx.set_xmx(l, P7G_C, gm.xsc[P7P_C][P7P_MOVE]); // C<-T
-    gx.set_xmx(
-        l,
-        P7G_E,
-        gx.xmx(l, P7G_C) + gm.xsc[P7P_E][P7P_MOVE],
-    ); // E<-C
+    gx.set_xmx(l, P7G_E, gx.xmx(l, P7G_C) + gm.xsc[P7P_E][P7P_MOVE]); // E<-C
 
     gx.set_mmx(l, m, gx.xmx(l, P7G_E));
     gx.set_dmx(l, m, gx.xmx(l, P7G_E));
@@ -48,7 +48,10 @@ pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
         // B state
         let mut xb = gx.mmx(i + 1, 1) + gm.tsc(0, P7P_BM) + gm.msc(1, xi1);
         for k in 2..=m {
-            xb = p7_flogsum(xb, gx.mmx(i + 1, k) + gm.tsc(k - 1, P7P_BM) + gm.msc(k, xi1));
+            xb = p7_flogsum(
+                xb,
+                gx.mmx(i + 1, k) + gm.tsc(k - 1, P7P_BM) + gm.msc(k, xi1),
+            );
         }
         gx.set_xmx(i, P7G_B, xb);
 
@@ -60,11 +63,7 @@ pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
         gx.set_xmx(i, P7G_J, xj);
 
         // C state
-        gx.set_xmx(
-            i,
-            P7G_C,
-            gx.xmx(i + 1, P7G_C) + gm.xsc[P7P_C][P7P_LOOP],
-        );
+        gx.set_xmx(i, P7G_C, gx.xmx(i + 1, P7G_C) + gm.xsc[P7P_C][P7P_LOOP]);
 
         // E state
         let xe = p7_flogsum(
@@ -91,10 +90,7 @@ pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
                     gx.mmx(i + 1, k + 1) + gm.tsc(k, P7P_MM) + gm.msc(k + 1, xi1),
                     gx.imx(i + 1, k) + gm.tsc(k, P7P_MI) + gm.isc(k, xi1),
                 ),
-                p7_flogsum(
-                    gx.xmx(i, P7G_E) + esc,
-                    gx.dmx(i, k + 1) + gm.tsc(k, P7P_MD),
-                ),
+                p7_flogsum(gx.xmx(i, P7G_E) + esc, gx.dmx(i, k + 1) + gm.tsc(k, P7P_MD)),
             );
             gx.set_mmx(i, k, mm);
 
@@ -108,10 +104,7 @@ pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
             // D state
             let dm = p7_flogsum(
                 gx.mmx(i + 1, k + 1) + gm.tsc(k, P7P_DM) + gm.msc(k + 1, xi1),
-                p7_flogsum(
-                    gx.dmx(i, k + 1) + gm.tsc(k, P7P_DD),
-                    gx.xmx(i, P7G_E) + esc,
-                ),
+                p7_flogsum(gx.dmx(i, k + 1) + gm.tsc(k, P7P_DD), gx.xmx(i, P7G_E) + esc),
             );
             gx.set_dmx(i, k, dm);
         }

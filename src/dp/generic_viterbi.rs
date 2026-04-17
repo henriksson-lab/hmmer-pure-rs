@@ -10,7 +10,11 @@ use crate::profile::*;
 /// `dsq` is a 1-based digital sequence (dsq[1..=L]).
 pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
-    let esc: f32 = if gm.is_local() { 0.0 } else { f32::NEG_INFINITY };
+    let esc: f32 = if gm.is_local() {
+        0.0
+    } else {
+        f32::NEG_INFINITY
+    };
 
     // Initialization of row 0
     gx.set_xmx(0, P7G_N, 0.0);
@@ -135,6 +139,10 @@ mod tests {
         let sc = g_viterbi(&dsq, l, &gm, &mut gx);
 
         // Score should be positive for a matching sequence
-        assert!(sc > 0.0, "Viterbi score {} should be positive for matching seq", sc);
+        assert!(
+            sc > 0.0,
+            "Viterbi score {} should be positive for matching seq",
+            sc
+        );
     }
 }

@@ -76,7 +76,13 @@ pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
     hmm.flags |= P7H_STATS;
 }
 
-fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut MersenneTwister) -> f32 {
+fn calibrate_msv(
+    hmm: &Hmm,
+    abc: &crate::alphabet::Alphabet,
+    bg: &Bg,
+    lambda: f32,
+    rng: &mut MersenneTwister,
+) -> f32 {
     let n = 200;
     let l = 200;
 
@@ -121,7 +127,13 @@ fn calibrate_msv(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f3
     mu as f32
 }
 
-fn calibrate_viterbi(hmm: &Hmm, abc: &crate::alphabet::Alphabet, bg: &Bg, lambda: f32, rng: &mut MersenneTwister) -> f32 {
+fn calibrate_viterbi(
+    hmm: &Hmm,
+    abc: &crate::alphabet::Alphabet,
+    bg: &Bg,
+    lambda: f32,
+    rng: &mut MersenneTwister,
+) -> f32 {
     let n = 200;
     let l = 200;
 
@@ -172,8 +184,8 @@ fn calibrate_forward(
     lambda: f32,
     rng: &mut MersenneTwister,
 ) -> (f32, f32) {
-    let n = 200;  // EfN
-    let l = 100;  // EfL
+    let n = 200; // EfN
+    let l = 100; // EfL
     let tailp = 0.04_f64; // Eft
 
     let mut gm = Profile::new(hmm.m, abc);
@@ -217,8 +229,7 @@ fn calibrate_forward(
     // C code: tau = esl_gumbel_invcdf(1.0-tailp, gmu, glam) + (log(tailp) / lambda)
     // First find x where Gumbel tail mass = tailp, then back up by log(tailp)/lambda
     // to set the origin of the exponential tail to 1.0 instead of tailp.
-    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam)
-        + (tailp.ln() / lambda as f64);
+    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam) + (tailp.ln() / lambda as f64);
 
     let tau = if tau.is_finite() { tau as f32 } else { -3.0 };
     // C stores the HMM-derived lambda for all three: MLAMBDA = VLAMBDA = FLAMBDA = lambda
@@ -276,8 +287,13 @@ mod lambda_test {
     #[test]
     fn check_lambda_directly() {
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"), "/hmmer/testsuite/20aa.hmm"
-        ))).unwrap().into_iter().next().unwrap();
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
         let abc = Alphabet::new(hmm.abc_type);
         let bg = Bg::new(&abc);
 
@@ -297,7 +313,10 @@ mod lambda_test {
         eprintln!("H={:.6} bits, lambda={:.5} (C expects 0.72049)", h, lambda);
 
         // Lambda should be close to C's 0.72049
-        assert!((lambda - 0.72049).abs() < 0.001,
-            "lambda={} too far from C's 0.72049", lambda);
+        assert!(
+            (lambda - 0.72049).abs() < 0.001,
+            "lambda={} too far from C's 0.72049",
+            lambda
+        );
     }
 }

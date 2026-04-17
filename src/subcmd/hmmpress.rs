@@ -122,7 +122,8 @@ fn write_msv_filter<W: Write>(w: &mut W, om: &OProfile) {
             w.write_all(&om.rbv[x][q]).unwrap();
         }
     }
-    w.write_all(&[om.tbm_b, om.tec_b, om.tjb_b, om.base_b, om.bias_b]).unwrap();
+    w.write_all(&[om.tbm_b, om.tec_b, om.tjb_b, om.base_b, om.bias_b])
+        .unwrap();
     w.write_all(&om.scale_b.to_le_bytes()).unwrap();
 }
 

@@ -18,10 +18,14 @@ fn read_hmm_from_cm(cm_path: &Path) -> hmmer_pure_rs::hmm::Hmm {
     let mut in_hmm = false;
     for line in reader.lines() {
         let line = line.unwrap();
-        if line.starts_with("HMMER3/") { in_hmm = true; }
+        if line.starts_with("HMMER3/") {
+            in_hmm = true;
+        }
         if in_hmm {
             hmm_lines.push(line);
-            if hmm_lines.last().map(|l| l.trim()) == Some("//") { break; }
+            if hmm_lines.last().map(|l| l.trim()) == Some("//") {
+                break;
+            }
         }
     }
     assert!(!hmm_lines.is_empty(), "No HMMER3 section in CM file");
@@ -93,16 +97,21 @@ fn run_p7_longtarget_timed(
 
     let start = Instant::now();
     let windows = unsafe {
-        simd::ssv_longtarget::ssv_filter_longtarget(
-            &dsq, seq.len(), &om, &bg_obj, 0.02, max_length,
-        )
+        simd::ssv_longtarget::ssv_filter_longtarget(&dsq, seq.len(), &om, &bg_obj, 0.02, max_length)
     };
     let elapsed = start.elapsed();
 
-    let hits: Vec<(usize, usize, f32)> = windows.iter().map(|w| {
-        let start = if w.n > w.length { w.n - w.length + 1 } else { 1 };
-        (start, w.n, w.score)
-    }).collect();
+    let hits: Vec<(usize, usize, f32)> = windows
+        .iter()
+        .map(|w| {
+            let start = if w.n > w.length {
+                w.n - w.length + 1
+            } else {
+                1
+            };
+            (start, w.n, w.score)
+        })
+        .collect();
 
     (hits, elapsed)
 }
@@ -145,9 +154,14 @@ fn make_seq_with_trna(total_len: usize, trna_pos: usize, seed: u64) -> Vec<u8> {
             seq.push(trna[i - trna_pos]);
         } else {
             // Simple LCG PRNG
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let base = match (state >> 33) % 4 {
-                0 => b'A', 1 => b'C', 2 => b'G', _ => b'U',
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                _ => b'U',
             };
             seq.push(base);
         }
@@ -160,7 +174,9 @@ fn read_first_fasta_seq(path: &Path) -> Vec<u8> {
     let content = std::fs::read_to_string(path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
-        if line.starts_with('>') { break; }
+        if line.starts_with('>') {
+            break;
+        }
         seq.extend_from_slice(line.trim().as_bytes());
     }
     seq
@@ -178,18 +194,27 @@ fn perf_p7_pipeline_10kb() {
     let seq = make_seq_with_trna(10_000, 5000, 42);
     let (domains, elapsed) = run_p7_timed(&hmm, &seq);
 
-    println!("P7 pipeline 10kb: {:.3}s, {} domains", elapsed.as_secs_f64(), domains.len());
+    println!(
+        "P7 pipeline 10kb: {:.3}s, {} domains",
+        elapsed.as_secs_f64(),
+        domains.len()
+    );
     for (i, j, sc) in &domains {
         println!("  {}-{}: {:.1} bits", i, j, sc);
     }
 
     // Should find the tRNA
-    let trna_hit = domains.iter().any(|(i, _, sc)| *i >= 4950 && *i <= 5050 && *sc > 10.0);
+    let trna_hit = domains
+        .iter()
+        .any(|(i, _, sc)| *i >= 4950 && *i <= 5050 && *sc > 10.0);
     assert!(trna_hit, "Should find tRNA at ~5000 in 10kb sequence");
 
     // Performance: should complete in under 5 seconds
-    assert!(elapsed.as_secs() < 5,
-        "10kb P7 pipeline took {:.1}s, expected <5s", elapsed.as_secs_f64());
+    assert!(
+        elapsed.as_secs() < 5,
+        "10kb P7 pipeline took {:.1}s, expected <5s",
+        elapsed.as_secs_f64()
+    );
 }
 
 // ============================================================
@@ -204,18 +229,28 @@ fn perf_ssv_longtarget_100kb() {
     let seq = make_seq_with_trna(100_000, 50_000, 123);
     let (windows, elapsed) = run_p7_longtarget_timed(&hmm, &seq);
 
-    println!("SSV longtarget 100kb: {:.3}s, {} windows", elapsed.as_secs_f64(), windows.len());
+    println!(
+        "SSV longtarget 100kb: {:.3}s, {} windows",
+        elapsed.as_secs_f64(),
+        windows.len()
+    );
     for (i, j, sc) in &windows {
         println!("  {}-{}: {:.1} nats", i, j, sc);
     }
 
     // Should find a window near the tRNA at position 50000
     let trna_hit = windows.iter().any(|(i, j, _)| *i <= 50100 && *j >= 50000);
-    assert!(trna_hit, "SSV longtarget should find tRNA at ~50000 in 100kb sequence");
+    assert!(
+        trna_hit,
+        "SSV longtarget should find tRNA at ~50000 in 100kb sequence"
+    );
 
     // Performance: SSV longtarget should be fast (<5s for 100kb)
-    assert!(elapsed.as_secs() < 5,
-        "100kb SSV longtarget took {:.1}s, expected <5s", elapsed.as_secs_f64());
+    assert!(
+        elapsed.as_secs() < 5,
+        "100kb SSV longtarget took {:.1}s, expected <5s",
+        elapsed.as_secs_f64()
+    );
 }
 
 // ============================================================
@@ -239,26 +274,34 @@ fn perf_ssv_longtarget_genome() {
 
     let (domains, elapsed) = run_p7_longtarget_timed(&hmm, &seq);
 
-    println!("SSV longtarget genome ({}bp): {:.3}s, {} windows",
-        seq.len(), elapsed.as_secs_f64(), domains.len());
+    println!(
+        "SSV longtarget genome ({}bp): {:.3}s, {} windows",
+        seq.len(),
+        elapsed.as_secs_f64(),
+        domains.len()
+    );
     for (i, j, sc) in &domains {
         println!("  {}-{}: {:.1} nats", i, j, sc);
     }
 
     // C Infernal processes this genome in ~1 second with SSE.
     // Target: under 60 seconds for the full 2.9 Mbp genome.
-    assert!(elapsed.as_secs() < 60,
+    assert!(
+        elapsed.as_secs() < 60,
         "Genome SSV longtarget took {:.1}s, expected <60s. \
          C Infernal (SSE) does this in ~1s.",
-        elapsed.as_secs_f64());
+        elapsed.as_secs_f64()
+    );
 
     // C Infernal finds 15 tRNAs in this genome.
     // SSV longtarget is a prefilter — it should find at least as many
     // windows as there are true hits (may include false positives).
-    assert!(domains.len() >= 5,
+    assert!(
+        domains.len() >= 5,
         "Expected at least 5 SSV windows in M. ruminantium genome, got {}. \
          C Infernal finds 15 tRNAs.",
-        domains.len());
+        domains.len()
+    );
 }
 
 // ============================================================
@@ -288,11 +331,16 @@ fn perf_p7_pipeline_scaling() {
     let t_large = times[3].1;
     if t_small > 0.1 {
         let ratio = t_large / t_small;
-        println!("Scaling: {:.0}x time increase for {:.0}x size increase",
-            ratio, times[3].0 as f64 / times[0].0 as f64);
-        assert!(ratio < 200.0,
+        println!(
+            "Scaling: {:.0}x time increase for {:.0}x size increase",
+            ratio,
+            times[3].0 as f64 / times[0].0 as f64
+        );
+        assert!(
+            ratio < 200.0,
             "P7 pipeline scaling is superlinear: {:.0}x time for 50x size. \
              Expected roughly linear (50-100x).",
-            ratio);
+            ratio
+        );
     }
 }

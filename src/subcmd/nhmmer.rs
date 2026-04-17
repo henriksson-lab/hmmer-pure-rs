@@ -36,6 +36,10 @@ struct Args {
     #[arg(long = "tblout")]
     tblout: Option<PathBuf>,
 
+    /// Save per-domain hits to tabular file
+    #[arg(long = "domtblout")]
+    domtblout: Option<PathBuf>,
+
     /// Don't output alignments
     #[arg(long = "noali")]
     noali: bool,
@@ -199,6 +203,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         })
     });
+    let mut domtblout_file = args.domtblout.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating domtblout file: {}", e);
+            std::process::exit(1);
+        })
+    });
 
     for hmm in &hmms {
         let abc = match hmm.abc_type {
@@ -342,10 +352,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut th = TopHits::new();
         th.hits = all_hits;
         pli.n_targets = sequences.len() as u64;
+
+        // nhmmer E-value space is in residues, not sequences. Count each strand
+        // searched once (C HMMER reports this as "residues searched").
+        let total_residues: usize = sequences.iter().map(|s| s.n).sum();
+        let strand_multiplier = (do_watson as usize) + (do_crick as usize);
+        let residues_searched = (total_residues * strand_multiplier.max(1)) as f64;
+
         let z = match pli.z_setby {
             hmmer_pure_rs::pipeline::ZSetBy::Option => pli.z,
-            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => sequences.len() as f64,
+            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => residues_searched,
         };
+        if pli.z_setby == hmmer_pure_rs::pipeline::ZSetBy::Ntargets {
+            pli.z = residues_searched;
+        }
         th.sort_by_sortkey();
         th.threshold(&pli, z, z);
 
@@ -409,6 +429,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         // Tblout
         if let Some(ref mut f) = tblout_file {
             hmmer_pure_rs::output::write_tblout(f, &hmm.name, hmm.acc.as_deref(), &th, z);
+        }
+        if let Some(ref mut f) = domtblout_file {
+            hmmer_pure_rs::output::write_domtblout(f, &hmm.name, hmm.acc.as_deref(), &th, z, z);
         }
 
         writeln!(out, "\n//").unwrap();
@@ -532,7 +555,8 @@ fn search_longtarget(
         let lb = bg.clone();
         let mut lpli = Pipeline::new();
         lpli.new_model(&lgm);
-        lpli.do_max = true; // Skip filters — SSV already pre-filtered
+        // SSV already ran; still apply Viterbi (F2) and Forward (F3) filters
+        // per window so we don't emit one Hit for every SSV candidate.
 
         let mut lth = TopHits::new();
         if lpli.run(&mut lgm, &mut lom, &lb, hmm, &win_sq, &mut lth) {

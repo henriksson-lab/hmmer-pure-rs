@@ -1,7 +1,7 @@
 //! Binary sequence database format for fast reading.
 //! Simplified port of esl_dsqdata — stores digital sequences in a compact binary format.
 
-use std::io::{Read, Write, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 #[cfg(test)]
@@ -18,18 +18,22 @@ pub fn write_dsqdata(path: &Path, sequences: &[Sequence]) -> HmmerResult<()> {
     let mut w = BufWriter::new(file);
 
     // Header
-    w.write_all(&DSQDATA_MAGIC.to_le_bytes()).map_err(HmmerError::Io)?;
-    w.write_all(&(sequences.len() as u64).to_le_bytes()).map_err(HmmerError::Io)?;
+    w.write_all(&DSQDATA_MAGIC.to_le_bytes())
+        .map_err(HmmerError::Io)?;
+    w.write_all(&(sequences.len() as u64).to_le_bytes())
+        .map_err(HmmerError::Io)?;
 
     // Write each sequence
     for sq in sequences {
         // Name length + name
         let name_bytes = sq.name.as_bytes();
-        w.write_all(&(name_bytes.len() as u32).to_le_bytes()).map_err(HmmerError::Io)?;
+        w.write_all(&(name_bytes.len() as u32).to_le_bytes())
+            .map_err(HmmerError::Io)?;
         w.write_all(name_bytes).map_err(HmmerError::Io)?;
 
         // Sequence length + digital sequence (excluding sentinels)
-        w.write_all(&(sq.n as u64).to_le_bytes()).map_err(HmmerError::Io)?;
+        w.write_all(&(sq.n as u64).to_le_bytes())
+            .map_err(HmmerError::Io)?;
         w.write_all(&sq.dsq[1..=sq.n]).map_err(HmmerError::Io)?;
     }
 

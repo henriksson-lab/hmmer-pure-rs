@@ -261,17 +261,6 @@ unsafe fn trace_engine_row1_checkpoint_q1e5(
     }
 }
 
-/// SSE Backward parser. Returns Backward score in nats.
-///
-/// # Safety
-/// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn backward_parser(dsq: &[Dsq], l: usize, om: &OProfile, fwd_sc: f32) -> f32 {
-    let mut pmx = super::probmx::ProbMx::new(l);
-    backward_parser_pmx(dsq, l, om, fwd_sc, &mut pmx)
-}
-
 /// SSE Backward parser that stores per-position specials and scale into a ProbMx.
 /// Adapted from the proven hmmer-pure-rs bck_engine() implementation.
 ///
@@ -366,12 +355,6 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     let row_len = q * 3; // M, D, I per stripe
     dpp_buf.resize(row_len, zerov);
     dpc_buf.resize(row_len, zerov);
-    for v in dpp_buf.iter_mut() {
-        *v = zerov;
-    }
-    for v in dpc_buf.iter_mut() {
-        *v = zerov;
-    }
 
     // Special state init at position L
     let c_move = om.xf[P7O_C][P7O_MOVE];
@@ -389,8 +372,8 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     let mut x_b: f32 = 0.0;
     let mut x_n: f32 = 0.0;
     let mut totscale: f64 = 0.0;
+    let track_scales = cfg!(feature = "tracehash") || fwd_row_scales.is_none();
     let mut has_own_scales = fwd_row_scales.is_none();
-
     // Initialize row L: M(L,k)->E->C->T and D(L,k)->E->C->T
     {
         let dp = dpp_buf.as_mut_ptr();
@@ -449,7 +432,9 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         for v in dpp_buf.iter_mut() {
             *v = _mm_mul_ps(*v, scalev);
         }
-        totscale += (row_scale_l as f64).ln();
+        if track_scales {
+            totscale += (row_scale_l as f64).ln();
+        }
     }
 
     if pmx.has_dp {
@@ -462,7 +447,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.set_xmx(l, PXJ, 0.0);
     pmx.set_xmx(l, PXB, 0.0);
     pmx.set_xmx(l, PXC, x_c);
-    pmx.scale[l] = totscale;
+    pmx.scale[l] = if track_scales { totscale } else { 0.0 };
     pmx.row_scale[l] = row_scale_l;
 
     #[cfg(feature = "tracehash")]
@@ -485,7 +470,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
             pmx.set_xmx(i, PXJ, x_j);
             pmx.set_xmx(i, PXB, x_b);
             pmx.set_xmx(i, PXC, x_c);
-            pmx.scale[i] = totscale;
+            pmx.scale[i] = if track_scales { totscale } else { 0.0 };
             pmx.row_scale[i] = fwd_row_scales.map(|s| s[i]).unwrap_or(1.0);
             if pmx.has_dp {
                 pmx.zero_simd_row(i);
@@ -637,7 +622,9 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                 let p = dpc.add(qi);
                 *p = _mm_mul_ps(*p, scalev);
             }
-            totscale += (row_scale as f64).ln();
+            if track_scales {
+                totscale += (row_scale as f64).ln();
+            }
             if has_own_scales {
                 x_b = 1.0;
             } else {
@@ -656,7 +643,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
         pmx.set_xmx(i, PXJ, x_j);
         pmx.set_xmx(i, PXB, x_b);
         pmx.set_xmx(i, PXC, x_c);
-        pmx.scale[i] = totscale;
+        pmx.scale[i] = if track_scales { totscale } else { 0.0 };
         pmx.row_scale[i] = row_scale;
 
         #[cfg(feature = "tracehash")]
@@ -756,11 +743,25 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.set_xmx(0, PXJ, 0.0);
     pmx.set_xmx(0, PXB, x_b);
     pmx.set_xmx(0, PXC, 0.0);
-    pmx.scale[0] = totscale;
+    pmx.scale[0] = if track_scales { totscale } else { 0.0 };
     pmx.row_scale[0] = 1.0;
     pmx.has_own_scales = has_own_scales;
 
     (totscale + (x_n as f64).ln()) as f32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn backward_parser_pmx_offset_canonical(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    om: &OProfile,
+    pmx: &mut super::probmx::ProbMx,
+    fwd_row_scales: Option<&[f32]>,
+) -> f32 {
+    debug_assert!(pmx.has_dp);
+    backward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx, fwd_row_scales)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -779,11 +780,10 @@ unsafe fn backward_parser_pmx_offset_direct(
     let row_width = pmx.striped_row_width();
     let zerov = _mm_setzero_ps();
     let dsq_ptr = dsq.as_ptr().add(dsq_offset);
-    let striped_ptr = pmx.striped_dp.as_mut_ptr();
+    let striped_ptr = pmx.striped_dp.as_mut_ptr().add(pmx.striped_dp_offset);
     let xmx_ptr = pmx.xmx.as_mut_ptr();
     let scale_ptr = pmx.scale.as_mut_ptr();
     let row_scale_ptr = pmx.row_scale.as_mut_ptr();
-
     let c_move = om.xf[P7O_C][P7O_MOVE];
     let c_loop = om.xf[P7O_C][P7O_LOOP];
     let e_move = om.xf[P7O_E][P7O_MOVE];
@@ -799,16 +799,17 @@ unsafe fn backward_parser_pmx_offset_direct(
     let mut x_b: f32 = 0.0;
     let mut x_n: f32 = 0.0;
     let mut totscale: f64 = 0.0;
+    let track_scales = cfg!(feature = "tracehash") || fwd_row_scales.is_none();
     let mut has_own_scales = fwd_row_scales.is_none();
 
     #[inline(always)]
     unsafe fn load_cell(row: *const f32, q: usize, s: usize) -> __m128 {
-        _mm_loadu_ps(row.add(q * 12 + s * 4))
+        _mm_load_ps(row.add(q * 12 + s * 4))
     }
 
     #[inline(always)]
     unsafe fn store_cell(row: *mut f32, q: usize, s: usize, v: __m128) {
-        _mm_storeu_ps(row.add(q * 12 + s * 4), v);
+        _mm_store_ps(row.add(q * 12 + s * 4), v);
     }
 
     #[inline(always)]
@@ -881,14 +882,16 @@ unsafe fn backward_parser_pmx_offset_direct(
         let mut off = 0;
         while off < row_width {
             let p = row_l.add(off);
-            _mm_storeu_ps(p, _mm_mul_ps(_mm_loadu_ps(p), scalev));
+            _mm_store_ps(p, _mm_mul_ps(_mm_load_ps(p), scalev));
             off += 4;
         }
-        totscale += (row_scale_l as f64).ln();
+        if track_scales {
+            totscale += (row_scale_l as f64).ln();
+        }
     }
 
     store_xmx(xmx_ptr, l, x_e, 0.0, 0.0, 0.0, x_c);
-    *scale_ptr.add(l) = totscale;
+    *scale_ptr.add(l) = if track_scales { totscale } else { 0.0 };
     *row_scale_ptr.add(l) = row_scale_l;
 
     for i in (1..l).rev() {
@@ -1006,10 +1009,12 @@ unsafe fn backward_parser_pmx_offset_direct(
             let mut off = 0;
             while off < row_width {
                 let p = dpc.add(off);
-                _mm_storeu_ps(p, _mm_mul_ps(_mm_loadu_ps(p), scalev));
+                _mm_store_ps(p, _mm_mul_ps(_mm_load_ps(p), scalev));
                 off += 4;
             }
-            totscale += (row_scale as f64).ln();
+            if track_scales {
+                totscale += (row_scale as f64).ln();
+            }
             if has_own_scales {
                 x_b = 1.0;
             } else {
@@ -1018,7 +1023,7 @@ unsafe fn backward_parser_pmx_offset_direct(
         }
 
         store_xmx(xmx_ptr, i, x_e, x_n, x_j, x_b, x_c);
-        *scale_ptr.add(i) = totscale;
+        *scale_ptr.add(i) = if track_scales { totscale } else { 0.0 };
         *row_scale_ptr.add(i) = row_scale;
     }
 
@@ -1044,7 +1049,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     }
 
     store_xmx(xmx_ptr, 0, 0.0, x_n, 0.0, x_b, 0.0);
-    *scale_ptr = totscale;
+    *scale_ptr = if track_scales { totscale } else { 0.0 };
     *row_scale_ptr = 1.0;
     pmx.has_own_scales = has_own_scales;
 
@@ -1076,18 +1081,22 @@ fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> boo
 /// Load transition vector for stripe qi, transition index tidx (0=BM,1=MM,2=IM,3=DM,4=MD,5=MI,6=II)
 #[inline(always)]
 unsafe fn load_tfv(om: &OProfile, qi: usize, tidx: usize) -> __m128 {
-    _mm_loadu_ps(om.tfv[qi * 7 + tidx].as_ptr())
+    let ptr = om.tfv_a.as_ptr().add(qi * 7 + tidx);
+    _mm_load_ps((*ptr).as_ptr())
 }
 
 /// Load D->D transition vector for stripe qi
 #[inline(always)]
 unsafe fn load_tfv_dd(om: &OProfile, qi: usize) -> __m128 {
     let q = (om.m + 3) / 4;
-    _mm_loadu_ps(om.tfv[7 * q + qi].as_ptr())
+    let ptr = om.tfv_a.as_ptr().add(7 * q + qi);
+    _mm_load_ps((*ptr).as_ptr())
 }
 
 /// Load float emission vector for residue x, stripe qi
 #[inline(always)]
 unsafe fn load_rfv(om: &OProfile, x: usize, qi: usize) -> __m128 {
-    _mm_loadu_ps(om.rfv[x][qi].as_ptr())
+    let residue = om.rfv_a.as_ptr().add(x);
+    let ptr = (*residue).as_ptr().add(qi);
+    _mm_load_ps((*ptr).as_ptr())
 }

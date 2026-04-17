@@ -49,7 +49,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let stderr = std::io::stderr();
     let mut err = stderr.lock();
 
-    writeln!(err, "Read {} sequences ({} residues total)", seq_names.len(), all_text.len()).unwrap();
+    writeln!(
+        err,
+        "Read {} sequences ({} residues total)",
+        seq_names.len(),
+        all_text.len()
+    )
+    .unwrap();
 
     // Build FM-index
     writeln!(err, "Building FM-index...").unwrap();
@@ -70,14 +76,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     // Write header
     out.write_all(b"HMMERDB\0").unwrap();
-    out.write_all(&(seq_names.len() as u64).to_le_bytes()).unwrap();
-    out.write_all(&(all_text.len() as u64).to_le_bytes()).unwrap();
+    out.write_all(&(seq_names.len() as u64).to_le_bytes())
+        .unwrap();
+    out.write_all(&(all_text.len() as u64).to_le_bytes())
+        .unwrap();
 
     // Write sequence names and offsets
     for (i, name) in seq_names.iter().enumerate() {
         out.write_all(&(name.len() as u32).to_le_bytes()).unwrap();
         out.write_all(name.as_bytes()).unwrap();
-        out.write_all(&(seq_starts[i] as u64).to_le_bytes()).unwrap();
+        out.write_all(&(seq_starts[i] as u64).to_le_bytes())
+            .unwrap();
     }
 
     // Write BWT

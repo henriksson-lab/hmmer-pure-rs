@@ -39,8 +39,14 @@ fn main() -> ExitCode {
         "makehmmerdb" => subcmd::makehmmerdb::run(sub_args),
         "pgmd" | "hmmpgmd" => subcmd::hmmpgmd::run(sub_args),
         "sim" | "hmmsim" => subcmd::hmmsim::run(sub_args),
-        "help" | "--help" | "-h" => { print_usage(); ExitCode::SUCCESS }
-        "version" | "--version" | "-V" => { println!("hmmer-pure-rs {}", env!("CARGO_PKG_VERSION")); ExitCode::SUCCESS }
+        "help" | "--help" | "-h" => {
+            print_usage();
+            ExitCode::SUCCESS
+        }
+        "version" | "--version" | "-V" => {
+            println!("hmmer-pure-rs {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
             eprintln!("Unknown command: {}", cmd);
             eprintln!();
@@ -51,7 +57,10 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("hmmer-pure-rs {} — biological sequence analysis using profile HMMs", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "hmmer-pure-rs {} — biological sequence analysis using profile HMMs",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!();
     eprintln!("Usage: hmmer <command> [options] [args...]");
     eprintln!();

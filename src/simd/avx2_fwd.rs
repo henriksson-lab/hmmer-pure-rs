@@ -106,9 +106,21 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
     let mut dp: Vec<__m256> = vec![_mm256_setzero_ps(); q_count * nscells];
     let zerov = _mm256_setzero_ps();
 
-    macro_rules! mmo { ($q:expr) => { dp[$q * nscells + 0] }; }
-    macro_rules! dmo { ($q:expr) => { dp[$q * nscells + 1] }; }
-    macro_rules! imo { ($q:expr) => { dp[$q * nscells + 2] }; }
+    macro_rules! mmo {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmo {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imo {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
 
     let mut xe: f32 = 0.0;
     let mut xn: f32 = 1.0;
@@ -119,7 +131,9 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
 
     for i in 1..=l {
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp { continue; }
+        if xi >= om.abc_kp {
+            continue;
+        }
         let rsc = &om.rfv[xi];
 
         let mut dcv = zerov;
@@ -132,10 +146,14 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
 
         let mut tsc_idx = 0;
         for q in 0..q_count {
-            let tbm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tmm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tim = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tdm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tbm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tmm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tim = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tdm = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
 
             let mut sv = _mm256_mul_ps(xbv, tbm);
             sv = _mm256_add_ps(sv, _mm256_mul_ps(mpv, tmm));
@@ -152,15 +170,15 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
             mmo!(q) = sv;
             dmo!(q) = dcv;
 
-            let tmd = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
+            let tmd = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
             dcv = _mm256_mul_ps(sv, tmd);
 
-            let tmi = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            let tii = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr()); tsc_idx += 1;
-            imo!(q) = _mm256_add_ps(
-                _mm256_mul_ps(mpv, tmi),
-                _mm256_mul_ps(ipv, tii),
-            );
+            let tmi = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            let tii = _mm256_loadu_ps(om.tfv[tsc_idx].as_ptr());
+            tsc_idx += 1;
+            imo!(q) = _mm256_add_ps(_mm256_mul_ps(mpv, tmi), _mm256_mul_ps(ipv, tii));
         }
 
         // DD paths
@@ -181,7 +199,9 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
             }
         }
 
-        for q in 0..q_count { xev = _mm256_add_ps(dmo!(q), xev); }
+        for q in 0..q_count {
+            xev = _mm256_add_ps(dmo!(q), xev);
+        }
 
         // Horizontal sum
         let hi = _mm256_extractf128_ps::<1>(xev);
@@ -198,7 +218,10 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
 
         if xe > 1.0e4 {
             let scale = 1.0 / xe;
-            xn *= scale; xc *= scale; xj *= scale; xb *= scale;
+            xn *= scale;
+            xc *= scale;
+            xj *= scale;
+            xb *= scale;
             let sv = _mm256_set1_ps(scale);
             for q in 0..q_count {
                 mmo!(q) = _mm256_mul_ps(mmo!(q), sv);

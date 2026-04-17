@@ -24,7 +24,7 @@ thiserror = "2"
 rayon = "1"
 divsufsort = "2"
 flate2 = "1"
-tracehash = { path = "tracehash", optional = true }
+tracehash = { package = "tracehash-rs", version = "0.1", optional = true }
 
 [features]
 tracehash = ["dep:tracehash"]
@@ -35,8 +35,10 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+deep-comparator-rs = { path = "../deep-comparator", default-features = false }
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+panic = "abort"

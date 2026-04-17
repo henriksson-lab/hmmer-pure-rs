@@ -7,7 +7,10 @@ use clap::Parser;
 use hmmer_pure_rs::hmmfile;
 
 #[derive(Parser)]
-#[command(name = "hmmconvert", about = "Convert profile HMM file to HMMER3 format")]
+#[command(
+    name = "hmmconvert",
+    about = "Convert profile HMM file to HMMER3 format"
+)]
 struct Args {
     /// HMM file
     hmmfile: PathBuf,

@@ -12,7 +12,10 @@ use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::msa;
 
 #[derive(Parser)]
-#[command(name = "hmmbuild", about = "Build profile HMM(s) from multiple sequence alignment(s)")]
+#[command(
+    name = "hmmbuild",
+    about = "Build profile HMM(s) from multiple sequence alignment(s)"
+)]
 struct Args {
     /// Output HMM file
     hmmfile: PathBuf,
@@ -62,12 +65,34 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
 
-    writeln!(err, "# hmmbuild :: profile HMM construction from multiple sequence alignments").unwrap();
+    writeln!(
+        err,
+        "# hmmbuild :: profile HMM construction from multiple sequence alignments"
+    )
+    .unwrap();
     writeln!(err, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
-    writeln!(err, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
-    writeln!(err, "# input alignment file:            {}", args.msafile.display()).unwrap();
-    writeln!(err, "# output HMM file:                 {}", args.hmmfile.display()).unwrap();
-    writeln!(err, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(
+        err,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
+    writeln!(
+        err,
+        "# input alignment file:            {}",
+        args.msafile.display()
+    )
+    .unwrap();
+    writeln!(
+        err,
+        "# output HMM file:                 {}",
+        args.hmmfile.display()
+    )
+    .unwrap();
+    writeln!(
+        err,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
     writeln!(err).unwrap();
 
     for (idx, alignment) in msas.iter().enumerate() {
@@ -85,7 +110,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             hmm.m,
             alignment.nseq,
             hmm.eff_nseq,
-        ).unwrap();
+        )
+        .unwrap();
 
         hmmfile::write_hmm(&mut out_file, &hmm).unwrap_or_else(|e| {
             eprintln!("Error writing HMM: {}", e);

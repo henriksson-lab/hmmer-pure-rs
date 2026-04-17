@@ -44,6 +44,15 @@ impl Trace {
         }
     }
 
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.st.clear();
+        self.k.clear();
+        self.i.clear();
+        self.n = 0;
+    }
+
+    #[inline(always)]
     pub fn append(&mut self, state: State, k: usize, i: usize) {
         self.st.push(state);
         match state {

@@ -7,8 +7,8 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::hmm;
+use hmmer_pure_rs::hmmfile;
 
 #[derive(Parser)]
 #[command(name = "hmmstat", about = "Display summary statistics for each HMM")]
@@ -31,19 +31,38 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     writeln!(out, "# hmmstat :: display summary statistics for each HMM").unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
     writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
-    writeln!(out, "# Freely distributed under the BSD open source license.").unwrap();
-    writeln!(out, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -").unwrap();
+    writeln!(
+        out,
+        "# Freely distributed under the BSD open source license."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
 
     writeln!(
         out,
         "# {:>3} {:<20} {:<12} {:>8} {:>8} {:>5} {:>8} {:>8} {:>8} {:>8}",
         "idx", "name", "accession", "nseq", "eff_nseq", "M", "relent", "info", "p relE", "compKL"
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(
         out,
         "# {:>3} {:<20} {:<12} {:>8} {:>8} {:>5} {:>8} {:>8} {:>8} {:>8}",
-        "---", "--------------------", "------------", "--------", "--------", "-----", "--------", "--------", "--------", "--------"
-    ).unwrap();
+        "---",
+        "--------------------",
+        "------------",
+        "--------",
+        "--------",
+        "-----",
+        "--------",
+        "--------",
+        "--------",
+        "--------"
+    )
+    .unwrap();
 
     for (idx, h) in hmms.iter().enumerate() {
         let abc = Alphabet::new(h.abc_type);
@@ -68,7 +87,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             info,
             p_rele,
             comp_kl,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     writeln!(out, "#").unwrap();

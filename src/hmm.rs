@@ -82,11 +82,11 @@ pub struct Hmm {
     pub name: String,
     pub acc: Option<String>,
     pub desc: Option<String>,
-    pub rf: Option<Vec<u8>>,       // 0..M+1
-    pub mm: Option<Vec<u8>>,       // model mask, 0..M+1
-    pub consensus: Option<Vec<u8>>,// 0..M+1
-    pub cs: Option<Vec<u8>>,       // 0..M+1
-    pub ca: Option<Vec<u8>>,       // 0..M+1
+    pub rf: Option<Vec<u8>>,        // 0..M+1
+    pub mm: Option<Vec<u8>>,        // model mask, 0..M+1
+    pub consensus: Option<Vec<u8>>, // 0..M+1
+    pub cs: Option<Vec<u8>>,        // 0..M+1
+    pub ca: Option<Vec<u8>>,        // 0..M+1
 
     // Metadata
     pub comlog: Option<String>,
@@ -94,7 +94,7 @@ pub struct Hmm {
     pub eff_nseq: f32,
     pub max_length: i32,
     pub ctime: Option<String>,
-    pub map: Option<Vec<i32>>,     // 0..M+1
+    pub map: Option<Vec<i32>>, // 0..M+1
     pub checksum: u32,
 
     // Statistical parameters

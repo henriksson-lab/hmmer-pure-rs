@@ -1,7 +1,7 @@
 //! Pure Rust hmmsearch — uses generic DP algorithms.
 //! Progressively replacing C hmmsearch functionality.
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -185,10 +185,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             eprintln!("Error creating output file: {}", e);
             std::process::exit(1);
         });
-        Box::new(std::io::BufWriter::new(outfile_handle))
+        Box::new(BufWriter::new(outfile_handle))
     } else {
         stdout = std::io::stdout();
-        Box::new(stdout.lock())
+        Box::new(BufWriter::new(stdout.lock()))
     };
 
     // Print header
@@ -230,28 +230,32 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     // Open tblout/domtblout files if requested
     let mut tblout_file = args.tblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
+        let file = std::fs::File::create(p).unwrap_or_else(|e| {
             eprintln!("Error creating tblout file: {}", e);
             std::process::exit(1);
-        })
+        });
+        BufWriter::new(file)
     });
     let mut domtblout_file = args.domtblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
+        let file = std::fs::File::create(p).unwrap_or_else(|e| {
             eprintln!("Error creating domtblout file: {}", e);
             std::process::exit(1);
-        })
+        });
+        BufWriter::new(file)
     });
     let mut pfamtblout_file = args.pfamtblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
+        let file = std::fs::File::create(p).unwrap_or_else(|e| {
             eprintln!("Error creating pfamtblout file: {}", e);
             std::process::exit(1);
-        })
+        });
+        BufWriter::new(file)
     });
     let mut ali_outfile = args.ali_outfile.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
+        let file = std::fs::File::create(p).unwrap_or_else(|e| {
             eprintln!("Error creating alignment output file: {}", e);
             std::process::exit(1);
-        })
+        });
+        BufWriter::new(file)
     });
 
     let textw = if args.notextw { 0 } else { args.textw };
@@ -260,7 +264,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let abc = Alphabet::new(hmm.abc_type);
         let mut bg = Bg::new(&abc);
         let mut gm = Profile::new(hmm.m, &abc);
-        profile::profile_config(hmm, &bg, &mut gm, 400, P7_LOCAL);
+        profile::profile_config(hmm, &bg, &mut gm, 100, P7_LOCAL);
         // Configure bias filter with model composition
         bg.set_filter(hmm.m, &hmm.compo);
 
@@ -329,91 +333,161 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             pli.domz_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
         }
 
-        // Read all sequences first
-        let mut sequences = Vec::new();
-        let mut total_residues: u64 = 0;
-        {
-            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-                eprintln!("Error opening sequence file: {}", e);
-                std::process::exit(1);
-            });
-            let mut sq = Sequence::new();
-            while sqf.read(&mut sq).unwrap() {
-                total_residues += sq.n as u64;
-                sequences.push(sq.clone());
-                sq.reuse();
-            }
-        }
-
-        // Score sequences in parallel using rayon
-        // Share base profile/oprofile via Arc to avoid expensive clones
-        use rayon::prelude::*;
-        use std::sync::Arc;
-        let shared_gm = Arc::new(gm.clone());
-        let shared_om = Arc::new(om.clone());
+        // Score sequences. For --cpu 1, stream the target database like C HMMER
+        // instead of cloning the entire sequence set before scoring.
         let f1 = args.f1;
         let f2 = args.f2;
         let f3 = args.f3;
         let do_max = args.max;
-
         let nobias = args.nobias;
         let nonull2 = args.nonull2;
         let seed = args.seed;
         let do_alignment = !args.noali || args.domtblout.is_some();
         let do_alignment_display = !args.noali;
+        let mut total_residues: u64 = 0;
+        let mut n_targets: u64 = 0;
 
-        let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> = sequences
-            .par_iter()
-            .map_init(
-                || {
-                    hmmer_pure_rs::util::simd_env::init();
-                    let local_gm = (*shared_gm).clone();
-                    let mut local_pli = Pipeline::new();
-                    local_pli.new_model(&local_gm);
-                    local_pli.f1 = f1;
-                    local_pli.f2 = f2;
-                    local_pli.f3 = f3;
-                    local_pli.do_max = do_max;
-                    if nobias {
-                        local_pli.do_biasfilter = false;
-                    }
-                    if nonull2 {
-                        local_pli.do_null2 = false;
-                    }
-                    local_pli.do_alignment = do_alignment;
-                    local_pli.do_alignment_display = do_alignment_display;
-                    local_pli.seed = seed;
-                    (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
-                },
-                |(local_bg, local_gm, local_om, local_pli), sq| {
+        let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> =
+            if args.cpu == 1 {
+                let mut local_bg = bg.clone();
+                let mut local_gm = gm.clone();
+                let mut local_om = om.clone();
+                let mut local_pli = Pipeline::new();
+                local_pli.new_model(&local_gm);
+                local_pli.f1 = f1;
+                local_pli.f2 = f2;
+                local_pli.f3 = f3;
+                local_pli.do_max = do_max;
+                if nobias {
+                    local_pli.do_biasfilter = false;
+                }
+                if nonull2 {
+                    local_pli.do_null2 = false;
+                }
+                local_pli.do_alignment = do_alignment;
+                local_pli.do_alignment_display = do_alignment_display;
+                local_pli.seed = seed;
+
+                let mut results = Vec::new();
+                let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
+                    eprintln!("Error opening sequence file: {}", e);
+                    std::process::exit(1);
+                });
+                let mut sq = Sequence::new();
+                while sqf.read(&mut sq).unwrap() {
+                    total_residues += sq.n as u64;
+                    n_targets += 1;
+
                     local_pli.n_targets = 0;
                     local_pli.n_past_msv = 0;
                     local_pli.n_past_bias = 0;
                     local_pli.n_past_vit = 0;
                     local_pli.n_past_fwd = 0;
-
                     local_bg.set_length(sq.n);
 
                     let mut local_th = TopHits::new();
-                    let hit = if local_pli.run(local_gm, local_om, local_bg, hmm, sq, &mut local_th)
-                    {
+                    let hit = if local_pli.run(
+                        &mut local_gm,
+                        &mut local_om,
+                        &local_bg,
+                        hmm,
+                        &sq,
+                        &mut local_th,
+                    ) {
                         local_th.hits.into_iter().next()
                     } else {
                         None
                     };
-                    (
+                    results.push((
                         hit,
                         local_pli.n_past_msv,
                         local_pli.n_past_bias,
                         local_pli.n_past_vit,
                         local_pli.n_past_fwd,
+                    ));
+                    sq.reuse();
+                }
+                results
+            } else {
+                let mut sequences = Vec::new();
+                {
+                    let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
+                        eprintln!("Error opening sequence file: {}", e);
+                        std::process::exit(1);
+                    });
+                    let mut sq = Sequence::new();
+                    while sqf.read(&mut sq).unwrap() {
+                        total_residues += sq.n as u64;
+                        n_targets += 1;
+                        sequences.push(sq.clone());
+                        sq.reuse();
+                    }
+                }
+
+                use rayon::prelude::*;
+                use std::sync::Arc;
+                let shared_gm = Arc::new(gm.clone());
+                let shared_om = Arc::new(om.clone());
+
+                sequences
+                    .par_iter()
+                    .map_init(
+                        || {
+                            hmmer_pure_rs::util::simd_env::init();
+                            let local_gm = (*shared_gm).clone();
+                            let mut local_pli = Pipeline::new();
+                            local_pli.new_model(&local_gm);
+                            local_pli.f1 = f1;
+                            local_pli.f2 = f2;
+                            local_pli.f3 = f3;
+                            local_pli.do_max = do_max;
+                            if nobias {
+                                local_pli.do_biasfilter = false;
+                            }
+                            if nonull2 {
+                                local_pli.do_null2 = false;
+                            }
+                            local_pli.do_alignment = do_alignment;
+                            local_pli.do_alignment_display = do_alignment_display;
+                            local_pli.seed = seed;
+                            (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
+                        },
+                        |(local_bg, local_gm, local_om, local_pli), sq| {
+                            local_pli.n_targets = 0;
+                            local_pli.n_past_msv = 0;
+                            local_pli.n_past_bias = 0;
+                            local_pli.n_past_vit = 0;
+                            local_pli.n_past_fwd = 0;
+
+                            local_bg.set_length(sq.n);
+
+                            let mut local_th = TopHits::new();
+                            let hit = if local_pli.run(
+                                local_gm,
+                                local_om,
+                                local_bg,
+                                hmm,
+                                sq,
+                                &mut local_th,
+                            ) {
+                                local_th.hits.into_iter().next()
+                            } else {
+                                None
+                            };
+                            (
+                                hit,
+                                local_pli.n_past_msv,
+                                local_pli.n_past_bias,
+                                local_pli.n_past_vit,
+                                local_pli.n_past_fwd,
+                            )
+                        },
                     )
-                },
-            )
-            .collect();
+                    .collect()
+            };
 
         let mut th = TopHits::new();
-        pli.n_targets = sequences.len() as u64;
+        pli.n_targets = n_targets;
         pli.n_past_msv = 0;
         pli.n_past_bias = 0;
         pli.n_past_vit = 0;
@@ -737,10 +811,23 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(out, "//").unwrap();
     writeln!(out, "[ok]").unwrap();
+    out.flush().unwrap();
+    if let Some(ref mut f) = tblout_file {
+        f.flush().unwrap();
+    }
+    if let Some(ref mut f) = domtblout_file {
+        f.flush().unwrap();
+    }
+    if let Some(ref mut f) = pfamtblout_file {
+        f.flush().unwrap();
+    }
+    if let Some(ref mut f) = ali_outfile {
+        f.flush().unwrap();
+    }
     std::process::ExitCode::SUCCESS
 }
 
-fn write_tblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
+fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
     let tnamew = th
         .hits
         .iter()
@@ -861,8 +948,8 @@ fn write_tblout(f: &mut std::fs::File, qname: &str, qacc: Option<&str>, th: &Top
     }
 }
 
-fn write_domtblout(
-    f: &mut std::fs::File,
+fn write_domtblout<W: Write>(
+    f: &mut W,
     qname: &str,
     qacc: Option<&str>,
     qlen: usize,
@@ -1014,15 +1101,14 @@ fn write_domtblout(
 
 /// Write Pfam-format tabular output (--pfamtblout).
 /// Two sections: sequence scores, then domain scores.
-fn write_pfamtblout(
-    f: &mut std::fs::File,
+fn write_pfamtblout<W: Write>(
+    f: &mut W,
     _qname: &str,
     _qacc: Option<&str>,
     th: &TopHits,
     z: f64,
     _domz: f64,
 ) {
-    use std::io::Write;
     // Sequence scores section
     for hit in &th.hits {
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
@@ -1046,14 +1132,13 @@ fn write_pfamtblout(
 }
 
 /// Write alignment output in Stockholm format (-A).
-fn write_ali_output(
-    f: &mut std::fs::File,
+fn write_ali_output<W: Write>(
+    f: &mut W,
     hmm: &hmmer_pure_rs::hmm::Hmm,
     th: &TopHits,
     _domz: f64,
     _textw: usize,
 ) {
-    use std::io::Write;
     // Write a minimal Stockholm-format MSA of included hits
     writeln!(f, "# STOCKHOLM 1.0").unwrap();
     writeln!(f, "#=GF ID   {}", hmm.name).unwrap();

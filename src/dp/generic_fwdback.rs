@@ -11,7 +11,11 @@ use crate::profile::*;
 /// `dsq` is a 1-based digital sequence (dsq[1..=L]).
 pub fn g_forward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
-    let esc: f32 = if gm.is_local() { 0.0 } else { f32::NEG_INFINITY };
+    let esc: f32 = if gm.is_local() {
+        0.0
+    } else {
+        f32::NEG_INFINITY
+    };
 
     crate::logsum::p7_flogsuminit();
 
@@ -94,10 +98,7 @@ pub fn g_forward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
         gx.set_dmx(i, m, dsc);
 
         // E state update from M_M and D_M
-        let e = p7_flogsum(
-            p7_flogsum(gx.mmx(i, m), gx.dmx(i, m)),
-            gx.xmx(i, P7G_E),
-        );
+        let e = p7_flogsum(p7_flogsum(gx.mmx(i, m), gx.dmx(i, m)), gx.xmx(i, P7G_E));
         gx.set_xmx(i, P7G_E, e);
 
         // J state

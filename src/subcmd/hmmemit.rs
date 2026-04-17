@@ -9,7 +9,10 @@ use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::hmmfile;
 
 #[derive(Parser)]
-#[command(name = "hmmemit", about = "Sample or emit sequences from a profile HMM")]
+#[command(
+    name = "hmmemit",
+    about = "Sample or emit sequences from a profile HMM"
+)]
 struct Args {
     /// HMM file
     hmmfile: PathBuf,
@@ -83,12 +86,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
 /// Simple LCG random number generator.
 fn simple_rng(seed: u64) -> u64 {
-    if seed == 0 { 42 } else { seed }
+    if seed == 0 {
+        42
+    } else {
+        seed
+    }
 }
 
 /// Sample from a discrete probability distribution.
 fn sample_discrete(probs: &[f32], rng: &mut u64) -> usize {
-    *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *rng = rng
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let r = (*rng >> 33) as f32 / (u32::MAX as f32 / 2.0);
     let r = r.fract().abs(); // 0..1
 

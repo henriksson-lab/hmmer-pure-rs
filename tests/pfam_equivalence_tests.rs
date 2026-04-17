@@ -35,9 +35,13 @@ fn test_path(relative: &str) -> String {
 fn parse_tblout_map(content: &str) -> HashMap<(String, String), (f64, f64)> {
     let mut map = HashMap::new();
     for line in content.lines() {
-        if line.starts_with('#') || line.trim().is_empty() { continue; }
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 6 { continue; }
+        if f.len() < 6 {
+            continue;
+        }
         let ev: f64 = f[4].parse().unwrap_or(f64::INFINITY);
         let sc: f64 = f[5].parse().unwrap_or(0.0);
         map.insert((f[0].to_string(), f[2].to_string()), (ev, sc));
@@ -47,11 +51,14 @@ fn parse_tblout_map(content: &str) -> HashMap<(String, String), (f64, f64)> {
 
 /// Parse tblout into Vec of (target, query, evalue, score).
 fn parse_tblout_vec(content: &str) -> Vec<(String, String, f64, f64)> {
-    content.lines()
+    content
+        .lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .filter_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() < 6 { return None; }
+            if f.len() < 6 {
+                return None;
+            }
             let ev: f64 = f[4].parse().ok()?;
             let sc: f64 = f[5].parse().ok()?;
             Some((f[0].to_string(), f[2].to_string(), ev, sc))
@@ -64,11 +71,21 @@ fn rust_search(hmm: &str, seqdb: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
     let output = Command::new(binary_path())
-        .args(&["search", "--noali", "--tblout", tblout.to_str().unwrap(), hmm, seqdb])
+        .args(&[
+            "search",
+            "--noali",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
         .output()
         .expect("failed to run hmmer search");
-    assert!(output.status.success(), "search failed: {}",
-        String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     std::fs::read_to_string(&tblout).unwrap_or_default()
 }
 
@@ -100,7 +117,11 @@ fn compare_results(golden_path: &str, hmm: &str, seqdb: &str) -> ComparisonResul
     let c_only = c_keys.difference(&r_keys).count();
     let r_only = r_keys.difference(&c_keys).count();
     let total = c_keys.union(&r_keys).count();
-    let overlap = if total > 0 { common as f64 / total as f64 * 100.0 } else { 100.0 };
+    let overlap = if total > 0 {
+        common as f64 / total as f64 * 100.0
+    } else {
+        100.0
+    };
 
     // Find strong C hits missed by Rust
     let mut strong_missed = Vec::new();
@@ -137,12 +158,18 @@ fn compare_results(golden_path: &str, hmm: &str, seqdb: &str) -> ComparisonResul
 // Shared test database
 // Prefer uncompressed for speed; fall back to .gz (which is committed to git)
 fn seqdb_path() -> String {
-    let uncompressed = format!("{}/test_data/human_swissprot_2k.fasta", env!("CARGO_MANIFEST_DIR"));
+    let uncompressed = format!(
+        "{}/test_data/human_swissprot_2k.fasta",
+        env!("CARGO_MANIFEST_DIR")
+    );
     if std::path::Path::new(&uncompressed).exists() {
         return "test_data/human_swissprot_2k.fasta".to_string();
     }
     // Decompress .gz on first use
-    let gz = format!("{}/test_data/human_swissprot_2k.fasta.gz", env!("CARGO_MANIFEST_DIR"));
+    let gz = format!(
+        "{}/test_data/human_swissprot_2k.fasta.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
     if std::path::Path::new(&gz).exists() {
         use std::io::Read;
         let f = std::fs::File::open(&gz).unwrap();
@@ -205,36 +232,36 @@ macro_rules! pfam_test {
 
 // Single-domain families: high overlap, tight score tolerance
 //                          test name                    family          min_ovl  max_miss  max_sc_diff
-pfam_test!(test_pfam_globin,                             "Globin",       85.0,    0,        15.0);
-pfam_test!(test_pfam_trypsin,                            "Trypsin",      95.0,    0,        15.0);
-pfam_test!(test_pfam_ras,                                "Ras",          90.0,    0,        15.0);
-pfam_test!(test_pfam_gtp_eftu,                           "GTP_EFTU",     85.0,    0,        15.0);
-pfam_test!(test_pfam_rvt_1,                              "RVT_1",        95.0,    0,        15.0);
-pfam_test!(test_pfam_adh_short,                          "adh_short",    75.0,    0,        15.0);
+pfam_test!(test_pfam_globin, "Globin", 85.0, 0, 15.0);
+pfam_test!(test_pfam_trypsin, "Trypsin", 95.0, 0, 15.0);
+pfam_test!(test_pfam_ras, "Ras", 90.0, 0, 15.0);
+pfam_test!(test_pfam_gtp_eftu, "GTP_EFTU", 85.0, 0, 15.0);
+pfam_test!(test_pfam_rvt_1, "RVT_1", 95.0, 0, 15.0);
+pfam_test!(test_pfam_adh_short, "adh_short", 75.0, 0, 15.0);
 
 // Multi-domain families: good overlap, wider score tolerance
 // (multi-domain proteins like TITIN accumulate score differences across domains)
-pfam_test!(test_pfam_pkinase,                            "Pkinase",      95.0,    1,        60.0);
-pfam_test!(test_pfam_pkinase_tyr,                        "Pkinase_Tyr",  95.0,    1,        55.0);
-pfam_test!(test_pfam_rrm_1,                              "RRM_1",        90.0,    0,        25.0);
-pfam_test!(test_pfam_homeodomain,                        "Homeodomain",  85.0,    0,        25.0);
-pfam_test!(test_pfam_aaa,                                "AAA",          70.0,    0,        20.0);
+pfam_test!(test_pfam_pkinase, "Pkinase", 95.0, 1, 60.0);
+pfam_test!(test_pfam_pkinase_tyr, "Pkinase_Tyr", 95.0, 1, 55.0);
+pfam_test!(test_pfam_rrm_1, "RRM_1", 90.0, 0, 25.0);
+pfam_test!(test_pfam_homeodomain, "Homeodomain", 85.0, 0, 25.0);
+pfam_test!(test_pfam_aaa, "AAA", 70.0, 0, 20.0);
 
 // GPCR / transmembrane: relaxed overlap, wider score tolerance (bias filter sensitive)
-pfam_test!(test_pfam_7tm_1,                              "7tm_1",        85.0,    5,        40.0);
+pfam_test!(test_pfam_7tm_1, "7tm_1", 85.0, 5, 40.0);
 
 // ABC transporter: Rust finds more hits (relaxed overlap)
-pfam_test!(test_pfam_abc_tran,                           "ABC_tran",     55.0,    0,        20.0);
+pfam_test!(test_pfam_abc_tran, "ABC_tran", 55.0, 0, 20.0);
 
 // Sugar transporter: large divergence in hit count (known issue, bias filter sensitive)
-pfam_test!(test_pfam_sugar_tr,                           "Sugar_tr",     25.0,    0,        40.0);
+pfam_test!(test_pfam_sugar_tr, "Sugar_tr", 25.0, 0, 40.0);
 
 // Repeat domain families: score divergence expected (domain accumulation)
 // Use max_score_diff = 0.0 to skip score check for repeats
-pfam_test!(test_pfam_ank,                                "Ank",          95.0,    0,        0.0);
-pfam_test!(test_pfam_wd40,                               "WD40",         90.0,    0,        0.0);
-pfam_test!(test_pfam_ig,                                 "ig",           85.0,    5,        0.0);
-pfam_test!(test_pfam_zf_c2h2,                            "zf_C2H2",     80.0,    5,        0.0);
+pfam_test!(test_pfam_ank, "Ank", 95.0, 0, 0.0);
+pfam_test!(test_pfam_wd40, "WD40", 90.0, 0, 0.0);
+pfam_test!(test_pfam_ig, "ig", 85.0, 5, 0.0);
+pfam_test!(test_pfam_zf_c2h2, "zf_C2H2", 80.0, 5, 0.0);
 
 // ============================================================
 // Cross-cutting tests
@@ -244,9 +271,24 @@ pfam_test!(test_pfam_zf_c2h2,                            "zf_C2H2",     80.0,   
 #[test]
 fn test_no_total_failures() {
     let families = [
-        "Globin", "Trypsin", "Ras", "GTP_EFTU", "Pkinase", "RRM_1",
-        "AAA", "7tm_1", "ABC_tran", "Ank", "WD40", "ig", "zf_C2H2",
-        "Homeodomain", "Pkinase_Tyr", "RVT_1", "adh_short", "Sugar_tr",
+        "Globin",
+        "Trypsin",
+        "Ras",
+        "GTP_EFTU",
+        "Pkinase",
+        "RRM_1",
+        "AAA",
+        "7tm_1",
+        "ABC_tran",
+        "Ank",
+        "WD40",
+        "ig",
+        "zf_C2H2",
+        "Homeodomain",
+        "Pkinase_Tyr",
+        "RVT_1",
+        "adh_short",
+        "Sugar_tr",
     ];
 
     for family in &families {
@@ -259,15 +301,30 @@ fn test_no_total_failures() {
         }
 
         let c_content = std::fs::read_to_string(&golden).unwrap();
-        let c_count = c_content.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).count();
+        let c_count = c_content
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count();
 
         if c_count > 10 {
             let r_tbl = rust_search(&hmm, &seqdb);
-            let r_count = r_tbl.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).count();
-            assert!(r_count > 0,
-                "{}: C finds {} hits but Rust finds 0!", family, c_count);
-            assert!(r_count as f64 >= c_count as f64 * 0.25,
-                "{}: Rust finds {} hits vs C's {} — less than 25%", family, r_count, c_count);
+            let r_count = r_tbl
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                .count();
+            assert!(
+                r_count > 0,
+                "{}: C finds {} hits but Rust finds 0!",
+                family,
+                c_count
+            );
+            assert!(
+                r_count as f64 >= c_count as f64 * 0.25,
+                "{}: Rust finds {} hits vs C's {} — less than 25%",
+                family,
+                r_count,
+                c_count
+            );
         }
     }
 }
@@ -277,8 +334,16 @@ fn test_no_total_failures() {
 #[test]
 fn test_top_hit_agreement() {
     let families = [
-        "Globin", "Trypsin", "Ras", "GTP_EFTU", "Pkinase", "RRM_1",
-        "AAA", "Pkinase_Tyr", "RVT_1", "adh_short",
+        "Globin",
+        "Trypsin",
+        "Ras",
+        "GTP_EFTU",
+        "Pkinase",
+        "RRM_1",
+        "AAA",
+        "Pkinase_Tyr",
+        "RVT_1",
+        "adh_short",
     ];
 
     for family in &families {
@@ -295,7 +360,9 @@ fn test_top_hit_agreement() {
         let r_tbl = rust_search(&hmm, &seqdb);
         let r_hits = parse_tblout_vec(&r_tbl);
 
-        if c_hits.is_empty() || r_hits.is_empty() { continue; }
+        if c_hits.is_empty() || r_hits.is_empty() {
+            continue;
+        }
 
         // Top hit target should match (same protein found as #1)
         // For multi-query HMMs, check per query
@@ -304,8 +371,13 @@ fn test_top_hit_agreement() {
 
         // Check if C's top hit is in Rust's top 3
         let r_top3: HashSet<&str> = r_hits.iter().take(3).map(|h| h.0.as_str()).collect();
-        assert!(r_top3.contains(c_top.as_str()),
-            "{}: C top hit '{}' not in Rust top 3 {:?}", family, c_top, r_top3);
+        assert!(
+            r_top3.contains(c_top.as_str()),
+            "{}: C top hit '{}' not in Rust top 3 {:?}",
+            family,
+            c_top,
+            r_top3
+        );
     }
 }
 
@@ -313,9 +385,24 @@ fn test_top_hit_agreement() {
 #[test]
 fn test_strong_hit_recall() {
     let families = [
-        "Globin", "Trypsin", "Ras", "GTP_EFTU", "Pkinase", "RRM_1",
-        "AAA", "7tm_1", "ABC_tran", "Ank", "WD40", "ig", "zf_C2H2",
-        "Homeodomain", "Pkinase_Tyr", "RVT_1", "adh_short", "Sugar_tr",
+        "Globin",
+        "Trypsin",
+        "Ras",
+        "GTP_EFTU",
+        "Pkinase",
+        "RRM_1",
+        "AAA",
+        "7tm_1",
+        "ABC_tran",
+        "Ank",
+        "WD40",
+        "ig",
+        "zf_C2H2",
+        "Homeodomain",
+        "Pkinase_Tyr",
+        "RVT_1",
+        "adh_short",
+        "Sugar_tr",
     ];
 
     let mut total_strong = 0;
@@ -353,9 +440,13 @@ fn test_strong_hit_recall() {
         100.0
     };
 
-    assert!(recall >= 95.0,
+    assert!(
+        recall >= 95.0,
         "Strong hit recall: {:.1}% ({} missed of {} total) — should be >= 95%",
-        recall, total_missed, total_strong);
+        recall,
+        total_missed,
+        total_strong
+    );
 }
 
 /// Verify tblout output format is correct across all families.
@@ -367,30 +458,53 @@ fn test_tblout_format_all_families() {
         let hmm = test_path(&format!("test_data/{}_pfam.hmm", family));
         let seqdb = test_path(&seqdb_path());
 
-        if !std::path::Path::new(&hmm).exists() { continue; }
+        if !std::path::Path::new(&hmm).exists() {
+            continue;
+        }
 
         let tbl = rust_search(&hmm, &seqdb);
 
         for (i, line) in tbl.lines().enumerate() {
-            if line.starts_with('#') || line.trim().is_empty() { continue; }
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
             let fields: Vec<&str> = line.split_whitespace().collect();
-            assert!(fields.len() >= 18,
+            assert!(
+                fields.len() >= 18,
                 "{} line {}: expected >=18 fields, got {}: {}",
-                family, i + 1, fields.len(), &line[..line.len().min(100)]);
+                family,
+                i + 1,
+                fields.len(),
+                &line[..line.len().min(100)]
+            );
 
             // Verify E-value is parseable
             let ev: Result<f64, _> = fields[4].parse();
-            assert!(ev.is_ok(),
-                "{} line {}: E-value '{}' not parseable", family, i + 1, fields[4]);
+            assert!(
+                ev.is_ok(),
+                "{} line {}: E-value '{}' not parseable",
+                family,
+                i + 1,
+                fields[4]
+            );
 
             // Verify score is parseable
             let sc: Result<f64, _> = fields[5].parse();
-            assert!(sc.is_ok(),
-                "{} line {}: score '{}' not parseable", family, i + 1, fields[5]);
+            assert!(
+                sc.is_ok(),
+                "{} line {}: score '{}' not parseable",
+                family,
+                i + 1,
+                fields[5]
+            );
 
             // Name should not contain accession dash
-            assert!(fields[0] != "-",
-                "{} line {}: target name is '-'", family, i + 1);
+            assert!(
+                fields[0] != "-",
+                "{} line {}: target name is '-'",
+                family,
+                i + 1
+            );
         }
     }
 }

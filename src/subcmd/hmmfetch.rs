@@ -50,7 +50,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 eprintln!("Error reading HMM file: {}", e);
                 std::process::exit(1);
             });
-            let found = hmms.iter().find(|h| h.name == *key || h.acc.as_deref() == Some(key));
+            let found = hmms
+                .iter()
+                .find(|h| h.name == *key || h.acc.as_deref() == Some(key));
             match found {
                 Some(hmm) => {
                     let stdout = std::io::stdout();
@@ -58,12 +60,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     hmmfile::write_hmm(&mut out, hmm).unwrap();
                 }
                 None => {
-                    eprintln!("Error: HMM '{}' not found in {}", key, args.hmmfile.display());
+                    eprintln!(
+                        "Error: HMM '{}' not found in {}",
+                        key,
+                        args.hmmfile.display()
+                    );
                     std::process::exit(1);
                 }
             }
         } else {
-            eprintln!("Error: HMM '{}' not found in {}", key, args.hmmfile.display());
+            eprintln!(
+                "Error: HMM '{}' not found in {}",
+                key,
+                args.hmmfile.display()
+            );
             std::process::exit(1);
         }
     } else {

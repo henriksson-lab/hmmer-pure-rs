@@ -87,12 +87,32 @@ fn trace_oprofile_tfv_source(m: usize, idx: usize, lanes: &[f32; 4]) {
     th.finish();
 }
 
+#[cfg(target_arch = "x86_64")]
+#[repr(align(16))]
+#[derive(Debug, Clone, Copy)]
+pub struct AlignedF32x4(pub [f32; 4]);
+
+#[cfg(target_arch = "x86_64")]
+impl AlignedF32x4 {
+    #[inline]
+    pub fn from_array(v: [f32; 4]) -> Self {
+        Self(v)
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *const f32 {
+        self.0.as_ptr()
+    }
+}
+
 /// Optimized profile for SSE2 SIMD operations.
 #[derive(Debug, Clone)]
 pub struct OProfile {
     // === MSV byte-precision fields ===
     /// MSV byte-precision match scores: rbv[residue_code][q_vector][16 bytes]
     pub rbv: Vec<Vec<[u8; 16]>>,
+    /// SSV signed-byte match scores, with extra wrapped vectors for band code.
+    pub sbv: Vec<Vec<[u8; 16]>>,
     pub tbm_b: u8,
     pub tec_b: u8,
     pub tjb_b: u8,
@@ -118,6 +138,10 @@ pub struct OProfile {
     pub rfv: Vec<Vec<[f32; 4]>>,
     /// Float-precision transition scores: tfv[j][4 floats]
     pub tfv: Vec<[f32; 4]>,
+    #[cfg(target_arch = "x86_64")]
+    pub rfv_a: Vec<Vec<AlignedF32x4>>,
+    #[cfg(target_arch = "x86_64")]
+    pub tfv_a: Vec<AlignedF32x4>,
     /// Special state float scores: xf[state][transition]
     pub xf: [[f32; P7O_NXTRANS]; P7O_NXSTATES],
 
@@ -344,6 +368,19 @@ impl OProfile {
             }
         }
 
+        let extra_sb = 17;
+        let mut sbv = vec![vec![[0u8; 16]; nq + extra_sb]; kp];
+        for x in 0..kp {
+            for q in 0..(nq + extra_sb) {
+                let src = rbv[x][q % nq];
+                let mut tmp = [0u8; 16];
+                for z in 0..16 {
+                    tmp[z] = (bias_b.wrapping_add(127).saturating_sub(src[z])) ^ 127;
+                }
+                sbv[x][q] = tmp;
+            }
+        }
+
         // Transition costs
         let tbm_b = unbiased_byteify(scale_b, (2.0_f32 / (m as f32 * (m as f32 + 1.0))).ln());
         let tec_b = unbiased_byteify(scale_b, 0.5_f32.ln());
@@ -553,8 +590,17 @@ impl OProfile {
         xf[P7O_J][P7O_LOOP] = gm.xsc[P7P_J][P7P_LOOP].exp();
         xf[P7O_J][P7O_MOVE] = gm.xsc[P7P_J][P7P_MOVE].exp();
 
+        #[cfg(target_arch = "x86_64")]
+        let rfv_a: Vec<Vec<AlignedF32x4>> = rfv
+            .iter()
+            .map(|rows| rows.iter().copied().map(AlignedF32x4::from_array).collect())
+            .collect();
+        #[cfg(target_arch = "x86_64")]
+        let tfv_a: Vec<AlignedF32x4> = tfv.iter().copied().map(AlignedF32x4::from_array).collect();
+
         let om = OProfile {
             rbv,
+            sbv,
             tbm_b,
             tec_b,
             tjb_b,
@@ -570,6 +616,10 @@ impl OProfile {
             ncj_roundoff: 0.0,
             rfv,
             tfv,
+            #[cfg(target_arch = "x86_64")]
+            rfv_a,
+            #[cfg(target_arch = "x86_64")]
+            tfv_a,
             xf,
             m,
             l: gm.l,

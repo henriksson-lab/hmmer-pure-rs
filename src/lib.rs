@@ -45,14 +45,13 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-
 pub mod alphabet;
 pub mod bg;
 pub mod builder;
 pub mod calibrate;
 pub mod domaindef;
-pub mod dsqdata;
 pub mod dp;
+pub mod dsqdata;
 pub mod errors;
 pub mod eweight;
 pub mod fm_index;

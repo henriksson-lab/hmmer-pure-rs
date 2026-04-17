@@ -41,10 +41,14 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
     let mut arr = vec![0u8; cell_cnt];
 
     for x in 0..kp {
-        if x >= om.rbv.len() { break; }
+        if x >= om.rbv.len() {
+            break;
+        }
         let mut k = 1;
         for q in 0..nq {
-            if q >= om.rbv[x].len() { break; }
+            if q >= om.rbv[x].len() {
+                break;
+            }
             let vec = &om.rbv[x][q];
             for z in 0..16 {
                 let idx = kp * (k + z * nq) + x;
@@ -83,32 +87,33 @@ pub unsafe fn ssv_filter_longtarget(
     // Get flat SSV score array for diagonal traceback
     let ssv_scores = get_ssv_score_array(om);
 
-    // Compute score threshold from P-value
+    // Compute score threshold from P-value.
+    // Matches C: uses om->max_length for length config, om->tjb_b for thresholds.
+    // C calls p7_bg_SetLength + p7_oprofile_ReconfigMSVLength + p7_bg_NullOne
+    // before computing the threshold. We use om's existing tjb_b which should
+    // already be configured for om->max_length.
     let inv_p = stats::gumbel::invsurv(
         p_thresh,
         om.evparam[crate::hmm::P7_MMU] as f64,
         om.evparam[crate::hmm::P7_MLAMBDA] as f64,
     );
 
-    // Configure length model for max_length
+    // Null score: p7_bg_NullOne computes L * log(p1) + log(1-p1) where p1 = L/(L+1)
+    // C uses om->max_length which was set by ReconfigMSVLength before this call.
+    // We use the max_length parameter which the caller should set to om->max_length.
     let ml = if max_length > 0 { max_length as usize } else { m * 4 };
-    let p1 = ml as f32 / (ml as f32 + 1.0);
-    let nullsc = ml as f32 * p1.ln() + (1.0 - p1).ln();
+    let p1: f32 = ml as f32 / (ml as f32 + 1.0);
+    let nullsc: f32 = ml as f32 * p1.ln() + (1.0f32 - p1).ln();
 
-    // tjb_b for max_length
-    let tjb_b_ml = {
-        let sc = (3.0_f32 / (ml as f32 + 3.0)).ln();
-        let negated = -1.0 * (om.scale_b * sc).round();
-        if negated > 255.0 { 255u8 }
-        else if negated < 0.0 { 0u8 }
-        else { negated as u8 }
-    };
+    // Use om->tjb_b directly (matching C line 324, 334, 385, 420)
+    // C reconfigures om->tjb_b via ReconfigMSVLength before calling this function.
+    // The tjb_b in om should already be set for max_length.
+    let tjb_b = om.tjb_b;
 
-    let sc_thresh_f = ((nullsc + (inv_p as f32 * std::f32::consts::LN_2) + 3.0)
-        * om.scale_b)
+    let sc_thresh_f = ((nullsc + (inv_p as f32 * std::f32::consts::LN_2) + 3.0) * om.scale_b)
         + om.base_b as f32
         + om.tec_b as f32
-        + tjb_b_ml as f32;
+        + tjb_b as f32;
     let sc_thresh: u8 = if sc_thresh_f >= 255.0 {
         255
     } else if sc_thresh_f <= 0.0 {
@@ -121,7 +126,8 @@ pub unsafe fn ssv_filter_longtarget(
     let bias_v = _mm_set1_epi8(om.bias_b as i8);
     let ceiling_v = _mm_cmpeq_epi8(bias_v, bias_v); // all 0xFF
     let base_v = _mm_set1_epi8(om.base_b as i8);
-    let tjbm_v = _mm_set1_epi8((tjb_b_ml.wrapping_add(om.tbm_b)) as i8);
+    // C line 334: tjbmv = set1(om->tjb_b + om->tbm_b)
+    let tjbm_v = _mm_set1_epi8((tjb_b.wrapping_add(om.tbm_b)) as i8);
     let xb_v = _mm_subs_epu8(base_v, tjbm_v);
 
     // DP row: q_count vectors of 16 u8s
@@ -197,7 +203,8 @@ pub unsafe fn ssv_filter_longtarget(
             let mut target_start = i;
             let mut target_end = i;
             let sc_val = rem_sc;
-            let entry_cost = om.base_b.wrapping_sub(tjb_b_ml).wrapping_sub(om.tbm_b);
+            // C line 385: while (rem_sc > om->base_b - om->tjb_b - om->tbm_b)
+            let entry_cost = om.base_b.wrapping_sub(tjb_b).wrapping_sub(om.tbm_b);
 
             while rem_sc > entry_cost && start > 1 && target_start > 1 {
                 let score_idx = start * kp + dsq[target_start] as usize;
@@ -208,7 +215,9 @@ pub unsafe fn ssv_filter_longtarget(
                 };
                 // rem_sc -= bias_b - emission (in uint8 arithmetic)
                 let delta = om.bias_b.wrapping_sub(emission);
-                if delta > rem_sc { break; }
+                if delta > rem_sc {
+                    break;
+                }
                 rem_sc -= delta;
                 start -= 1;
                 target_start -= 1;
@@ -250,10 +259,9 @@ pub unsafe fn ssv_filter_longtarget(
             end += max_end - target_end;
             target_end = max_end;
 
-            // Convert score to nats
-            let ret_sc = ((max_sc as f32 - tjb_b_ml as f32) - om.base_b as f32)
-                / om.scale_b
-                - 3.0;
+            // Convert score to nats (matching C line 420-422)
+            // ret_sc = ((float)(max_sc - om->tjb_b) - (float)om->base_b) / om->scale_b - 3.0
+            let ret_sc = ((max_sc as f32 - tjb_b as f32) - om.base_b as f32) / om.scale_b - 3.0;
 
             windows.push(HmmWindow {
                 n: target_start,

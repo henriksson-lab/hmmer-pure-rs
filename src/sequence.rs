@@ -120,7 +120,8 @@ impl<R: Read> SeqFile<R> {
                 }
                 for &ch in trimmed.as_bytes() {
                     let code = self.abc.digitize_symbol(ch);
-                    if code != crate::alphabet::DSQ_IGNORED && code != crate::alphabet::DSQ_ILLEGAL {
+                    if code != crate::alphabet::DSQ_IGNORED && code != crate::alphabet::DSQ_ILLEGAL
+                    {
                         sq.dsq.push(code);
                     }
                 }
@@ -199,7 +200,12 @@ impl<R: Read> SeqFile<R> {
                 if trimmed.starts_with("DEFINITION") && sq.desc.is_empty() {
                     sq.desc = trimmed[10..].trim().to_string();
                 } else if trimmed.starts_with("ACCESSION") && sq.acc.is_empty() {
-                    sq.acc = trimmed[9..].trim().split_whitespace().next().unwrap_or("").to_string();
+                    sq.acc = trimmed[9..]
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
                 } else if trimmed == "ORIGIN" {
                     in_seq = true;
                     continue;
@@ -230,7 +236,10 @@ impl<R: Read> SeqFile<R> {
 
 /// Open a FASTA file for reading with the given alphabet.
 /// Automatically detects and decompresses `.gz` files.
-pub fn open_seq_file(path: &std::path::Path, abc: &Alphabet) -> HmmerResult<SeqFile<Box<dyn Read>>> {
+pub fn open_seq_file(
+    path: &std::path::Path,
+    abc: &Alphabet,
+) -> HmmerResult<SeqFile<Box<dyn Read>>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let reader: Box<dyn Read> = if path.extension().map_or(false, |e| e == "gz") {
         Box::new(flate2::read::GzDecoder::new(file))
@@ -284,7 +293,11 @@ mod tests {
         let mut sq = Sequence::new();
         assert!(sqf.read(&mut sq).unwrap());
         assert_eq!(sq.name, "7LESS_DROME");
-        assert!(sq.n > 2500, "7LESS_DROME should be >2500 residues, got {}", sq.n);
+        assert!(
+            sq.n > 2500,
+            "7LESS_DROME should be >2500 residues, got {}",
+            sq.n
+        );
     }
 
     #[test]
@@ -303,9 +316,17 @@ mod tests {
         let mut count = 0;
         while sqf.read(&mut sq).unwrap() {
             count += 1;
-            assert!(sq.n > 100, "Globin seq should be >100 residues, got {}", sq.n);
+            assert!(
+                sq.n > 100,
+                "Globin seq should be >100 residues, got {}",
+                sq.n
+            );
             sq.reuse();
         }
-        assert!(count >= 40, "Should read ~45 globin sequences, got {}", count);
+        assert!(
+            count >= 40,
+            "Should read ~45 globin sequences, got {}",
+            count
+        );
     }
 }

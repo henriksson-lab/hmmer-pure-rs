@@ -26,6 +26,26 @@ pub unsafe fn msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
 
     // Working DP row (one row of Q vectors)
     let mut dp: Vec<__m128i> = vec![_mm_setzero_si128(); q_count];
+    msv_filter_with_scratch(dsq, l, om, &mut dp)
+}
+
+/// SSE2 MSV filter variant that reuses caller-owned row storage.
+///
+/// Keep tracehash builds on `msv_filter()` unless a trace proves this allocation
+/// change is harmless for exact instrumentation-sensitive comparisons.
+#[target_feature(enable = "sse2")]
+pub unsafe fn msv_filter_with_scratch(
+    dsq: &[Dsq],
+    l: usize,
+    om: &OProfile,
+    dp: &mut Vec<__m128i>,
+) -> MsvResult {
+    let q_count = nqb(om.m);
+    let zerov = _mm_setzero_si128();
+    dp.resize(q_count, zerov);
+    for v in dp.iter_mut() {
+        *v = zerov;
+    }
 
     let biasv = _mm_set1_epi8(om.bias_b as i8);
     let basev = _mm_set1_epi8(om.base_b as i8);
@@ -43,24 +63,26 @@ pub unsafe fn msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
         if xi >= om.abc_kp {
             continue; // skip non-residue characters
         }
-        let rsc = &om.rbv[xi];
+        let rsc_ptr = om.rbv.get_unchecked(xi).as_ptr();
+        let dp_ptr = dp.as_mut_ptr();
 
         let mut xev = _mm_setzero_si128();
 
         // Right shift by 1 byte (shift in zero = -infinity in offset arithmetic)
-        let mut mpv = _mm_slli_si128::<1>(dp[q_count - 1]);
+        let mut mpv = _mm_slli_si128::<1>(*dp_ptr.add(q_count - 1));
 
         for q in 0..q_count {
             // Calculate new M(i,q)
             let mut sv = _mm_max_epu8(mpv, xbv);
             sv = _mm_adds_epu8(sv, biasv);
             // Load emission score and subtract (in offset arithmetic, subtraction = adding score)
-            let rsc_v = _mm_loadu_si128(rsc[q].as_ptr() as *const __m128i);
+            let rsc_v = _mm_loadu_si128((*rsc_ptr.add(q)).as_ptr() as *const __m128i);
             sv = _mm_subs_epu8(sv, rsc_v);
             xev = _mm_max_epu8(xev, sv);
 
-            mpv = dp[q];
-            dp[q] = sv;
+            let cell = dp_ptr.add(q);
+            mpv = *cell;
+            *cell = sv;
         }
 
         // Test for overflow

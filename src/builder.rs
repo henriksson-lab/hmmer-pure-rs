@@ -79,12 +79,7 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
 ///
 /// Uses the "fast" method: columns with >= `symfrac` occupancy become match states.
 /// Default symfrac = 0.5.
-pub fn build_hmm_from_msa(
-    msa: &Msa,
-    abc: &Alphabet,
-    bg: &Bg,
-    symfrac: f32,
-) -> Hmm {
+pub fn build_hmm_from_msa(msa: &Msa, abc: &Alphabet, bg: &Bg, symfrac: f32) -> Hmm {
     let k = abc.k;
     let nseq = msa.nseq;
 

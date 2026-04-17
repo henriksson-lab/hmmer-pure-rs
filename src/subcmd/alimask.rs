@@ -8,7 +8,10 @@ use clap::Parser;
 use hmmer_pure_rs::msa;
 
 #[derive(Parser)]
-#[command(name = "alimask", about = "Add mask annotation to a Stockholm alignment")]
+#[command(
+    name = "alimask",
+    about = "Add mask annotation to a Stockholm alignment"
+)]
 struct Args {
     /// Input alignment file (Stockholm)
     msafile: PathBuf,
@@ -60,6 +63,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "//").unwrap();
     }
 
-    eprintln!("Wrote {} alignment(s) to {}", msas.len(), args.outfile.display());
+    eprintln!(
+        "Wrote {} alignment(s) to {}",
+        msas.len(),
+        args.outfile.display()
+    );
     std::process::ExitCode::SUCCESS
 }

@@ -18,18 +18,6 @@ fn c_log_f64(x: f64) -> f64 {
     unsafe { c_log(x) }
 }
 
-#[inline(always)]
-fn forward_score_from_row_scales(row_scale: &[f32], l: usize, xc: f32, c_move: f32) -> f32 {
-    let mut scale = 0.0_f32;
-    for &s in &row_scale[1..=l] {
-        if s > 1.0 {
-            scale = (scale as f64 + c_log_f64(s as f64)) as f32;
-        }
-    }
-    let product = xc * c_move;
-    (scale as f64 + c_log_f64(product as f64)) as f32
-}
-
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_row_sums_q1e5(
     row: usize,
@@ -895,7 +883,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     pmx: &mut super::probmx::ProbMx,
     dp: &mut Vec<__m128>,
 ) -> f32 {
-    const USE_DIRECT_FULL_DP_FORWARD: bool = false;
+    const USE_DIRECT_FULL_DP_FORWARD: bool = true;
     if USE_DIRECT_FULL_DP_FORWARD && pmx.has_dp && canonical_run(dsq, dsq_offset, l, om.abc_kp) {
         return forward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx);
     }
@@ -909,15 +897,15 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
         *v = zerov;
     }
     let dp_ptr = dp.as_mut_ptr();
-    let rfv_ptr = om.rfv.as_ptr();
-    let tfv_ptr = om.tfv.as_ptr();
+    let rfv_ptr = om.rfv_a.as_ptr();
+    let tfv_ptr = om.tfv_a.as_ptr();
 
     let mut xe: f32 = 0.0;
     let mut xn: f32 = 1.0;
     let mut xj: f32 = 0.0;
     let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
     let mut xc: f32 = 0.0;
-    let mut totscale: f64 = 0.0; // f64 precision for domain decoding
+    let mut totscale: f32 = 0.0;
     #[cfg(feature = "tracehash")]
     let mut trace_scale_event_count = 0usize;
     #[cfg(feature = "tracehash")]
@@ -964,7 +952,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             pmx.set_xmx(i, PXJ, xj);
             pmx.set_xmx(i, PXB, xb);
             pmx.set_xmx(i, PXC, xc);
-            pmx.scale[i] = totscale;
+            pmx.scale[i] = totscale as f64;
             pmx.row_scale[i] = 1.0;
             continue;
         }
@@ -986,15 +974,15 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
 
         for q_idx in 0..q_count {
             let tsc_base = q_idx * 7;
-            let rsc_v = _mm_loadu_ps((*rsc_ptr.add(q_idx)).as_ptr());
+            let rsc_v = _mm_load_ps((*rsc_ptr.add(q_idx)).as_ptr());
 
-            let tbm = _mm_loadu_ps((*tfv_ptr.add(tsc_base)).as_ptr());
-            let tmm = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 1)).as_ptr());
-            let tim = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 2)).as_ptr());
-            let tdm = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 3)).as_ptr());
-            let tmd = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 4)).as_ptr());
-            let tmi = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 5)).as_ptr());
-            let tii = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 6)).as_ptr());
+            let tbm = _mm_load_ps((*tfv_ptr.add(tsc_base)).as_ptr());
+            let tmm = _mm_load_ps((*tfv_ptr.add(tsc_base + 1)).as_ptr());
+            let tim = _mm_load_ps((*tfv_ptr.add(tsc_base + 2)).as_ptr());
+            let tdm = _mm_load_ps((*tfv_ptr.add(tsc_base + 3)).as_ptr());
+            let tmd = _mm_load_ps((*tfv_ptr.add(tsc_base + 4)).as_ptr());
+            let tmi = _mm_load_ps((*tfv_ptr.add(tsc_base + 5)).as_ptr());
+            let tii = _mm_load_ps((*tfv_ptr.add(tsc_base + 6)).as_ptr());
 
             // M(i,k) = (B*BM + Mprev*MM + Iprev*IM + Dprev*DM) * emission
             let mut sv = _mm_mul_ps(xbv, tbm);
@@ -1033,7 +1021,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
             dcv = rightshift_float(dcv);
             dmo!(0) = zerov;
             for q_idx in 0..q_count {
-                let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                 dmo!(q_idx) = _mm_add_ps(dcv, dmo!(q_idx));
                 dcv = _mm_mul_ps(dmo!(q_idx), tdd);
             }
@@ -1041,7 +1029,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                 for _ in 0..3 {
                     dcv = rightshift_float(dcv);
                     for q_idx in 0..q_count {
-                        let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                        let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                         dmo!(q_idx) = _mm_add_ps(dcv, dmo!(q_idx));
                         dcv = _mm_mul_ps(dcv, tdd);
                     }
@@ -1051,7 +1039,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                     dcv = rightshift_float(dcv);
                     let mut cv = zerov;
                     for q_idx in 0..q_count {
-                        let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                        let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                         let sv = _mm_add_ps(dcv, dmo!(q_idx));
                         cv = _mm_or_ps(cv, _mm_cmpgt_ps(sv, dmo!(q_idx)));
                         dmo!(q_idx) = sv;
@@ -1185,7 +1173,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
                     dp,
                 );
             }
-            totscale += (xe as f64).ln();
+            totscale = (totscale as f64 + c_log_f64(xe as f64)) as f32;
             xe = 1.0;
             row_scale
         } else {
@@ -1215,7 +1203,7 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
         pmx.set_xmx(i, PXJ, xj);
         pmx.set_xmx(i, PXB, xb);
         pmx.set_xmx(i, PXC, xc);
-        pmx.scale[i] = totscale;
+        pmx.scale[i] = totscale as f64;
         pmx.row_scale[i] = row_scale;
     }
 
@@ -1230,9 +1218,22 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         f32::NEG_INFINITY
     } else {
-        forward_score_from_row_scales(&pmx.row_scale, l, xc, om.xf[P7O_C][P7O_MOVE])
+        (totscale as f64 + c_log_f64((xc * om.xf[P7O_C][P7O_MOVE]) as f64)) as f32
     };
     score
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn forward_parser_pmx_offset_canonical(
+    dsq: &[Dsq],
+    dsq_offset: usize,
+    l: usize,
+    om: &OProfile,
+    pmx: &mut super::probmx::ProbMx,
+) -> f32 {
+    debug_assert!(pmx.has_dp);
+    forward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1250,19 +1251,19 @@ unsafe fn forward_parser_pmx_offset_direct(
     let row_width = pmx.striped_row_width();
     let zerov = _mm_setzero_ps();
     let dsq_ptr = dsq.as_ptr().add(dsq_offset);
-    let striped_ptr = pmx.striped_dp.as_mut_ptr();
+    let striped_ptr = pmx.striped_dp.as_mut_ptr().add(pmx.striped_dp_offset);
     let xmx_ptr = pmx.xmx.as_mut_ptr();
     let scale_ptr = pmx.scale.as_mut_ptr();
     let row_scale_ptr = pmx.row_scale.as_mut_ptr();
-    let rfv_ptr = om.rfv.as_ptr();
-    let tfv_ptr = om.tfv.as_ptr();
+    let rfv_ptr = om.rfv_a.as_ptr();
+    let tfv_ptr = om.tfv_a.as_ptr();
 
     let mut xe: f32 = 0.0;
     let mut xn: f32 = 1.0;
     let mut xj: f32 = 0.0;
     let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
     let mut xc: f32 = 0.0;
-    let mut totscale: f64 = 0.0;
+    let mut totscale: f32 = 0.0;
     #[cfg(feature = "tracehash")]
     let mut trace_scale_event_count = 0usize;
     #[cfg(feature = "tracehash")]
@@ -1270,12 +1271,12 @@ unsafe fn forward_parser_pmx_offset_direct(
 
     #[inline(always)]
     unsafe fn load_cell(row: *const f32, q: usize, s: usize) -> __m128 {
-        _mm_loadu_ps(row.add(q * 12 + s * 4))
+        _mm_load_ps(row.add(q * 12 + s * 4))
     }
 
     #[inline(always)]
     unsafe fn store_cell(row: *mut f32, q: usize, s: usize, v: __m128) {
-        _mm_storeu_ps(row.add(q * 12 + s * 4), v);
+        _mm_store_ps(row.add(q * 12 + s * 4), v);
     }
 
     #[inline(always)]
@@ -1307,15 +1308,15 @@ unsafe fn forward_parser_pmx_offset_direct(
 
         for q_idx in 0..q_count {
             let tsc_base = q_idx * 7;
-            let rsc_v = _mm_loadu_ps((*rsc_ptr.add(q_idx)).as_ptr());
+            let rsc_v = _mm_load_ps((*rsc_ptr.add(q_idx)).as_ptr());
 
-            let tbm = _mm_loadu_ps((*tfv_ptr.add(tsc_base)).as_ptr());
-            let tmm = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 1)).as_ptr());
-            let tim = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 2)).as_ptr());
-            let tdm = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 3)).as_ptr());
-            let tmd = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 4)).as_ptr());
-            let tmi = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 5)).as_ptr());
-            let tii = _mm_loadu_ps((*tfv_ptr.add(tsc_base + 6)).as_ptr());
+            let tbm = _mm_load_ps((*tfv_ptr.add(tsc_base)).as_ptr());
+            let tmm = _mm_load_ps((*tfv_ptr.add(tsc_base + 1)).as_ptr());
+            let tim = _mm_load_ps((*tfv_ptr.add(tsc_base + 2)).as_ptr());
+            let tdm = _mm_load_ps((*tfv_ptr.add(tsc_base + 3)).as_ptr());
+            let tmd = _mm_load_ps((*tfv_ptr.add(tsc_base + 4)).as_ptr());
+            let tmi = _mm_load_ps((*tfv_ptr.add(tsc_base + 5)).as_ptr());
+            let tii = _mm_load_ps((*tfv_ptr.add(tsc_base + 6)).as_ptr());
 
             let mut sv = _mm_mul_ps(xbv, tbm);
             sv = _mm_add_ps(sv, _mm_mul_ps(mpv, tmm));
@@ -1345,7 +1346,7 @@ unsafe fn forward_parser_pmx_offset_direct(
             dcv = rightshift_float(dcv);
             store_cell(curr_row, 0, 1, zerov);
             for q_idx in 0..q_count {
-                let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                 let d = _mm_add_ps(dcv, load_cell(curr_row, q_idx, 1));
                 store_cell(curr_row, q_idx, 1, d);
                 dcv = _mm_mul_ps(d, tdd);
@@ -1354,7 +1355,7 @@ unsafe fn forward_parser_pmx_offset_direct(
                 for _ in 0..3 {
                     dcv = rightshift_float(dcv);
                     for q_idx in 0..q_count {
-                        let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                        let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                         let d = _mm_add_ps(dcv, load_cell(curr_row, q_idx, 1));
                         store_cell(curr_row, q_idx, 1, d);
                         dcv = _mm_mul_ps(dcv, tdd);
@@ -1365,7 +1366,7 @@ unsafe fn forward_parser_pmx_offset_direct(
                     dcv = rightshift_float(dcv);
                     let mut cv = zerov;
                     for q_idx in 0..q_count {
-                        let tdd = _mm_loadu_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
+                        let tdd = _mm_load_ps((*tfv_ptr.add(dd_offset + q_idx)).as_ptr());
                         let old_d = load_cell(curr_row, q_idx, 1);
                         let d = _mm_add_ps(dcv, old_d);
                         cv = _mm_or_ps(cv, _mm_cmpgt_ps(d, old_d));
@@ -1456,10 +1457,10 @@ unsafe fn forward_parser_pmx_offset_direct(
             let mut off = 0;
             while off < row_width {
                 let p = curr_row.add(off);
-                _mm_storeu_ps(p, _mm_mul_ps(_mm_loadu_ps(p), scalev));
+                _mm_store_ps(p, _mm_mul_ps(_mm_load_ps(p), scalev));
                 off += 4;
             }
-            totscale += (xe as f64).ln();
+            totscale = (totscale as f64 + c_log_f64(xe as f64)) as f32;
             xe = 1.0;
             row_scale
         } else {
@@ -1467,7 +1468,7 @@ unsafe fn forward_parser_pmx_offset_direct(
         };
 
         store_xmx(xmx_ptr, i, xe, xn, xj, xb, xc);
-        *scale_ptr.add(i) = totscale;
+        *scale_ptr.add(i) = totscale as f64;
         *row_scale_ptr.add(i) = row_scale;
     }
 
@@ -1481,8 +1482,7 @@ unsafe fn forward_parser_pmx_offset_direct(
     if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         f32::NEG_INFINITY
     } else {
-        let row_scales = std::slice::from_raw_parts(row_scale_ptr, l + 1);
-        forward_score_from_row_scales(row_scales, l, xc, om.xf[P7O_C][P7O_MOVE])
+        (totscale as f64 + c_log_f64((xc * om.xf[P7O_C][P7O_MOVE]) as f64)) as f32
     }
 }
 
@@ -1506,214 +1506,6 @@ fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> boo
         }
     }
     true
-}
-
-/// Per-position Forward special states plus cumulative scale.
-#[derive(Clone, Copy, Default)]
-pub struct FwdSpecials {
-    pub xn: f32,
-    pub xj: f32,
-    pub xc: f32,
-    pub xb: f32,
-    pub xe: f32,
-    pub totscale: f32, // cumulative log-scale at this position
-}
-
-/// SSE Forward parser that also saves per-position special states for domain decoding.
-/// Returns (score, specials_vec).
-///
-/// # Safety
-/// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn forward_parser_with_specials(
-    dsq: &[Dsq],
-    l: usize,
-    om: &OProfile,
-) -> (f32, Vec<FwdSpecials>) {
-    let q_count = nqf(om.m);
-    let nscells = 3;
-    let mut dp: Vec<__m128> = vec![_mm_setzero_ps(); q_count * nscells];
-    let zerov = _mm_setzero_ps();
-
-    let mut xe: f32 = 0.0;
-    let mut xn: f32 = 1.0;
-    let mut xj: f32 = 0.0;
-    let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
-    let mut xc: f32 = 0.0;
-    let mut totscale: f32 = 0.0;
-
-    macro_rules! mmo {
-        ($q:expr) => {
-            dp[$q * nscells + 0]
-        };
-    }
-    macro_rules! dmo {
-        ($q:expr) => {
-            dp[$q * nscells + 1]
-        };
-    }
-    macro_rules! imo {
-        ($q:expr) => {
-            dp[$q * nscells + 2]
-        };
-    }
-
-    let mut specials = vec![FwdSpecials::default(); l + 1];
-    specials[0] = FwdSpecials {
-        xn,
-        xj,
-        xc,
-        xb,
-        xe,
-        totscale,
-    };
-
-    for i in 1..=l {
-        let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            specials[i] = FwdSpecials {
-                xn,
-                xj,
-                xc,
-                xb,
-                xe,
-                totscale,
-            };
-            continue;
-        }
-
-        let rsc = &om.rfv[xi];
-        let xbv = _mm_set1_ps(xb);
-        let mut dcv = zerov;
-        let mut xev = zerov;
-
-        // Shift previous M row right by 1 float
-        let mut mpv = rightshift_float(mmo!(q_count - 1));
-
-        for q in 0..q_count {
-            let tsc_base = q * 7;
-            let rsc_v = _mm_loadu_ps(rsc[q].as_ptr());
-
-            let tbm = _mm_loadu_ps(om.tfv[tsc_base].as_ptr());
-            let tmm = _mm_loadu_ps(om.tfv[tsc_base + 1].as_ptr());
-            let tim = _mm_loadu_ps(om.tfv[tsc_base + 2].as_ptr());
-            let tdm = _mm_loadu_ps(om.tfv[tsc_base + 3].as_ptr());
-            let tmd = _mm_loadu_ps(om.tfv[tsc_base + 4].as_ptr());
-            let tmi = _mm_loadu_ps(om.tfv[tsc_base + 5].as_ptr());
-            let tii = _mm_loadu_ps(om.tfv[tsc_base + 6].as_ptr());
-
-            // M(i,k) = (M(i-1,k-1)*tMM + I(i-1,k-1)*tIM + D(i-1,k-1)*tDM + B*tBM) * e_M(k,xi)
-            let sv = _mm_mul_ps(
-                _mm_add_ps(
-                    _mm_add_ps(_mm_mul_ps(mpv, tmm), _mm_mul_ps(imo!(q), tim)),
-                    _mm_add_ps(_mm_mul_ps(dmo!(q), tdm), _mm_mul_ps(xbv, tbm)),
-                ),
-                rsc_v,
-            );
-
-            xev = _mm_add_ps(xev, sv);
-
-            // I(i,k) = (M(i-1,k)*tMI + I(i-1,k)*tII) * e_I(k,xi)
-            // Parser mode: insert emissions = 1.0, so no multiply
-            imo!(q) = _mm_add_ps(_mm_mul_ps(mmo!(q), tmi), _mm_mul_ps(imo!(q), tii));
-
-            mpv = mmo!(q);
-            mmo!(q) = sv;
-
-            // D(i,k) = M(i,k-1)*tMD + D(i,k-1)*tDD
-            dcv = _mm_add_ps(
-                _mm_mul_ps(sv, tmd),
-                _mm_mul_ps(dcv, {
-                    let dd_offset = 7 * q_count;
-                    _mm_loadu_ps(om.tfv[dd_offset + q].as_ptr())
-                }),
-            );
-            dmo!(q) = dcv;
-        }
-
-        // DD wing unfolding
-        {
-            let last_val = dmo!(q_count - 1);
-            let last_f = {
-                let mut tmp = [0.0f32; 4];
-                _mm_storeu_ps(tmp.as_mut_ptr(), last_val);
-                tmp[3]
-            };
-            if last_f > 0.0 {
-                for _iter in 0..q_count {
-                    dcv = rightshift_float(dcv);
-                    for q in 0..q_count {
-                        let dd_offset = 7 * q_count;
-                        let tdd = _mm_loadu_ps(om.tfv[dd_offset + q].as_ptr());
-                        dcv = _mm_mul_ps(dcv, tdd);
-                        dmo!(q) = _mm_add_ps(dmo!(q), dcv);
-                        xev = _mm_add_ps(xev, dcv);
-                    }
-                    let cv = _mm_cmpgt_ps(dcv, zerov);
-                    if _mm_movemask_ps(cv) == 0 {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Add D's to xEv
-        for q in 0..q_count {
-            xev = _mm_add_ps(dmo!(q), xev);
-        }
-
-        // Horizontal sum
-        xev = _mm_add_ps(
-            xev,
-            _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(xev, xev),
-        );
-        xev = _mm_add_ps(
-            xev,
-            _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(xev, xev),
-        );
-        _mm_store_ss(&mut xe, xev);
-
-        // Special states
-        xn *= om.xf[P7O_N][P7O_LOOP];
-        xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
-        xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
-        xb = xj * om.xf[P7O_J][P7O_MOVE] + xn * om.xf[P7O_N][P7O_MOVE];
-
-        // Rescaling
-        if xe > 1.0e4 {
-            let scale = 1.0 / xe;
-            xn /= xe;
-            xc /= xe;
-            xj /= xe;
-            xb /= xe;
-            let scale_v = _mm_set1_ps(scale);
-            for q in 0..q_count {
-                mmo!(q) = _mm_mul_ps(mmo!(q), scale_v);
-                dmo!(q) = _mm_mul_ps(dmo!(q), scale_v);
-                imo!(q) = _mm_mul_ps(imo!(q), scale_v);
-            }
-            totscale += xe.ln();
-            xe = 1.0;
-        }
-
-        specials[i] = FwdSpecials {
-            xn,
-            xj,
-            xc,
-            xb,
-            xe,
-            totscale,
-        };
-    }
-
-    let score = if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
-        f32::NEG_INFINITY
-    } else {
-        totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
-    };
-
-    (score, specials)
 }
 
 /// Right-shift a __m128 by one float element, zero-filling from the left.

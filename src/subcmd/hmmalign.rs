@@ -79,9 +79,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     // Consensus from HMM
     if let Some(ref cons) = hmm.consensus {
-        let cons_text: String = (1..=hmm.m)
-            .map(|i| cons[i] as char)
-            .collect();
+        let cons_text: String = (1..=hmm.m).map(|i| cons[i] as char).collect();
         writeln!(out, "#=GC RF              {}", cons_text.replace('\0', "x")).unwrap();
     }
 
