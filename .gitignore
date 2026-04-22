@@ -1,4 +1,18 @@
 hmmer
 target
 test_data/*.fasta
+test_data/*.fasta.gz
 tests/golden/pfam_*.tblout
+
+# Local agent/editor state
+.cargo/
+.codex
+CLAUDE.md
+
+# Local perf / scratch artifacts
+perf.data
+perf.data.old
+tracehash
+
+# Superseded duplicate mapping filename
+mapping.toml

@@ -1,0 +1,406 @@
+# Rust <-> C function mapping for code-complexity-comparator.
+#
+# Default filename used by `ccc-rs` when run from this repo root:
+#   ccc-rs compare rust.json c.json
+#
+# Covers hot-path and structural mappings where name normalization fails
+# (e.g. C's `p7_G*` prefix, C's `p7_<module>_<Verb>` snake/CamelCase mix,
+# and Rust's multiple SIMD variants that all correspond to one C engine).
+
+# =================================================================
+# Generic (non-SIMD) reference DP kernels — hmmer/src/generic_*.c
+# =================================================================
+
+[[entries]]
+rust  = "g_forward"
+other = "p7_GForward"
+
+[[entries]]
+rust  = "g_backward"
+other = "p7_GBackward"
+
+[[entries]]
+rust  = "g_viterbi"
+other = "p7_GViterbi"
+
+[[entries]]
+rust  = "g_msv"
+other = "p7_GMSV"
+
+[[entries]]
+rust  = "g_decoding"
+other = "p7_GDecoding"
+
+[[entries]]
+rust  = "domain_decoding"
+other = "p7_GDomainDecoding"
+
+[[entries]]
+rust  = "domain_occupancy"
+other = "p7_GDomainDecoding"
+
+[[entries]]
+rust  = "g_optimal_accuracy"
+other = "p7_GOptimalAccuracy"
+
+[[entries]]
+rust  = "g_optimal_accuracy_with_deltas"
+other = "p7_GOptimalAccuracy"
+
+[[entries]]
+rust  = "g_oa_trace"
+other = "p7_GOATrace"
+
+[[entries]]
+rust  = "g_stochastic_trace"
+other = "p7_GStochasticTrace"
+
+[[entries]]
+rust  = "g_trace"
+other = "p7_GTrace"
+
+[[entries]]
+rust  = "null2_by_expectation"
+other = "p7_GNull2_ByExpectation"
+
+[[entries]]
+rust  = "null2_by_trace"
+other = "p7_GNull2_ByTrace"
+
+[[entries]]
+rust  = "null2_by_trace_optimized"
+other = "p7_GNull2_ByTrace"
+
+[[entries]]
+rust  = "null2_score"
+other = "p7_GNull2_ByExpectation"
+
+# =================================================================
+# Long-target generic kernels — hmmer/src/generic_msv.c & generic_viterbi.c
+# =================================================================
+
+[[entries]]
+rust  = "g_msv_longtarget"
+other = "p7_GMSV_longtarget"
+
+[[entries]]
+rust  = "g_viterbi_longtarget"
+other = "p7_GViterbi_longtarget"
+
+# =================================================================
+# Hot SIMD pipeline filters — hmmer/src/impl_sse/*.c
+# =================================================================
+
+[[entries]]
+rust  = "msv_filter"
+other = "p7_MSVFilter"
+
+[[entries]]
+rust  = "msv_filter_with_scratch"
+other = "p7_MSVFilter"
+
+[[entries]]
+rust  = "avx2_msv_filter"
+other = "p7_MSVFilter"
+
+[[entries]]
+rust  = "neon_msv_filter"
+other = "p7_MSVFilter"
+
+[[entries]]
+rust  = "ssv_filter_q17"
+other = "p7_SSVFilter"
+
+[[entries]]
+rust  = "ssv_filter_longtarget"
+other = "p7_SSVFilter_longtarget"
+
+[[entries]]
+rust  = "viterbi_filter"
+other = "p7_ViterbiFilter"
+
+[[entries]]
+rust  = "avx2_viterbi_filter"
+other = "p7_ViterbiFilter"
+
+[[entries]]
+rust  = "neon_viterbi_filter"
+other = "p7_ViterbiFilter"
+
+[[entries]]
+rust  = "viterbi_filter_longtarget"
+other = "p7_ViterbiFilter_longtarget"
+
+# =================================================================
+# Forward / Backward SIMD engines — hmmer/src/impl_sse/fwdback.c
+# =================================================================
+# C has forward_engine + backward_engine (static inline fused engines)
+# that handle both parser and full-matrix modes. Rust has split them.
+
+[[entries]]
+rust  = "forward_parser_pmx"
+other = "p7_ForwardParser"
+
+[[entries]]
+rust  = "forward_parser_pmx_offset"
+other = "p7_ForwardParser"
+
+[[entries]]
+rust  = "forward_parser_pmx_offset_with_scratch"
+other = "forward_engine"
+
+[[entries]]
+rust  = "forward_parser_pmx_offset_canonical"
+other = "forward_engine"
+
+[[entries]]
+rust  = "forward_parser_pmx_offset_direct"
+other = "p7_Forward"
+
+[[entries]]
+rust  = "forward_parser"
+other = "p7_Forward"
+
+[[entries]]
+rust  = "forward_parser_offset"
+other = "p7_Forward"
+
+[[entries]]
+rust  = "avx2_forward_parser"
+other = "p7_Forward"
+
+[[entries]]
+rust  = "neon_forward_parser"
+other = "p7_Forward"
+
+[[entries]]
+rust  = "backward_parser_pmx"
+other = "p7_BackwardParser"
+
+[[entries]]
+rust  = "backward_parser_pmx_offset"
+other = "p7_BackwardParser"
+
+[[entries]]
+rust  = "backward_parser_pmx_offset_with_scratch"
+other = "backward_engine"
+
+[[entries]]
+rust  = "backward_parser_pmx_offset_canonical"
+other = "backward_engine"
+
+[[entries]]
+rust  = "backward_parser_pmx_offset_direct"
+other = "p7_Backward"
+
+[[entries]]
+rust  = "backward_parser_pmx_offset_with_fwd_scales"
+other = "p7_Backward"
+
+# =================================================================
+# SIMD decoding / optimal-accuracy / null2 — hmmer/src/impl_sse/*.c
+# =================================================================
+
+[[entries]]
+rust  = "p_decoding"
+other = "p7_Decoding"
+
+[[entries]]
+rust  = "p_decoding_to_gmx"
+other = "p7_Decoding"
+
+[[entries]]
+rust  = "p_decoding_to_gmx_striped"
+other = "p7_Decoding"
+
+[[entries]]
+rust  = "posterior_decoding_pmx"
+other = "p7_Decoding"
+
+[[entries]]
+rust  = "p_domain_decoding"
+other = "p7_DomainDecoding"
+
+[[entries]]
+rust  = "p_domain_decoding_reuse"
+other = "p7_DomainDecoding"
+
+[[entries]]
+rust  = "p_null2_correction"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_from_pmx"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_pmx"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_pmx_reuse"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_posteriors_reuse"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_omx_expectation_reuse"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_striped_pmx"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "p_null2_odds_from_striped_pmx_reuse"
+other = "p7_Null2_ByExpectation"
+
+[[entries]]
+rust  = "optimal_accuracy_pmx"
+other = "p7_OptimalAccuracy"
+
+[[entries]]
+rust  = "optimal_accuracy_pmx_trace"
+other = "p7_OATrace"
+
+[[entries]]
+rust  = "oa_trace_pmx"
+other = "p7_OATrace"
+
+[[entries]]
+rust  = "oa_trace_coords_pmx"
+other = "p7_OATrace"
+
+# =================================================================
+# Profile / optimized-profile configuration
+# =================================================================
+
+[[entries]]
+rust  = "convert"
+other = "p7_oprofile_Convert"
+
+[[entries]]
+rust  = "reconfig_length"
+other = "p7_oprofile_ReconfigLength"
+
+[[entries]]
+rust  = "reconfig_msv_length"
+other = "p7_oprofile_ReconfigMSVLength"
+
+[[entries]]
+rust  = "reconfig_multihit"
+other = "p7_oprofile_ReconfigMultihit"
+
+[[entries]]
+rust  = "reconfig_unihit"
+other = "p7_oprofile_ReconfigUnihit"
+
+[[entries]]
+rust  = "profile_config"
+other = "p7_ProfileConfig"
+
+[[entries]]
+rust  = "reconfigure_length"
+other = "p7_ReconfigLength"
+
+[[entries]]
+rust  = "reconfigure_multihit"
+other = "p7_ReconfigMultihit"
+
+[[entries]]
+rust  = "reconfigure_unihit"
+other = "p7_ReconfigUnihit"
+
+[[entries]]
+rust  = "nqb"
+other = "p7O_NQB"
+
+[[entries]]
+rust  = "nqw"
+other = "p7O_NQW"
+
+[[entries]]
+rust  = "nqf"
+other = "p7O_NQF"
+
+[[entries]]
+rust  = "wordify_pub"
+other = "wordify"
+
+# =================================================================
+# Pipeline / domain definition / null model
+# =================================================================
+
+[[entries]]
+rust  = "run"
+other = "p7_Pipeline"
+
+[[entries]]
+rust  = "new_model"
+other = "p7_pli_NewModel"
+
+[[entries]]
+rust  = "search_longtarget"
+other = "p7_Pipeline_LongTarget"
+
+[[entries]]
+rust  = "domain_definition"
+other = "p7_domaindef_ByPosteriorHeuristics"
+
+[[entries]]
+rust  = "posterior_null2"
+other = "p7_GNull2_ByTrace"
+
+[[entries]]
+rust  = "Bg::new"
+other = "p7_bg_Create"
+
+[[entries]]
+rust  = "set_filter"
+other = "p7_bg_SetFilter"
+
+[[entries]]
+rust  = "set_length"
+other = "p7_bg_SetLength"
+
+[[entries]]
+rust  = "null_one"
+other = "p7_bg_NullOne"
+
+[[entries]]
+rust  = "filter_score"
+other = "p7_bg_FilterScore"
+
+# =================================================================
+# HMM I/O and command surfaces
+# =================================================================
+
+[[entries]]
+rust  = "read_hmms"
+other = "p7_hmmfile_Read"
+
+[[entries]]
+rust  = "read_hmm_ascii"
+other = "read_asc30hmm"
+
+[[entries]]
+rust  = "write_hmm"
+other = "p7_hmmfile_WriteASCII"
+
+[[entries]]
+rust  = "write_binary_hmm"
+other = "p7_hmmfile_WriteBinary"
+
+[[entries]]
+rust  = "read_binary_hmm"
+other = "read_bin30hmm"
+
+[[entries]]
+rust  = "hmmsearch"
+other = "hmmsearch"
+
+[[entries]]
+rust  = "nhmmer"
+other = "nhmmer"
