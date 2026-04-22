@@ -85,9 +85,11 @@ fn calibrate_msv(
 ) -> f32 {
     let n = 200;
     let l = 200;
+    let mut bg = bg.clone();
+    bg.set_length(l);
 
     let mut gm = Profile::new(hmm.m, abc);
-    profile_config(hmm, bg, &mut gm, l as i32, P7_LOCAL);
+    profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
     let om = OProfile::convert(&gm);
 
     let mut scores = Vec::with_capacity(n);
@@ -136,9 +138,11 @@ fn calibrate_viterbi(
 ) -> f32 {
     let n = 200;
     let l = 200;
+    let mut bg = bg.clone();
+    bg.set_length(l);
 
     let mut gm = Profile::new(hmm.m, abc);
-    profile_config(hmm, bg, &mut gm, l as i32, P7_LOCAL);
+    profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
     let om = OProfile::convert(&gm);
 
     let mut scores = Vec::with_capacity(n);
@@ -187,9 +191,11 @@ fn calibrate_forward(
     let n = 200; // EfN
     let l = 100; // EfL
     let tailp = 0.04_f64; // Eft
+    let mut bg = bg.clone();
+    bg.set_length(l);
 
     let mut gm = Profile::new(hmm.m, abc);
-    profile_config(hmm, bg, &mut gm, l as i32, P7_LOCAL);
+    profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
     let om = OProfile::convert(&gm);
 
     let mut scores = Vec::with_capacity(n);

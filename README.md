@@ -217,10 +217,12 @@ not yet C-identical:
   around legacy fixture edge cases.
 - `phmmer` and first-iteration `jackhmmer` now use the upstream-style
   single-sequence score-matrix conversion path instead of the earlier
-  renormalized shortcut. Current committed regressions cover the improved
-  `phmmer` baseline plus small `jackhmmer` convergence and final-round
-  `--tblout`/`--domtblout` cases and `--nonull2` spot checks, but parity
-  coverage here is still lighter than for `hmmsearch`/`nhmmer`.
+  renormalized shortcut. Later `jackhmmer` rounds now rebuild from a
+  model-guided alignment to the previous-round HMM instead of the earlier raw
+  right-padding shortcut, which materially improved convergence behavior and
+  final-round scores. The remaining gap is that iterative rebuilds still use a
+  simplified `hmmbuild` path, so bundled-C final-round `jackhmmer` scores are
+  not yet exact even though the behavior is much closer than before.
 - `hmmsearch --pfamtblout` now writes both Pfam sections with C-style domain
   ordering and coordinate generation even under `--noali`. Current regressions
   cover exact bundled-C parity on small fixtures plus a real-world GECCO case.

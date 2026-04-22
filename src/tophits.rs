@@ -1,6 +1,11 @@
 //! P7_TOPHITS - Ranked hit list for search results.
 //! Simplified port focused on what hmmsearch needs.
 
+use crate::alphabet::Alphabet;
+use crate::msa::Msa;
+use crate::sequence::Sequence;
+use crate::trace::{State, Trace};
+
 /// Print one alignment display as ASCII blocks, matching C
 /// `p7_nontranslated_alidisplay_Print()` (p7_alidisplay.c:1162). Splits the
 /// alignment into blocks of `aliwidth = linewidth - namewidth - 2*coordwidth -
@@ -493,6 +498,273 @@ impl TopHits {
                     }
                 }
             }
+        }
+    }
+}
+
+pub fn included_alignment(
+    th: &TopHits,
+    abc: &Alphabet,
+    model_len: usize,
+    extra: Option<(&Sequence, &Trace)>,
+    msa_name: &str,
+) -> Option<Msa> {
+    let ndom = th
+        .hits
+        .iter()
+        .filter(|hit| hit.flags & P7_IS_INCLUDED != 0)
+        .map(|hit| hit.dcl.iter().filter(|dom| dom.is_included).count())
+        .sum::<usize>();
+    if ndom == 0 {
+        return None;
+    }
+
+    let mut sequences = Vec::new();
+    let mut traces = Vec::new();
+
+    if let Some((sq, tr)) = extra {
+        sequences.push(sq.clone());
+        traces.push(tr.clone());
+    }
+
+    for hit in &th.hits {
+        if hit.flags & P7_IS_INCLUDED == 0 {
+            continue;
+        }
+        for dom in &hit.dcl {
+            if !dom.is_included {
+                continue;
+            }
+            let ad = dom.ad.as_ref()?;
+            let (sq, tr) = alidisplay_backconvert(hit, dom, ad, abc);
+            sequences.push(sq);
+            traces.push(tr);
+        }
+    }
+
+    if sequences.is_empty() {
+        return None;
+    }
+
+    let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
+    let mut aseq = Vec::with_capacity(sequences.len());
+    let mut sqname = Vec::with_capacity(sequences.len());
+    for (sq, tr) in sequences.iter().zip(traces.iter()) {
+        let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
+        rejustify_insertions_text(&mut row, &inscount, &matmap, &matuse, model_len);
+        aseq.push(row);
+        sqname.push(sq.name.clone());
+    }
+
+    let mut rf = vec![b'.'; alen];
+    for k in 1..=model_len {
+        if matuse[k] {
+            rf[matmap[k] - 1] = b'x';
+        }
+    }
+
+    Some(Msa {
+        name: msa_name.to_string(),
+        sqname,
+        aseq,
+        nseq: sequences.len(),
+        alen,
+        rf: Some(rf),
+    })
+}
+
+fn alidisplay_backconvert(
+    hit: &Hit,
+    dom: &Domain,
+    ad: &AliDisplay,
+    abc: &Alphabet,
+) -> (Sequence, Trace) {
+    let sub_l = ad
+        .aseq
+        .bytes()
+        .filter(|&c| c != b'.' && c != b'-')
+        .count();
+    let sqfrom = dom.iali.min(dom.jali);
+    let sqto = dom.iali.max(dom.jali);
+
+    let mut sq = Sequence::new();
+    sq.name = format!("{}/{}-{}", hit.name, sqfrom, sqto);
+    sq.desc = format!("[subseq from] {}", hit.name);
+    sq.acc = hit.acc.clone();
+    sq.n = sub_l;
+    sq.l = hit.n;
+    sq.dsq = Vec::with_capacity(sub_l + 2);
+    sq.dsq.push(crate::alphabet::DSQ_SENTINEL);
+
+    let mut tr = Trace::new();
+    tr.append(State::S, 0, 0);
+    tr.append(State::N, 0, 0);
+    tr.append(State::B, 0, 0);
+
+    let model = ad.model.as_bytes();
+    let aseq = ad.aseq.as_bytes();
+    let mut k = ad.hmmfrom.saturating_sub(1);
+    let mut i = 1usize;
+    for a in 0..ad.model.len() {
+        let model_gap = model[a] == b'.' || model[a] == b'-';
+        let aseq_gap = aseq[a] == b'.' || aseq[a] == b'-';
+        let state = if !model_gap {
+            k += 1;
+            if !aseq_gap { State::M } else { State::D }
+        } else {
+            State::I
+        };
+        tr.append(state, k, i);
+        match state {
+            State::M | State::I => {
+                sq.dsq.push(abc.digitize_symbol(aseq[a].to_ascii_uppercase()));
+                i += 1;
+            }
+            State::D => {}
+            _ => unreachable!(),
+        }
+    }
+    tr.append(State::E, 0, 0);
+    tr.append(State::C, 0, 0);
+    tr.append(State::T, 0, 0);
+    sq.dsq.push(crate::alphabet::DSQ_SENTINEL);
+
+    (sq, tr)
+}
+
+fn map_new_msa(m: usize, traces: &[Trace]) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
+    let mut inscount = vec![0usize; m + 1];
+    let mut matuse = vec![true; m + 1];
+    matuse[0] = false;
+    let mut insnum = vec![0usize; m + 1];
+
+    for tr in traces {
+        insnum.fill(0);
+        for z in 1..tr.n {
+            match tr.st[z] {
+                State::I => insnum[tr.k[z]] += 1,
+                State::N if tr.st[z - 1] == State::N => insnum[0] += 1,
+                State::C if tr.st[z - 1] == State::C => insnum[m] += 1,
+                State::M => matuse[tr.k[z]] = true,
+                State::J => panic!("J state unsupported in TopHits alignment"),
+                _ => {}
+            }
+        }
+        for k in 0..=m {
+            inscount[k] = inscount[k].max(insnum[k]);
+        }
+    }
+
+    let mut matmap = vec![0usize; m + 1];
+    let mut alen = inscount[0];
+    for k in 1..=m {
+        if matuse[k] {
+            matmap[k] = alen + 1;
+            alen += 1 + inscount[k];
+        } else {
+            matmap[k] = alen;
+            alen += inscount[k];
+        }
+    }
+
+    (inscount, matuse, matmap, alen)
+}
+
+fn make_text_row(
+    abc: &Alphabet,
+    sq: &Sequence,
+    tr: &Trace,
+    matuse: &[bool],
+    matmap: &[usize],
+    alen: usize,
+) -> Vec<u8> {
+    let mut aseq = vec![b'.'; alen];
+    for k in 1..matuse.len() {
+        if matuse[k] {
+            aseq[matmap[k] - 1] = b'-';
+        }
+    }
+
+    let mut apos = 0usize;
+    for z in 0..tr.n {
+        match tr.st[z] {
+            State::M => {
+                let idx = matmap[tr.k[z]] - 1;
+                aseq[idx] = (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_uppercase() as u8;
+                apos = matmap[tr.k[z]];
+            }
+            State::D => {
+                if matuse[tr.k[z]] {
+                    aseq[matmap[tr.k[z]] - 1] = b'-';
+                }
+                apos = matmap[tr.k[z]];
+            }
+            State::I => {
+                if apos < alen {
+                    aseq[apos] =
+                        (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_lowercase() as u8;
+                    apos += 1;
+                }
+            }
+            State::N | State::C => {
+                if tr.i[z] > 0 && apos < alen {
+                    aseq[apos] =
+                        (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_lowercase() as u8;
+                    apos += 1;
+                }
+            }
+            State::E => {
+                apos = matmap[matmap.len() - 1];
+            }
+            _ => {}
+        }
+    }
+
+    aseq
+}
+
+fn rejustify_insertions_text(
+    aseq: &mut [u8],
+    inserts: &[usize],
+    matmap: &[usize],
+    matuse: &[bool],
+    m: usize,
+) {
+    fn is_text_gap(c: u8) -> bool {
+        matches!(c, b'.' | b'-' | b'~')
+    }
+
+    for k in 0..m {
+        if inserts[k] <= 1 {
+            continue;
+        }
+
+        let start = matmap[k];
+        let end = matmap[k + 1] - usize::from(matuse[k + 1]);
+        let mut nins = (start..end)
+            .filter(|&apos| aseq[apos].is_ascii_alphabetic())
+            .count();
+        if k == 0 {
+            nins = 0;
+        } else {
+            nins /= 2;
+        }
+
+        let floor = (start + nins) as isize;
+        let mut opos = end as isize - 1;
+        let mut npos = end as isize - 1;
+        while opos >= floor {
+            if is_text_gap(aseq[opos as usize]) {
+                opos -= 1;
+                continue;
+            }
+            aseq[npos as usize] = aseq[opos as usize];
+            opos -= 1;
+            npos -= 1;
+        }
+        while npos >= floor {
+            aseq[npos as usize] = b'.';
+            npos -= 1;
         }
     }
 }

@@ -7,6 +7,8 @@ use crate::hmm::Hmm;
 /// Target relative entropy per match position (bits).
 const ETARGET_AMINO: f64 = 0.59;
 const ETARGET_DNA: f64 = 0.62;
+const ESIGMA_DEFAULT: f64 = 45.0;
+const LOG2_INV: f64 = std::f64::consts::LOG2_E;
 
 /// Compute the effective sequence number for an HMM using entropy weighting.
 /// Adjusts the effective sequence count so that the mean match-state relative
@@ -14,36 +16,31 @@ const ETARGET_DNA: f64 = 0.62;
 ///
 /// Returns the effective sequence number (Neff).
 pub fn entropy_weight(hmm: &mut Hmm, bg: &Bg, target_re: Option<f64>) -> f32 {
-    let k = hmm.abc_k;
-    let target = target_re.unwrap_or(if k == 20 { ETARGET_AMINO } else { ETARGET_DNA });
+    let target = target_re.unwrap_or(default_re_target(hmm));
+    let etarget = entropy_target(hmm, target, ESIGMA_DEFAULT);
 
     let nseq = hmm.nseq as f64;
     if nseq <= 0.0 {
         return 1.0;
     }
 
-    // Binary search for Neff that gives target relative entropy
+    let fx_full = relative_entropy_fx(hmm, bg, nseq, etarget);
+    if fx_full <= 0.0 {
+        hmm.eff_nseq = nseq as f32;
+        return nseq as f32;
+    }
+
     let mut lo = 0.0_f64;
     let mut hi = nseq;
-
-    for _ in 0..100 {
+    for _ in 0..60 {
         let mid = (lo + hi) / 2.0;
-        if mid < 0.01 {
-            break;
-        }
-
-        // Scale counts by mid/nseq and recompute relative entropy
-        let re = mean_relative_entropy_at_neff(hmm, bg, mid, nseq);
-
-        if re > target {
-            // Too much information → need lower Neff (more smoothing)
+        let fx = relative_entropy_fx(hmm, bg, mid, etarget);
+        if fx > 0.0 {
             hi = mid;
         } else {
-            // Too little information → need higher Neff (less smoothing)
             lo = mid;
         }
-
-        if (re - target).abs() < 0.001 {
+        if (hi - lo).abs() < 0.01 {
             break;
         }
     }
@@ -53,31 +50,52 @@ pub fn entropy_weight(hmm: &mut Hmm, bg: &Bg, target_re: Option<f64>) -> f32 {
     neff
 }
 
-/// Compute mean match-state relative entropy at a given effective sequence number.
-fn mean_relative_entropy_at_neff(hmm: &Hmm, bg: &Bg, neff: f64, nseq: f64) -> f64 {
-    let k = hmm.abc_k;
-    let scale = neff / nseq;
-    let mut total_re = 0.0_f64;
+fn default_re_target(hmm: &Hmm) -> f64 {
+    if hmm.abc_k == 20 {
+        ETARGET_AMINO
+    } else {
+        ETARGET_DNA
+    }
+}
 
-    for node in 1..=hmm.m {
-        let mut node_re = 0.0_f64;
-        for x in 0..k {
-            // Scale the emission probability by neff
-            // p_scaled ∝ (count * scale + prior) / (total_scaled + prior_total)
-            // Simplified: interpolate between observed and background
-            let p_obs = hmm.mat[node][x] as f64;
-            let p_bg = bg.f[x] as f64;
-            let p = p_obs * scale + p_bg * (1.0 - scale);
-            let p = p.max(1e-10);
+fn entropy_target(hmm: &Hmm, re_target: f64, esigma: f64) -> f64 {
+    let m = hmm.m as f64;
+    let sigma_target = (esigma - LOG2_INV * (2.0 / (m * (m + 1.0))).ln()) / m;
+    re_target.max(sigma_target)
+}
 
-            if p > 0.0 && p_bg > 0.0 {
-                node_re += p * (p / p_bg).log2();
+fn relative_entropy_fx(hmm: &Hmm, bg: &Bg, neff: f64, etarget: f64) -> f64 {
+    let mut trial = hmm.clone();
+    let nseq = trial.nseq as f64;
+    scale_counts(&mut trial, neff / nseq);
+    crate::prior::apply_priors(&mut trial);
+    mean_match_relative_entropy(&trial, bg) - etarget
+}
+
+pub fn scale_counts(hmm: &mut Hmm, scale: f64) {
+    for k in 0..=hmm.m {
+        for t in &mut hmm.t[k] {
+            *t *= scale as f32;
+        }
+        for x in 0..hmm.abc_k {
+            hmm.mat[k][x] *= scale as f32;
+            hmm.ins[k][x] *= scale as f32;
+        }
+    }
+}
+
+fn mean_match_relative_entropy(hmm: &Hmm, bg: &Bg) -> f64 {
+    let mut kl = 0.0_f64;
+    for k in 1..=hmm.m {
+        for x in 0..hmm.abc_k {
+            let p = hmm.mat[k][x] as f64;
+            let q = bg.f[x] as f64;
+            if p > 0.0 && q > 0.0 {
+                kl += p * (p / q).log2();
             }
         }
-        total_re += node_re;
     }
-
-    total_re / hmm.m as f64
+    kl / hmm.m as f64
 }
 
 #[cfg(test)]

@@ -712,8 +712,7 @@ impl Pipeline {
                 ld += (dom.jenv - dom.ienv + 1) as usize;
             }
         }
-        let len_ratio = l as f32 / (l as f32 + 3.0);
-        let sum_score_nats = (sum_env as f64 + (l - ld) as f64 * (len_ratio as f64).ln()) as f32;
+        let sum_score_nats = reconstruction_score_nats(sum_env, l, ld);
         let sum_bias = if self.do_null2 {
             crate::logsum::p7_flogsum(0.0, ((omega as f64).ln() + sum_correction as f64) as f32)
         } else {
@@ -751,7 +750,7 @@ impl Pipeline {
             let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
             for dom in &mut domains {
                 let env_len = (dom.jenv - dom.ienv + 1) as usize;
-                let length_correction = ((l - env_len) as f64 * (len_ratio as f64).ln()) as f32;
+                let length_correction = reconstruction_score_nats(0.0, l, env_len);
                 dom.dombias = 0.0;
                 dom.bitscore = nats_to_bits_from_scores(dom.envsc + length_correction, null_sc);
                 dom.lnp = crate::stats::exponential::logsurv(dom.bitscore as f64, tau, lambda);
@@ -845,6 +844,13 @@ fn nats_to_bits_from_scores(score: f32, baseline: f32) -> f32 {
     (((score - baseline) as f64) / std::f64::consts::LN_2) as f32
 }
 
+#[inline]
+fn reconstruction_score_nats(sum_env: f32, l: usize, ld: usize) -> f32 {
+    let len_ratio = l as f32 / (l as f32 + 3.0);
+    let uncovered = l as i64 - ld as i64;
+    (sum_env as f64 + uncovered as f64 * (len_ratio as f64).ln()) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,5 +895,15 @@ mod tests {
         assert!(hit, "Pipeline should find a hit for matching sequence");
         assert_eq!(th.hits.len(), 1);
         assert!(th.hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn reconstruction_score_allows_domain_coverage_to_exceed_sequence_length() {
+        let score = reconstruction_score_nats(12.0, 100, 140);
+        let expected =
+            12.0_f64 + (100_i64 - 140_i64) as f64 * ((100.0_f64 / 103.0_f64).ln());
+        assert!((score as f64 - expected).abs() < 1.0e-6);
+        assert!(score.is_finite());
+        assert!(score > 12.0);
     }
 }

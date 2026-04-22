@@ -661,6 +661,10 @@ fn rejustify_insertions_text(
     matuse: &[bool],
     m: usize,
 ) {
+    fn is_text_gap(c: u8) -> bool {
+        matches!(c, b'.' | b'-' | b'~')
+    }
+
     let mut aseq_bytes = aseq.as_bytes().to_vec();
     let mut pp_bytes = ppline.as_bytes().to_vec();
 
@@ -684,7 +688,7 @@ fn rejustify_insertions_text(
         let mut opos = end as isize - 1;
         let mut npos = end as isize - 1;
         while opos >= floor {
-            if aseq_bytes[opos as usize] == b'.' {
+            if is_text_gap(aseq_bytes[opos as usize]) {
                 opos -= 1;
                 continue;
             }

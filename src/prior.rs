@@ -182,6 +182,80 @@ impl Default for TransitionPrior {
     }
 }
 
+fn amino_insert_alpha() -> [f32; 20] {
+    [
+        681.0, 120.0, 623.0, 651.0, 313.0, 902.0, 241.0, 371.0, 687.0, 676.0, 143.0, 548.0,
+        647.0, 415.0, 551.0, 926.0, 623.0, 505.0, 102.0, 269.0,
+    ]
+}
+
+fn nucleic_match_alpha() -> (&'static [f64], &'static [[f64; 4]]) {
+    static Q: [f64; 4] = [0.24, 0.26, 0.08, 0.42];
+    static ALPHA: [[f64; 4]; 4] = [
+        [0.16, 0.45, 0.12, 0.39],
+        [0.09, 0.03, 0.09, 0.04],
+        [1.29, 0.40, 6.58, 0.51],
+        [1.74, 1.49, 1.57, 1.95],
+    ];
+    (&Q, &ALPHA)
+}
+
+fn nucleic_insert_alpha() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+fn apply_mixture_dirichlet_with_components(
+    counts: &[f32],
+    q: &[f64],
+    alpha: &[Vec<f64>],
+) -> Vec<f32> {
+    let k = counts.len();
+    let counts_d: Vec<f64> = counts.iter().map(|&c| c as f64).collect();
+    let count_sum: f64 = counts_d.iter().sum();
+
+    let mut log_pk = vec![0.0_f64; q.len()];
+    for comp in 0..q.len() {
+        let alpha_sum: f64 = alpha[comp].iter().sum();
+        let mut log_p = q[comp].ln();
+        log_p += ln_gamma(alpha_sum) - ln_gamma(count_sum + alpha_sum);
+        for a in 0..k {
+            log_p += ln_gamma(counts_d[a] + alpha[comp][a]) - ln_gamma(alpha[comp][a]);
+        }
+        log_pk[comp] = log_p;
+    }
+
+    let max_log = log_pk.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut pk = vec![0.0_f64; q.len()];
+    let mut pk_sum = 0.0_f64;
+    for comp in 0..q.len() {
+        pk[comp] = (log_pk[comp] - max_log).exp();
+        pk_sum += pk[comp];
+    }
+    for weight in &mut pk {
+        *weight /= pk_sum;
+    }
+
+    let mut result = vec![0.0_f64; k];
+    for comp in 0..q.len() {
+        let alpha_sum: f64 = alpha[comp].iter().sum();
+        let denom = count_sum + alpha_sum;
+        if denom > 0.0 {
+            for a in 0..k {
+                result[a] += pk[comp] * (counts_d[a] + alpha[comp][a]) / denom;
+            }
+        }
+    }
+
+    let rsum: f64 = result.iter().sum();
+    if rsum > 0.0 {
+        for a in 0..k {
+            result[a] /= rsum;
+        }
+    }
+
+    result.iter().map(|&v| v as f32).collect()
+}
+
 /// Apply Dirichlet priors to an HMM's emission and transition counts.
 /// Modifies the HMM in place, converting counts to probabilities.
 pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
@@ -190,44 +264,65 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
     let m = hmm.m;
     let trans = TransitionPrior::default();
 
-    // Background for insert emissions
-    let bg_alpha: Vec<f32> = (0..k).map(|_| 1.0).collect(); // uniform
+    for node in 0..=m {
+        let mt_counts = [hmm.t[node][MM], hmm.t[node][MI], hmm.t[node][MD]];
+        let mt_probs = apply_dirichlet(&mt_counts, &trans.tm);
+        hmm.t[node][MM] = mt_probs[0];
+        hmm.t[node][MI] = mt_probs[1];
+        hmm.t[node][MD] = mt_probs[2];
+
+        let it_counts = [hmm.t[node][IM], hmm.t[node][II]];
+        let it_probs = apply_dirichlet(&it_counts, &trans.ti);
+        hmm.t[node][IM] = it_probs[0];
+        hmm.t[node][II] = it_probs[1];
+    }
+    hmm.t[m][MD] = 0.0;
+    let msum = hmm.t[m][MM] + hmm.t[m][MI] + hmm.t[m][MD];
+    if msum > 0.0 {
+        hmm.t[m][MM] /= msum;
+        hmm.t[m][MI] /= msum;
+        hmm.t[m][MD] /= msum;
+    }
+
+    for node in 1..m {
+        let dt_counts = [hmm.t[node][DM], hmm.t[node][DD]];
+        let dt_probs = apply_dirichlet(&dt_counts, &trans.td);
+        hmm.t[node][DM] = dt_probs[0];
+        hmm.t[node][DD] = dt_probs[1];
+    }
+    hmm.t[0][DM] = 1.0;
+    hmm.t[0][DD] = 0.0;
+    hmm.t[m][DM] = 1.0;
+    hmm.t[m][DD] = 0.0;
 
     for node in 1..=m {
-        // Apply match emission prior (9-component Sjolander mixture for amino acids)
         let match_counts: Vec<f32> = hmm.mat[node][..k].to_vec();
         let match_probs = if k == 20 {
             apply_mixture_dirichlet(&match_counts)
+        } else if k == 4 {
+            let (q, alpha_arr) = nucleic_match_alpha();
+            let alpha: Vec<Vec<f64>> = alpha_arr.iter().map(|row| row.to_vec()).collect();
+            apply_mixture_dirichlet_with_components(&match_counts, q, &alpha)
         } else {
-            apply_dirichlet(&match_counts, &[0.5_f32; 20][..k])
+            apply_dirichlet(&match_counts, &vec![1.0_f32; k])
         };
         hmm.mat[node][..k].copy_from_slice(&match_probs);
+    }
+    hmm.mat[0][..k].fill(0.0);
+    if k > 0 {
+        hmm.mat[0][0] = 1.0;
+    }
 
-        // Apply insert emission prior (uniform)
+    let ins_alpha: Vec<f32> = if k == 20 {
+        amino_insert_alpha().to_vec()
+    } else if k == 4 {
+        nucleic_insert_alpha().to_vec()
+    } else {
+        vec![1.0_f32; k]
+    };
+    for node in 0..=m {
         let ins_counts: Vec<f32> = hmm.ins[node][..k].to_vec();
-        let ins_probs = apply_dirichlet(&ins_counts, &bg_alpha);
+        let ins_probs = apply_dirichlet(&ins_counts, &ins_alpha);
         hmm.ins[node][..k].copy_from_slice(&ins_probs);
-
-        // Apply transition priors
-        if node < m {
-            // Match transitions: MM, MI, MD
-            let mt_counts = [hmm.t[node][MM], hmm.t[node][MI], hmm.t[node][MD]];
-            let mt_probs = apply_dirichlet(&mt_counts, &trans.tm);
-            hmm.t[node][MM] = mt_probs[0];
-            hmm.t[node][MI] = mt_probs[1];
-            hmm.t[node][MD] = mt_probs[2];
-
-            // Insert transitions: IM, II
-            let it_counts = [hmm.t[node][IM], hmm.t[node][II]];
-            let it_probs = apply_dirichlet(&it_counts, &trans.ti);
-            hmm.t[node][IM] = it_probs[0];
-            hmm.t[node][II] = it_probs[1];
-
-            // Delete transitions: DM, DD
-            let dt_counts = [hmm.t[node][DM], hmm.t[node][DD]];
-            let dt_probs = apply_dirichlet(&dt_counts, &trans.td);
-            hmm.t[node][DM] = dt_probs[0];
-            hmm.t[node][DD] = dt_probs[1];
-        }
     }
 }

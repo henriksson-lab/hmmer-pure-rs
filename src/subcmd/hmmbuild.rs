@@ -96,7 +96,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     writeln!(err).unwrap();
 
     for (idx, alignment) in msas.iter().enumerate() {
-        let mut hmm = builder::build_hmm_from_msa(alignment, &abc, &bg, args.symfrac);
+        let mut hmm = builder::build_hmm_from_msa(alignment, &abc, &bg, args.symfrac, false);
 
         if let Some(ref name) = args.name {
             hmm.name = name.clone();

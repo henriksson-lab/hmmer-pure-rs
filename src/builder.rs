@@ -5,12 +5,13 @@ use crate::alphabet::Alphabet;
 use crate::bg::Bg;
 use crate::hmm::*;
 use crate::msa::Msa;
+use crate::trace::{State as TraceState, Trace};
 
-fn checksum_msa(msa: &Msa) -> u32 {
+fn checksum_msa(msa: &Msa, abc: &Alphabet) -> u32 {
     let mut val = 0u32;
-    for row in &msa.aseq {
-        for &ch in row {
-            val = val.wrapping_add(ch as u32);
+    for row in msa.digitize(abc) {
+        for &sym in row.iter().skip(1).take(msa.alen) {
+            val = val.wrapping_add(sym as u32);
             val = val.wrapping_add(val << 10);
             val ^= val >> 6;
         }
@@ -23,7 +24,11 @@ fn checksum_msa(msa: &Msa) -> u32 {
 
 /// Henikoff position-based sequence weighting.
 /// Returns weights[0..nseq] that sum to nseq.
-pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
+///
+/// HMMER only restricts PB weighting to RF consensus columns in `--hand`
+/// mode. In default fast architecture mode, any input RF annotation is
+/// ignored for weighting.
+pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f32> {
     let nseq = msa.nseq;
     let k = abc.k;
 
@@ -31,6 +36,13 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
     let mut weights = vec![0.0_f32; nseq];
 
     for col in 0..msa.alen {
+        if use_rf {
+            let rf = msa.rf.as_ref().unwrap();
+            if col >= rf.len() || rf[col] == b'.' || rf[col] == b'-' || rf[col] == b' ' {
+                continue;
+            }
+        }
+
         // Count distinct residues and per-residue counts at this column
         let mut counts = vec![0usize; k];
 
@@ -65,6 +77,12 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
     for seq in 0..nseq {
         let mut n_res = 0;
         for col in 0..msa.alen {
+            if use_rf {
+                let rf = msa.rf.as_ref().unwrap();
+                if col >= rf.len() || rf[col] == b'.' || rf[col] == b'-' || rf[col] == b' ' {
+                    continue;
+                }
+            }
             let pos = col + 1;
             if pos < ax[seq].len() - 1 {
                 let residue = ax[seq][pos] as usize;
@@ -92,38 +110,58 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
 
 /// Build an HMM from a multiple sequence alignment using fast model construction.
 ///
-/// Uses the "fast" method: columns with >= `symfrac` occupancy become match states.
-/// Default symfrac = 0.5.
-pub fn build_hmm_from_msa(msa: &Msa, abc: &Alphabet, bg: &Bg, symfrac: f32) -> Hmm {
+/// Uses the "fast" method by default: columns with >= `symfrac` occupancy
+/// become match states. When `hand_arch` is true, input RF annotation defines
+/// the architecture instead, matching HMMER `--hand`.
+pub fn build_hmm_from_msa(
+    msa: &Msa,
+    abc: &Alphabet,
+    bg: &Bg,
+    symfrac: f32,
+    hand_arch: bool,
+) -> Hmm {
     let k = abc.k;
     let nseq = msa.nseq;
 
-    // Digitize the alignment
-    let ax = msa.digitize(abc);
+    // Digitize the alignment, then mark fragment flanks as missing data
+    // before architecture assignment and faux-trace counting, matching
+    // esl_msa_MarkFragments_old() in the C builder flow.
+    let mut ax = msa.digitize(abc);
     let gap = abc.gap_code();
+    let missing = abc.missing_code();
+
+    // Compute position-based sequence weights before architecture assignment.
+    let weights = pb_weights(msa, abc, hand_arch && msa.rf.is_some());
+    mark_fragments_old(&mut ax, abc, msa.alen, 0.5);
 
     // Step 1: Determine which columns are match states (Fast model construction)
     let mut matassign = vec![false; msa.alen];
     for col in 0..msa.alen {
-        let mut n_residues = 0;
+        let mut residue_wt = 0.0_f32;
+        let mut total_wt = 0.0_f32;
         for seq in 0..nseq {
-            // ax[seq] is 1-based; column col maps to position col+1
             let pos = col + 1;
             if pos < ax[seq].len() - 1 {
                 let residue = ax[seq][pos];
-                if residue != gap && abc.is_canonical(residue) {
-                    n_residues += 1;
+                if abc.is_residue(residue) {
+                    residue_wt += weights[seq];
+                    total_wt += weights[seq];
+                } else if residue == gap {
+                    total_wt += weights[seq];
+                } else if residue == missing {
+                    continue;
                 }
             }
         }
-        let occupancy = n_residues as f32 / nseq as f32;
-        matassign[col] = occupancy >= symfrac;
+        matassign[col] = residue_wt > 0.0 && total_wt > 0.0 && residue_wt / total_wt >= symfrac;
     }
 
-    // If RF annotation exists, use it instead
-    if let Some(ref rf) = msa.rf {
+    // Only `--hand` architecture uses input RF; fast architecture ignores it.
+    if hand_arch {
+        if let Some(ref rf) = msa.rf {
         for col in 0..msa.alen.min(rf.len()) {
             matassign[col] = rf[col] != b'.' && rf[col] != b'-' && rf[col] != b' ';
+        }
         }
     }
 
@@ -140,125 +178,30 @@ pub fn build_hmm_from_msa(msa: &Msa, abc: &Alphabet, bg: &Bg, symfrac: f32) -> H
     hmm.nseq = nseq as i32;
     hmm.eff_nseq = nseq as f32;
 
-    // Compute position-based sequence weights
-    let weights = pb_weights(msa, abc);
     let eff_nseq: f32 = weights.iter().sum();
     hmm.eff_nseq = eff_nseq;
 
     // Step 2: Count weighted residues and transitions
-    let pseudo = 1.0 / k as f32;
     for node in 0..=m {
         for x in 0..k {
-            hmm.mat[node][x] = pseudo;
-            hmm.ins[node][x] = pseudo;
+            hmm.mat[node][x] = 0.0;
+            hmm.ins[node][x] = 0.0;
         }
-        for t in 0..NTRANSITIONS {
-            hmm.t[node][t] = 0.01;
-        }
+        hmm.t[node] = [0.0; NTRANSITIONS];
     }
 
-    // Count observed residues weighted by PB weights
+    let traces = faux_trace_from_msa(&ax, &matassign, abc);
+
+    // Count observed residues and transitions from doctored faux traces,
+    // matching C's build.c -> p7_trace_FauxFromMSA() -> p7_trace_Doctor()
+    // -> p7_trace_Count() flow.
     for seq in 0..nseq {
         let w = weights[seq];
-        let mut node = 0;
-
-        for col in 0..msa.alen {
-            let pos = col + 1;
-            if pos >= ax[seq].len() - 1 {
-                break;
-            }
-            let residue = ax[seq][pos] as usize;
-
-            if matassign[col] {
-                // This column is a match state
-                let prev_node = node;
-                node += 1;
-
-                if residue < k {
-                    hmm.mat[node][residue] += w;
-                    hmm.t[prev_node][MM] += w;
-                } else if residue == gap as usize {
-                    hmm.t[prev_node][MD] += w;
-                }
-            } else {
-                // This column is an insert
-                if residue < k && node > 0 {
-                    hmm.ins[node][residue] += w;
-                    hmm.t[node][MI] += w * 0.1;
-                }
-            }
+        if traces[seq].n == 0 {
+            continue;
         }
+        count_trace(&mut hmm, &ax[seq], w, &traces[seq], abc);
     }
-
-    // Step 3: Normalize probabilities
-    for node in 1..=m {
-        // Match emissions
-        let mat_sum: f32 = hmm.mat[node].iter().take(k).sum();
-        if mat_sum > 0.0 {
-            for x in 0..k {
-                hmm.mat[node][x] /= mat_sum;
-            }
-        }
-
-        // Insert emissions
-        let ins_sum: f32 = hmm.ins[node].iter().take(k).sum();
-        if ins_sum > 0.0 {
-            for x in 0..k {
-                hmm.ins[node][x] /= ins_sum;
-            }
-        }
-    }
-
-    // Node 0 insert emissions = background
-    for x in 0..k {
-        hmm.ins[0][x] = bg.f[x];
-    }
-
-    // Normalize transitions
-    for node in 0..=m {
-        // Match transitions: MM + MI + MD = 1
-        let m_total = hmm.t[node][MM] + hmm.t[node][MI] + hmm.t[node][MD];
-        if m_total > 0.0 {
-            hmm.t[node][MM] /= m_total;
-            hmm.t[node][MI] /= m_total;
-            hmm.t[node][MD] /= m_total;
-        } else {
-            hmm.t[node][MM] = 1.0;
-            hmm.t[node][MI] = 0.0;
-            hmm.t[node][MD] = 0.0;
-        }
-
-        // Insert transitions: IM + II = 1
-        let i_total = hmm.t[node][IM] + hmm.t[node][II];
-        if i_total > 0.0 {
-            hmm.t[node][IM] /= i_total;
-            hmm.t[node][II] /= i_total;
-        } else {
-            hmm.t[node][IM] = 0.5;
-            hmm.t[node][II] = 0.5;
-        }
-
-        // Delete transitions: DM + DD = 1
-        let d_total = hmm.t[node][DM] + hmm.t[node][DD];
-        if d_total > 0.0 {
-            hmm.t[node][DM] /= d_total;
-            hmm.t[node][DD] /= d_total;
-        } else {
-            hmm.t[node][DM] = 0.5;
-            hmm.t[node][DD] = 0.5;
-        }
-    }
-
-    // Last node: no transitions out
-    hmm.t[m][MI] = 0.0;
-    hmm.t[m][MD] = 0.0;
-    hmm.t[m][MM] = 1.0;
-
-    // Set composition
-    for x in 0..k.min(MAXABET) {
-        hmm.compo[x] = bg.f[x];
-    }
-    hmm.flags |= P7H_COMPO;
 
     // Set consensus
     let mut cons = vec![b' '; m + 2];
@@ -308,17 +251,262 @@ pub fn build_hmm_from_msa(msa: &Msa, abc: &Alphabet, bg: &Bg, symfrac: f32) -> H
     hmm.flags |= P7H_MAP;
 
     // Store the training alignment checksum for hmmalign --mapali verification.
-    hmm.checksum = checksum_msa(msa);
+    hmm.checksum = checksum_msa(msa, abc);
     hmm.flags |= P7H_CHKSUM;
+
+    // Effective sequence number estimation acts on count HMMs, then the
+    // resulting ratio rescales counts before final parameterization.
+    let neff = crate::eweight::entropy_weight(&mut hmm, bg, None);
+    let scale = if hmm.nseq > 0 {
+        neff as f64 / hmm.nseq as f64
+    } else {
+        1.0
+    };
+    crate::eweight::scale_counts(&mut hmm, scale);
 
     // Apply Dirichlet priors to emission/transition counts
     crate::prior::apply_priors(&mut hmm);
 
-    // Effective sequence number estimation
-    crate::eweight::entropy_weight(&mut hmm, bg, None);
+    set_hmm_composition(&mut hmm);
 
     // E-value calibration by simulation
     crate::calibrate::calibrate(&mut hmm, abc, bg);
 
     hmm
+}
+
+fn set_hmm_composition(hmm: &mut Hmm) {
+    let mut mocc = vec![0.0_f32; hmm.m + 1];
+    let mut iocc = vec![0.0_f32; hmm.m + 1];
+
+    mocc[0] = 0.0;
+    if hmm.m >= 1 {
+        mocc[1] = hmm.t[0][MI] + hmm.t[0][MM];
+    }
+    for k in 2..=hmm.m {
+        mocc[k] = mocc[k - 1] * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI])
+            + (1.0 - mocc[k - 1]) * hmm.t[k - 1][DM];
+    }
+
+    if hmm.t[0][IM] > 0.0 {
+        iocc[0] = hmm.t[0][MI] / hmm.t[0][IM];
+    }
+    for k in 1..=hmm.m {
+        if hmm.t[k][IM] > 0.0 {
+            iocc[k] = mocc[k] * hmm.t[k][MI] / hmm.t[k][IM];
+        }
+    }
+
+    hmm.compo.fill(0.0);
+    for x in 0..hmm.abc_k {
+        hmm.compo[x] += hmm.ins[0][x] * iocc[0];
+    }
+    for k in 1..=hmm.m {
+        for x in 0..hmm.abc_k {
+            hmm.compo[x] += hmm.mat[k][x] * mocc[k];
+            hmm.compo[x] += hmm.ins[k][x] * iocc[k];
+        }
+    }
+
+    let sum: f32 = hmm.compo[..hmm.abc_k].iter().sum();
+    if sum > 0.0 {
+        for x in 0..hmm.abc_k {
+            hmm.compo[x] /= sum;
+        }
+    }
+    hmm.flags |= P7H_COMPO;
+}
+
+fn faux_trace_from_msa(ax: &[Vec<u8>], matassign: &[bool], abc: &Alphabet) -> Vec<Trace> {
+    let mut traces = Vec::with_capacity(ax.len());
+    for row in ax {
+        let mut tr = Trace::new();
+        tr.append(TraceState::B, 0, 0);
+
+        let mut k = 0usize;
+        for apos in 1..=matassign.len() {
+            let sym = row[apos];
+            if matassign[apos - 1] {
+                k += 1;
+                if abc.is_residue(sym) || sym == abc.nonresidue_code() {
+                    tr.append(TraceState::M, k, apos);
+                } else if abc.is_gap(sym) {
+                    tr.append(TraceState::D, k, 0);
+                } else if abc.is_missing(sym) && tr.st.last().copied() != Some(TraceState::X) {
+                    tr.append(TraceState::X, k, 0);
+                }
+            } else if abc.is_residue(sym) || sym == abc.nonresidue_code() {
+                tr.append(TraceState::I, k, apos);
+            } else if abc.is_missing(sym) && tr.st.last().copied() != Some(TraceState::X) {
+                tr.append(TraceState::X, k, 0);
+            }
+        }
+        tr.append(TraceState::E, 0, 0);
+        tr.m = k;
+        tr.l = matassign.len();
+        doctor_trace(&mut tr);
+        traces.push(tr);
+    }
+    traces
+}
+
+fn mark_fragments_old(ax: &mut [Vec<u8>], abc: &Alphabet, alen: usize, fragthresh: f32) {
+    let missing = abc.missing_code();
+    for row in ax {
+        let rlen = row
+            .iter()
+            .skip(1)
+            .take(alen)
+            .filter(|&&sym| abc.is_residue(sym))
+            .count();
+        if (rlen as f32) <= fragthresh * alen as f32 {
+            for pos in 1..=alen {
+                if abc.is_residue(row[pos]) {
+                    break;
+                }
+                row[pos] = missing;
+            }
+            for pos in (1..=alen).rev() {
+                if abc.is_residue(row[pos]) {
+                    break;
+                }
+                row[pos] = missing;
+            }
+        }
+    }
+}
+
+fn doctor_trace(tr: &mut Trace) {
+    let mut new_st = Vec::with_capacity(tr.n);
+    let mut new_k = Vec::with_capacity(tr.n);
+    let mut new_i = Vec::with_capacity(tr.n);
+    let mut opos = 0usize;
+
+    while opos < tr.n {
+        if opos + 1 < tr.n && tr.st[opos] == TraceState::D && tr.st[opos + 1] == TraceState::I {
+            new_st.push(TraceState::M);
+            new_k.push(tr.k[opos]);
+            new_i.push(tr.i[opos + 1]);
+            opos += 2;
+        } else if opos + 1 < tr.n
+            && tr.st[opos] == TraceState::I
+            && tr.st[opos + 1] == TraceState::D
+        {
+            new_st.push(TraceState::M);
+            new_k.push(tr.k[opos + 1]);
+            new_i.push(tr.i[opos]);
+            opos += 2;
+        } else {
+            new_st.push(tr.st[opos]);
+            new_k.push(tr.k[opos]);
+            new_i.push(tr.i[opos]);
+            opos += 1;
+        }
+    }
+
+    tr.st = new_st;
+    tr.k = new_k;
+    tr.i = new_i;
+    tr.n = tr.st.len();
+}
+
+fn fcount(abc: &Alphabet, ct: &mut [f32], sym: u8, wt: f32) {
+    if abc.is_canonical(sym) || abc.is_gap(sym) {
+        if let Some(slot) = ct.get_mut(sym as usize) {
+            *slot += wt;
+        }
+    } else if abc.is_missing(sym) || sym == abc.nonresidue_code() {
+    } else if abc.is_degenerate(sym) {
+        let denom = abc.ndegen[sym as usize] as f32;
+        if denom > 0.0 {
+            for y in 0..abc.k {
+                if abc.degen[sym as usize][y] {
+                    ct[y] += wt / denom;
+                }
+            }
+        }
+    }
+}
+
+fn count_trace(hmm: &mut Hmm, dsq: &[u8], wt: f32, tr: &Trace, abc: &Alphabet) {
+    let mut z1 = 0usize;
+    let mut z2 = tr.n.saturating_sub(1);
+
+    if tr.n >= 2 && tr.st[0] == TraceState::B && tr.st[1] == TraceState::X {
+        for z in 2..tr.n.saturating_sub(1) {
+            if tr.st[z] == TraceState::M {
+                z1 = z;
+                break;
+            }
+        }
+    }
+    if tr.n >= 2 && tr.st[tr.n - 1] == TraceState::E && tr.st[tr.n - 2] == TraceState::X {
+        for z in (1..=tr.n.saturating_sub(3)).rev() {
+            if tr.st[z] == TraceState::M {
+                z2 = z;
+                break;
+            }
+        }
+    }
+
+    for z in z1..z2 {
+        if tr.st[z] == TraceState::X {
+            continue;
+        }
+
+        let st = tr.st[z];
+        let st2 = tr.st[z + 1];
+        let k = tr.k[z];
+        let k2 = tr.k[z + 1];
+        let i = tr.i[z];
+
+        if st == TraceState::M {
+            fcount(abc, &mut hmm.mat[k], dsq[i], wt);
+        } else if st == TraceState::I {
+            fcount(abc, &mut hmm.ins[k], dsq[i], wt);
+        }
+
+        if st2 == TraceState::X {
+            continue;
+        }
+
+        if st == TraceState::B {
+            if st2 == TraceState::M && k2 > 1 {
+                hmm.t[0][MD] += wt;
+                for ktmp in 1..k2.saturating_sub(1) {
+                    hmm.t[ktmp][DD] += wt;
+                }
+                hmm.t[k2 - 1][DM] += wt;
+            } else {
+                match st2 {
+                    TraceState::M => hmm.t[0][MM] += wt,
+                    TraceState::I => hmm.t[0][MI] += wt,
+                    TraceState::D => hmm.t[0][MD] += wt,
+                    _ => {}
+                }
+            }
+        } else if st == TraceState::M {
+            match st2 {
+                TraceState::M => hmm.t[k][MM] += wt,
+                TraceState::I => hmm.t[k][MI] += wt,
+                TraceState::D => hmm.t[k][MD] += wt,
+                TraceState::E => hmm.t[k][MM] += wt,
+                _ => {}
+            }
+        } else if st == TraceState::I {
+            match st2 {
+                TraceState::M => hmm.t[k][IM] += wt,
+                TraceState::I => hmm.t[k][II] += wt,
+                TraceState::E => hmm.t[k][IM] += wt,
+                _ => {}
+            }
+        } else if st == TraceState::D {
+            match st2 {
+                TraceState::M => hmm.t[k][DM] += wt,
+                TraceState::D => hmm.t[k][DD] += wt,
+                TraceState::E => hmm.t[k][DM] += wt,
+                _ => {}
+            }
+        }
+    }
 }

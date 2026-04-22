@@ -19,6 +19,7 @@ pub enum State {
     C = 8,  // C-terminal
     T = 9,  // Terminal
     J = 10, // Join (multi-domain)
+    X = 11, // Missing data / fragment marker
 }
 
 /// A traceback path through the HMM.
@@ -32,6 +33,10 @@ pub struct Trace {
     pub i: Vec<usize>,
     /// Trace length
     pub n: usize,
+    /// Model length for traces constructed relative to a model/MSA
+    pub m: usize,
+    /// Sequence/alignment coordinate length
+    pub l: usize,
 }
 
 impl Trace {
@@ -41,6 +46,8 @@ impl Trace {
             k: Vec::new(),
             i: Vec::new(),
             n: 0,
+            m: 0,
+            l: 0,
         }
     }
 
@@ -64,6 +71,10 @@ impl Trace {
             State::S | State::B | State::E | State::T => {
                 self.k.push(0);
                 self.i.push(0);
+            }
+            State::X => {
+                self.k.push(k);
+                self.i.push(i);
             }
             State::D => {
                 self.k.push(k);

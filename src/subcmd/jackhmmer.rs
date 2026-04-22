@@ -17,6 +17,7 @@ use hmmer_pure_rs::seqmodel;
 use hmmer_pure_rs::sequence::{self, Sequence};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
+use hmmer_pure_rs::trace::{State, Trace};
 
 #[derive(Parser)]
 #[command(
@@ -38,8 +39,12 @@ struct Args {
     e_value: f64,
 
     /// Include sequences <= this E-value threshold
-    #[arg(long = "incE", default_value = "0.01")]
+    #[arg(long = "incE", default_value = "0.001")]
     inc_e: f64,
+
+    /// Include domains <= this E-value threshold
+    #[arg(long = "incdomE", default_value = "0.001")]
+    incdom_e: f64,
 
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
@@ -60,6 +65,14 @@ struct Args {
     /// Save per-domain hits to tabular file
     #[arg(long = "domtblout")]
     domtblout: Option<PathBuf>,
+
+    /// Save HMM checkpoints to files <f>-<iteration>.hmm
+    #[arg(long = "chkhmm")]
+    chkhmm: Option<PathBuf>,
+
+    /// Save alignment checkpoints to files <f>-<iteration>.sto
+    #[arg(long = "chkali")]
+    chkali: Option<PathBuf>,
 }
 
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
@@ -129,8 +142,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
     }
     let z = targets.len() as f64;
+    let query_tr = exact_match_query_trace(query_sq.n);
 
-    let mut prev_included: Vec<String> = Vec::new();
+    let mut prev_included_names: Vec<String> = Vec::new();
+    let mut prev_hmm: Option<hmmer_pure_rs::hmm::Hmm> = None;
     let mut final_hits: Option<TopHits> = None;
     let mut final_domz: Option<f64> = None;
     let mut final_model_len: Option<usize> = None;
@@ -151,47 +166,30 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 0.4,
             )
         } else {
-            // Subsequent iterations: build from MSA of included hits
-            // Create MSA from query + included hits
-            let mut aseqs = Vec::new();
-            let mut sqnames = Vec::new();
+            let prev_hmm = prev_hmm
+                .as_ref()
+                .expect("jackhmmer rebuild requested without previous-round HMM");
+            let prev_hits = final_hits
+                .as_ref()
+                .expect("jackhmmer rebuild requested without previous-round hits");
+            let msa = hmmer_pure_rs::tophits::included_alignment(
+                prev_hits,
+                &abc,
+                prev_hmm.m,
+                Some((&query_sq, &query_tr)),
+                &format!("{}-i{}", query_sq.name, iteration - 1),
+            );
 
-            // Add query
-            let query_text = abc.textize(&query_sq.dsq, query_sq.n);
-            aseqs.push(query_text.into_bytes());
-            sqnames.push(query_sq.name.clone());
-
-            // Add included hits (their raw sequences)
-            for target in &targets {
-                if prev_included.contains(&target.name) {
-                    let text = abc.textize(&target.dsq, target.n);
-                    aseqs.push(text.into_bytes());
-                    sqnames.push(target.name.clone());
-                }
-            }
-
-            if aseqs.len() <= 1 {
+            let Some(msa) = msa else {
                 writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
                 break;
-            }
-
-            // Pad sequences to same length for MSA
-            let max_len = aseqs.iter().map(|s| s.len()).max().unwrap_or(0);
-            for seq in &mut aseqs {
-                seq.resize(max_len, b'-');
-            }
-
-            let msa = Msa {
-                name: format!("{}-i{}", query_sq.name, iteration),
-                sqname: sqnames,
-                aseq: aseqs,
-                nseq: prev_included.len() + 1,
-                alen: max_len,
-                rf: None,
             };
-
-            builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5)
+            builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true)
         };
+
+        if let Some(prefix) = &args.chkhmm {
+            write_hmm_checkpoint(prefix, iteration, &hmm);
+        }
 
         // Configure profile and search
         let mut local_bg = bg.clone();
@@ -233,6 +231,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             tmp_pli.do_null2 = !args.nonull2;
             tmp_pli.e_value_threshold = args.e_value;
             tmp_pli.inc_e = args.inc_e;
+            tmp_pli.inc_dome = args.incdom_e;
             th.threshold(&tmp_pli, z, z);
             let domz = th.nreported.max(1) as f64;
             if domz != z {
@@ -263,7 +262,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         )
         .unwrap();
 
-        let mut new_included = Vec::new();
+        let mut new_included_names = Vec::new();
         for hit in &th.hits {
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
@@ -290,7 +289,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             .unwrap();
 
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0 {
-                new_included.push(hit.name.clone());
+                new_included_names.push(hit.name.clone());
             }
         }
 
@@ -304,14 +303,27 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out).unwrap();
         final_hits = Some(th);
         final_model_len = Some(hmm.m);
+        prev_hmm = Some(hmm.clone());
+
+        if let Some(prefix) = &args.chkali {
+            if let Some(msa) = hmmer_pure_rs::tophits::included_alignment(
+                final_hits.as_ref().unwrap(),
+                &abc,
+                hmm.m,
+                Some((&query_sq, &query_tr)),
+                &format!("{}-i{}", query_sq.name, iteration),
+            ) {
+                write_msa_checkpoint(prefix, iteration, &msa);
+            }
+        }
 
         // Check convergence
-        let n_new = new_included
+        let n_new = new_included_names
             .iter()
-            .filter(|name| !prev_included.contains(name))
+            .filter(|name| !prev_included_names.iter().any(|prev| prev == *name))
             .count();
 
-        if n_new == 0 && new_included.len() <= prev_included.len() && iteration > 1 {
+        if n_new == 0 && new_included_names.len() <= prev_included_names.len() && iteration > 1 {
             writeln!(out, "@@ CONVERGED (in {} rounds).", iteration).unwrap();
             break;
         }
@@ -320,13 +332,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             writeln!(
                 out,
                 "@@ {} included, {} new. Continuing to next round.",
-                new_included.len(),
+                new_included_names.len(),
                 n_new
             )
             .unwrap();
         }
 
-        prev_included = new_included;
+        prev_included_names = new_included_names;
     }
 
     if let Some(ref mut f) = tblout_file {
@@ -345,4 +357,84 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     writeln!(out, "//").unwrap();
     writeln!(out, "[ok]").unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+fn exact_match_query_trace(model_len: usize) -> Trace {
+    let mut tr = Trace::new();
+    tr.append(State::S, 0, 0);
+    tr.append(State::N, 0, 0);
+    tr.append(State::B, 0, 0);
+    for i in 1..=model_len {
+        tr.append(State::M, i, i);
+    }
+    tr.append(State::E, 0, 0);
+    tr.append(State::C, 0, 0);
+    tr.append(State::T, 0, 0);
+    tr
+}
+
+fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs::hmm::Hmm) {
+    let path = checkpoint_path(prefix, iteration, "hmm");
+    let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
+        eprintln!("Error creating HMM checkpoint {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+    hmmer_pure_rs::hmmfile::write_hmm(&mut file, hmm).unwrap_or_else(|e| {
+        eprintln!("Error writing HMM checkpoint {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+}
+
+fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
+    let path = checkpoint_path(prefix, iteration, "sto");
+    let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
+        eprintln!("Error creating alignment checkpoint {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+    write_stockholm_msa(&mut file, msa);
+}
+
+fn checkpoint_path(prefix: &PathBuf, iteration: usize, ext: &str) -> PathBuf {
+    let mut os = prefix.as_os_str().to_os_string();
+    os.push(format!("-{}.{}", iteration, ext));
+    PathBuf::from(os)
+}
+
+fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
+    let name_width = msa
+        .sqname
+        .iter()
+        .map(|name| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("#=GC RF".len())
+        .max(12);
+
+    writeln!(out, "# STOCKHOLM 1.0").unwrap();
+    writeln!(out).unwrap();
+    if !msa.name.is_empty() {
+        writeln!(out, "#=GF ID {}", msa.name).unwrap();
+    }
+
+    for (name, row) in msa.sqname.iter().zip(msa.aseq.iter()) {
+        writeln!(
+            out,
+            "{:<width$} {}",
+            name,
+            String::from_utf8_lossy(row),
+            width = name_width
+        )
+        .unwrap();
+    }
+    if let Some(rf) = &msa.rf {
+        writeln!(
+            out,
+            "{:<width$} {}",
+            "#=GC RF",
+            String::from_utf8_lossy(rf),
+            width = name_width
+        )
+        .unwrap();
+    }
+    writeln!(out, "//").unwrap();
 }

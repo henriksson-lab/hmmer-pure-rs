@@ -7,10 +7,12 @@ update this file in the same change.
 
 ## Remaining Feature Checklist
 
-- [ ] `hmmalign`: replace the current Viterbi-only placeholder with real
-      traceback and Stockholm/model-guided gapped alignment output.
-- [ ] `phmmer`: make single-sequence build/profile scoring C-identical so
-      absolute bit scores and E-values match, not just hit ordering.
+- [ ] `phmmer`: finish the remaining single-sequence calibration/build parity
+      work on smaller fixtures where exact bundled-C scores still drift.
+- [ ] `jackhmmer`: make later-round iterative rebuilds C-identical. Rebuilds
+      now use model-guided alignment against the previous-round HMM instead of
+      raw sequence padding, but the iterative `hmmbuild` path is still
+      simplified and final-round bundled-C scores remain lower in Rust.
 - [ ] Domain definition: finish the remaining SIMD/full-matrix Forward,
       Backward, and Decoding work needed to remove the generic DP bottleneck in
       per-envelope rescoring.
