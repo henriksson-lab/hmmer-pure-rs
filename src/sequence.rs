@@ -149,8 +149,14 @@ impl<R: Read> SeqFile<R> {
                     break; // end of record
                 }
 
-                if trimmed.starts_with("DE ") && sq.desc.is_empty() {
-                    sq.desc = trimmed[5..].trim().to_string();
+                if trimmed.starts_with("DE ") {
+                    let de = trimmed[5..].trim();
+                    if !de.is_empty() {
+                        if !sq.desc.is_empty() {
+                            sq.desc.push(' ');
+                        }
+                        sq.desc.push_str(de);
+                    }
                 } else if trimmed.starts_with("AC ") && sq.acc.is_empty() {
                     let acc = trimmed[5..].trim().trim_end_matches(';');
                     sq.acc = acc.split(';').next().unwrap_or("").trim().to_string();
@@ -293,6 +299,8 @@ mod tests {
         let mut sq = Sequence::new();
         assert!(sqf.read(&mut sq).unwrap());
         assert_eq!(sq.name, "7LESS_DROME");
+        assert_eq!(sq.acc, "P13368");
+        assert_eq!(sq.desc, "RecName: Full=Protein sevenless; EC=2.7.10.1;");
         assert!(
             sq.n > 2500,
             "7LESS_DROME should be >2500 residues, got {}",

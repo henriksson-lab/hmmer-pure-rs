@@ -44,6 +44,22 @@ struct Args {
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
     cpu: usize,
+
+    /// Turn off composition bias filter
+    #[arg(long = "nobias")]
+    nobias: bool,
+
+    /// Turn off biased composition score corrections
+    #[arg(long = "nonull2")]
+    nonull2: bool,
+
+    /// Save per-sequence hits to tabular file
+    #[arg(long = "tblout")]
+    tblout: Option<PathBuf>,
+
+    /// Save per-domain hits to tabular file
+    #[arg(long = "domtblout")]
+    domtblout: Option<PathBuf>,
 }
 
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
@@ -62,6 +78,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let mut tblout_file = args.tblout.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating tblout file: {}", e);
+            std::process::exit(1);
+        })
+    });
+    let mut domtblout_file = args.domtblout.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating domtblout file: {}", e);
+            std::process::exit(1);
+        })
+    });
 
     writeln!(
         out,
@@ -103,6 +131,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let z = targets.len() as f64;
 
     let mut prev_included: Vec<String> = Vec::new();
+    let mut final_hits: Option<TopHits> = None;
+    let mut final_domz: Option<f64> = None;
+    let mut final_model_len: Option<usize> = None;
 
     for iteration in 1..=args.max_iterations {
         writeln!(out, "@@ Round: {}", iteration).unwrap();
@@ -178,6 +209,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 let mut lgm = gm.clone();
                 let mut lom = om.clone();
                 let mut lpli = Pipeline::new();
+                lpli.do_biasfilter = !args.nobias;
+                lpli.do_null2 = !args.nonull2;
                 lpli.new_model(&lgm);
 
                 lb.set_length(sq.n);
@@ -196,11 +229,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
+            tmp_pli.do_biasfilter = !args.nobias;
+            tmp_pli.do_null2 = !args.nonull2;
             tmp_pli.e_value_threshold = args.e_value;
             tmp_pli.inc_e = args.inc_e;
             th.threshold(&tmp_pli, z, z);
+            let domz = th.nreported.max(1) as f64;
+            if domz != z {
+                th.threshold(&tmp_pli, z, domz);
+            }
+            final_domz = Some(domz);
         }
-
         // Output results for this round
         writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
         writeln!(
@@ -263,6 +302,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             .unwrap();
         }
         writeln!(out).unwrap();
+        final_hits = Some(th);
+        final_model_len = Some(hmm.m);
 
         // Check convergence
         let n_new = new_included
@@ -286,6 +327,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
 
         prev_included = new_included;
+    }
+
+    if let Some(ref mut f) = tblout_file {
+        if let Some(ref th) = final_hits {
+            crate::subcmd::hmmsearch::write_tblout(f, &query_sq.name, None, th, z);
+        }
+        f.flush().unwrap();
+    }
+    if let Some(ref mut f) = domtblout_file {
+        if let (Some(ref th), Some(domz), Some(qlen)) = (&final_hits, final_domz, final_model_len) {
+            crate::subcmd::hmmsearch::write_domtblout(f, &query_sq.name, None, qlen, th, z, domz);
+        }
+        f.flush().unwrap();
     }
 
     writeln!(out, "//").unwrap();

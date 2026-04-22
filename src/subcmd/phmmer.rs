@@ -47,6 +47,14 @@ struct Args {
     #[arg(long = "cpu", default_value = "2")]
     cpu: usize,
 
+    /// Turn off composition bias filter
+    #[arg(long = "nobias")]
+    nobias: bool,
+
+    /// Turn off biased composition score corrections
+    #[arg(long = "nonull2")]
+    nonull2: bool,
+
     /// Save per-sequence hits to tabular file
     #[arg(long = "tblout")]
     tblout: Option<PathBuf>,
@@ -163,6 +171,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 let mut lgm = gm.clone();
                 let mut lom = om.clone();
                 let mut lpli = Pipeline::new();
+                lpli.do_biasfilter = !args.nobias;
+                lpli.do_null2 = !args.nonull2;
                 lpli.new_model(&lgm);
 
                 lb.set_length(sq.n);
@@ -182,6 +192,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
+            tmp_pli.do_biasfilter = !args.nobias;
+            tmp_pli.do_null2 = !args.nonull2;
             tmp_pli.e_value_threshold = args.e_value;
             tmp_pli.inc_e = args.inc_e;
             th.threshold(&tmp_pli, z, z);

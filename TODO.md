@@ -14,9 +14,9 @@ update this file in the same change.
 - [ ] Domain definition: finish the remaining SIMD/full-matrix Forward,
       Backward, and Decoding work needed to remove the generic DP bottleneck in
       per-envelope rescoring.
-- [ ] Sequence-level null2 bias: match C's full-sequence posterior-decoding
-      route for multi-domain hits instead of deriving it from summed per-domain
-      corrections.
+- [ ] Sequence-level null2 bias: broaden validation beyond the current checked
+      fixtures and only reopen algorithmic work if a real C/Rust mismatch is
+      reproduced on a committed regression.
 - [ ] Keep command-surface parity honest: whenever a command exists but is not
       behaviorally complete, document the limitation in both `README.md` and
       the relevant subcommand source file until it is fixed.
@@ -961,3 +961,71 @@ cases to byte-identical output.
 - Regression coverage now lives in
   `tests/phmmer_integration_tests.rs`, covering the small 20aa fixture and
   the real-world `HBB_HUMAN` vs `globins45.fa` case.
+
+### 8.9 jackhmmer `--tblout` was missing
+
+- Fixed 2026-04-22. `src/subcmd/jackhmmer.rs` did not accept or write
+  `--tblout`, even though C jackhmmer supports per-sequence tabular output.
+- The Rust port now writes the final iteration's hitlist through the shared
+  `write_tblout()` helper, matching C's behavior of reporting the converged
+  or last round rather than appending every intermediate round.
+- Regression coverage now lives in
+  `tests/jackhmmer_integration_tests.rs`, with exact 20aa and globins
+  final-round `--tblout` checks alongside the round-wise stdout cases.
+
+### 8.10 jackhmmer `--domtblout` was missing
+
+- Fixed 2026-04-22. `src/subcmd/jackhmmer.rs` did not accept or write
+  `--domtblout`, even though C jackhmmer supports final-round per-domain
+  tabular output.
+- The Rust port now writes final-round domain tables through the shared
+  `write_domtblout()` helper. It keeps the original query name, uses the
+  final round's model length for `qlen`, and re-runs thresholding with
+  `domZ = nreported` so domain-level E-values and inclusion flags follow the
+  same two-pass shape as `hmmsearch`.
+- Regression coverage now lives in
+  `tests/jackhmmer_integration_tests.rs`, with exact 20aa and globins
+  final-round `--domtblout` checks.
+
+### 8.11 phmmer/jackhmmer `--nobias` and `--nonull2` were not exposed
+
+- Fixed 2026-04-22. `src/subcmd/phmmer.rs` and `src/subcmd/jackhmmer.rs`
+  were still missing the standard bias-control flags even though
+  `Pipeline` already supports them.
+- Both subcommands now parse `--nobias` and `--nonull2` and propagate them
+  into each per-target pipeline instance before running the search. The
+  thresholding pass also inherits `do_biasfilter`/`do_null2`, so reported and
+  included flags stay consistent with the searched scores.
+- Regression coverage now lives in
+  `tests/phmmer_integration_tests.rs` and
+  `tests/jackhmmer_integration_tests.rs`, with globins `--nonull2`
+  score/bias checks plus `--nobias` acceptance smoke tests.
+
+### 8.12 multi-domain sequence-level null2 behavior now has an exact guardrail
+
+- Added 2026-04-22: `tests/rust_hmmsearch_tests.rs` now includes an explicit
+  `fn3.hmm` vs `7LESS_DROME` regression that pins the current multi-domain
+  full-sequence behavior:
+  - default run reports `1.9e-57 / 178.0 / bias 0.4`
+  - `--nonull2` reports `1.4e-57 / 178.4 / bias 0.0`
+  - both runs preserve the same 9-domain structure and alignment ranges
+- This does not fix the remaining approximation, but it turns the TODO from a
+  README-only note into a concrete protein regression for future validation.
+- Follow-up after checking the bundled C binary: Rust and C currently agree on
+  that guarded case, default and `--nonull2`. Treat this area as "needs broader
+  evidence" rather than a known live mismatch until another committed fixture
+  reproduces a real drift.
+
+### 8.13 hmmsearch `--pfamtblout` parity and coverage
+
+- Fixed 2026-04-22. `src/subcmd/hmmsearch.rs` had an incomplete Pfam writer:
+  it only emitted the sequence-score section, did not force alignment
+  coordinates under `--noali`, and grouped domain rows per hit instead of using
+  C's global per-query domain-score ordering.
+- `write_pfamtblout()` now emits both C-style sections, uses the standard
+  HMMER E-value formatter, requests alignment coordinates whenever
+  `--pfamtblout` is active, and sorts reported domains globally by domain
+  bitscore within each query block.
+- Regression coverage now includes exact bundled-C parity in
+  `tests/rust_hmmsearch_tests.rs` for `20aa` and `fn3`, plus a real-world
+  GECCO multi-query case in `tests/real_world_regression_tests.rs`.

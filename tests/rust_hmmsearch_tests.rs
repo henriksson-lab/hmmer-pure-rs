@@ -31,6 +31,10 @@ fn test_path(relative: &str) -> String {
     format!("{}/{}", project_root(), relative)
 }
 
+fn c_hmmsearch_path() -> String {
+    test_path("hmmer/src/hmmsearch")
+}
+
 /// Run hmmsearch and return (stdout, tblout_content).
 fn run_hmmsearch(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +94,57 @@ fn run_hmmsearch_dom(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, St
     (stdout, tbl, domtbl)
 }
 
+/// Run Rust hmmsearch with pfamtblout and return the file content.
+fn run_hmmsearch_pfamtbl(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec![
+        "search",
+        "--noali",
+        "--pfamtblout",
+        pfamtblout.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra_args);
+    args.push(hmm);
+    args.push(seqdb);
+
+    let output = Command::new(binary_path("hmmer"))
+        .args(&args)
+        .output()
+        .expect("failed to run hmmer search");
+
+    assert!(
+        output.status.success(),
+        "hmmer search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::read_to_string(&pfamtblout).unwrap_or_default()
+}
+
+/// Run bundled C hmmsearch with pfamtblout and return the file content.
+fn run_c_hmmsearch_pfamtbl(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["--noali", "--pfamtblout", pfamtblout.to_str().unwrap()];
+    args.extend_from_slice(extra_args);
+    args.push(hmm);
+    args.push(seqdb);
+
+    let output = Command::new(c_hmmsearch_path())
+        .args(&args)
+        .output()
+        .expect("failed to run bundled C hmmsearch");
+
+    assert!(
+        output.status.success(),
+        "bundled C hmmsearch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::read_to_string(&pfamtblout).unwrap_or_default()
+}
+
 /// Parse tblout into Vec<(target_name, query_name, evalue, score)>.
 fn parse_tblout(content: &str) -> Vec<(String, String, f64, f64)> {
     content
@@ -140,6 +195,40 @@ fn parse_domtblout(content: &str) -> Vec<DomRecord> {
         .collect()
 }
 
+fn parse_domtblout_core_rows(content: &str) -> Vec<Vec<String>> {
+    content
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .filter_map(|line| {
+            let fields: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+            if fields.len() < 22 {
+                return None;
+            }
+            Some(fields)
+        })
+        .collect()
+}
+
+fn parse_pfamtblout_rows(content: &str) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    let mut seq_rows = Vec::new();
+    let mut dom_rows = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+
+        let fields: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+        if fields.len() >= 12 {
+            dom_rows.push(fields);
+        } else {
+            seq_rows.push(fields);
+        }
+    }
+
+    (seq_rows, dom_rows)
+}
+
 /// Extract hit names from stdout hit table.
 fn extract_hit_names(output: &str) -> Vec<String> {
     let mut names = Vec::new();
@@ -172,6 +261,30 @@ fn parse_golden_tblout(path: &str) -> HashMap<(String, String), (f64, f64)> {
     let mut map = HashMap::new();
     for (target, query, evalue, score) in parse_tblout(&content) {
         map.insert((target, query), (evalue, score));
+    }
+    map
+}
+
+/// Parse golden tblout into a map of (target, query) -> (evalue, score, bias).
+fn parse_golden_tblout_with_bias(
+    path: &str,
+) -> HashMap<(String, String), (String, String, String)> {
+    let content = std::fs::read_to_string(path).unwrap();
+    let mut map = HashMap::new();
+    for line in content
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert!(fields.len() >= 7, "tblout line too short: {}", line);
+        map.insert(
+            (fields[0].to_string(), fields[2].to_string()),
+            (
+                fields[4].to_string(),
+                fields[5].to_string(),
+                fields[6].to_string(),
+            ),
+        );
     }
     map
 }
@@ -330,6 +443,57 @@ fn test_fn3_multi_domain() {
         best_score > 35.0,
         "Best domain score should be > 35, got {:.1}",
         best_score
+    );
+}
+
+#[test]
+fn test_fn3_multi_domain_nonull2_zeroes_sequence_bias_but_keeps_domain_structure() {
+    let (stdout_default, _tbl_default, domtbl_default) = run_hmmsearch_dom(
+        &test_path("hmmer/tutorial/fn3.hmm"),
+        &test_path("hmmer/tutorial/7LESS_DROME"),
+        &[],
+    );
+    let (stdout_nonull2, _tbl_nonull2, domtbl_nonull2) = run_hmmsearch_dom(
+        &test_path("hmmer/tutorial/fn3.hmm"),
+        &test_path("hmmer/tutorial/7LESS_DROME"),
+        &["--nonull2"],
+    );
+
+    assert!(
+        stdout_default.contains("1.9e-57  178.0   0.4"),
+        "default fn3 multi-domain sequence score/bias drifted:\n{}",
+        stdout_default
+    );
+    assert!(
+        stdout_nonull2.contains("1.4e-57  178.4   0.0"),
+        "--nonull2 fn3 multi-domain sequence score/bias drifted:\n{}",
+        stdout_nonull2
+    );
+
+    let doms_default = parse_domtblout(&domtbl_default);
+    let doms_nonull2 = parse_domtblout(&domtbl_nonull2);
+    assert_eq!(
+        doms_default.len(),
+        doms_nonull2.len(),
+        "--nonull2 should not change the number of fn3 domains in 7LESS_DROME"
+    );
+    assert_eq!(
+        doms_default.len(),
+        9,
+        "expected stable 9-domain fn3 structure on 7LESS_DROME"
+    );
+
+    let default_ranges: Vec<(usize, usize)> = doms_default
+        .iter()
+        .map(|d| (d.ali_from, d.ali_to))
+        .collect();
+    let nonull2_ranges: Vec<(usize, usize)> = doms_nonull2
+        .iter()
+        .map(|d| (d.ali_from, d.ali_to))
+        .collect();
+    assert_eq!(
+        default_ranges, nonull2_ranges,
+        "--nonull2 should preserve the multi-domain alignment structure"
     );
 }
 
@@ -597,6 +761,57 @@ fn test_score_accuracy_gecco_pfam5() {
     check_scores_close(&golden, &rust_hits, 15.0, "gecco_pfam5 scores");
 }
 
+#[test]
+fn test_exact_tblout_score_bias_parity_on_representative_goldens() {
+    let cases = [
+        (
+            "20aa",
+            test_path("tests/golden/20aa.tblout"),
+            test_path("hmmer/testsuite/20aa.hmm"),
+            test_path("hmmer/testsuite/20aa-alitest.fa"),
+        ),
+        (
+            "globins4",
+            test_path("tests/golden/globins4_vs_globins45.tblout"),
+            test_path("hmmer/tutorial/globins4.hmm"),
+            test_path("hmmer/tutorial/globins45.fa"),
+        ),
+        (
+            "fn3",
+            test_path("tests/golden/fn3_vs_7less.tblout"),
+            test_path("hmmer/tutorial/fn3.hmm"),
+            test_path("hmmer/tutorial/7LESS_DROME"),
+        ),
+    ];
+
+    for (label, golden_path, hmm_path, seqdb_path) in cases {
+        let golden = parse_golden_tblout_with_bias(&golden_path);
+        let (_stdout, rust_tbl) = run_hmmsearch(&hmm_path, &seqdb_path, &[]);
+
+        let rust_rows: HashMap<(String, String), (String, String, String)> = rust_tbl
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                (
+                    (fields[0].to_string(), fields[2].to_string()),
+                    (
+                        fields[4].to_string(),
+                        fields[5].to_string(),
+                        fields[6].to_string(),
+                    ),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            rust_rows, golden,
+            "{} tblout score/bias rows diverged from the committed C golden",
+            label
+        );
+    }
+}
+
 // ============================================================
 // 4. Output format tests
 // ============================================================
@@ -716,6 +931,70 @@ fn test_domtblout_column_format() {
             .parse()
             .unwrap_or_else(|_| panic!("ali_to not parseable: '{}'", fields[18]));
         assert!(to > from, "ali_to ({}) should be > ali_from ({})", to, from);
+    }
+}
+
+#[test]
+fn test_exact_domtblout_parity_on_committed_goldens() {
+    let cases = [
+        (
+            "20aa",
+            test_path("tests/golden/hmmsearch_20aa.domtblout"),
+            test_path("hmmer/testsuite/20aa.hmm"),
+            test_path("hmmer/testsuite/20aa-alitest.fa"),
+        ),
+        (
+            "fn3",
+            test_path("tests/golden/hmmsearch_fn3.domtblout"),
+            test_path("hmmer/tutorial/fn3.hmm"),
+            test_path("hmmer/tutorial/7LESS_DROME"),
+        ),
+        (
+            "caudal",
+            test_path("tests/golden/hmmsearch_caudal.domtblout"),
+            test_path("hmmer/testsuite/Caudal_act.hmm"),
+            test_path("hmmer/testsuite/3box-alitest.fa"),
+        ),
+    ];
+
+    for (label, golden_path, hmm_path, seqdb_path) in cases {
+        let golden = std::fs::read_to_string(golden_path).unwrap();
+        let (_stdout, _tbl, rust_domtbl) = run_hmmsearch_dom(&hmm_path, &seqdb_path, &[]);
+
+        assert_eq!(
+            parse_domtblout_core_rows(&rust_domtbl),
+            parse_domtblout_core_rows(&golden),
+            "{} domtblout rows diverged from committed C golden output",
+            label
+        );
+    }
+}
+
+#[test]
+fn test_pfamtblout_matches_bundled_c_on_small_fixtures() {
+    let cases = [
+        (
+            "20aa",
+            test_path("hmmer/testsuite/20aa.hmm"),
+            test_path("hmmer/testsuite/20aa-alitest.fa"),
+        ),
+        (
+            "fn3",
+            test_path("hmmer/tutorial/fn3.hmm"),
+            test_path("hmmer/tutorial/7LESS_DROME"),
+        ),
+    ];
+
+    for (label, hmm_path, seqdb_path) in cases {
+        let rust = run_hmmsearch_pfamtbl(&hmm_path, &seqdb_path, &[]);
+        let c = run_c_hmmsearch_pfamtbl(&hmm_path, &seqdb_path, &[]);
+
+        assert_eq!(
+            parse_pfamtblout_rows(&rust),
+            parse_pfamtblout_rows(&c),
+            "{} pfamtblout rows diverged from bundled C hmmsearch",
+            label
+        );
     }
 }
 

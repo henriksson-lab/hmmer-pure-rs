@@ -44,7 +44,7 @@ The SIMD-accelerated filter pipeline (MSV → bias → Viterbi → Forward) matc
 | Domain definition: Decoding | 7% | **No** | Posterior probabilities |
 | Null2 bias | 2% | No | Needs per-M-state posteriors |
 
-**Known deviation:** C HMMER computes sequence-level null2 bias from the full-sequence posterior decoding. This port derives it from the sum of per-domain null2 corrections, which is an approximation. Per-domain scores and biases match C; the sequence-level bias may differ for multi-domain hits.
+**Sequence-bias status:** The current committed regression corpus, including an explicit multi-domain `fn3` vs `7LESS_DROME` case, matches C HMMER's observed sequence-level null2 behavior on the checked fixtures. Remaining work here is broader validation and guardrail expansion rather than a currently reproduced scoring mismatch.
 
 **Path to C-equivalent speed:**
 1. Port C's full-matrix SIMD Forward/Backward for per-envelope null2 (currently uses generic DP on each domain envelope).
@@ -218,14 +218,18 @@ not yet C-identical:
 - `phmmer` and first-iteration `jackhmmer` now use the upstream-style
   single-sequence score-matrix conversion path instead of the earlier
   renormalized shortcut. Current committed regressions cover the improved
-  baseline, but parity coverage here is still lighter than for
-  `hmmsearch`/`nhmmer`.
+  `phmmer` baseline plus small `jackhmmer` convergence and final-round
+  `--tblout`/`--domtblout` cases and `--nonull2` spot checks, but parity
+  coverage here is still lighter than for `hmmsearch`/`nhmmer`.
+- `hmmsearch --pfamtblout` now writes both Pfam sections with C-style domain
+  ordering and coordinate generation even under `--noali`. Current regressions
+  cover exact bundled-C parity on small fixtures plus a real-world GECCO case.
 - Domain-definition speed still lags behind C on larger workloads because some
   per-envelope Forward/Backward/Decoding work remains on generic DP paths
   instead of the corresponding SIMD paths.
-- Sequence-level null2 bias for multi-domain hits is still an approximation.
-  Per-domain scores match well, but the full-sequence bias calculation does not
-  yet follow C's full-sequence posterior-decoding route exactly.
+- Sequence-level null2 bias is currently covered by exact checked fixtures,
+  including a multi-domain `fn3` regression, but the broader validation corpus
+  here is still lighter than for the core `hmmsearch`/`nhmmer` search paths.
 
 Currently supported programs:
 - `hmmsearch` - Search HMM(s) against a sequence database (FASTA/UniProt/gzipped)

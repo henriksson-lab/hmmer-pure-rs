@@ -116,6 +116,49 @@ fn run_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
     std::fs::read_to_string(domtblout).unwrap()
 }
 
+fn run_hmmsearch_pfamtblout(hmm: &str, seqdb: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "search",
+            "--noali",
+            "--pfamtblout",
+            pfamtblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
+        .output()
+        .expect("failed to run hmmer search");
+    assert!(
+        output.status.success(),
+        "hmmer search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
+}
+
+fn run_c_hmmsearch_pfamtblout(hmm: &str, seqdb: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let output = Command::new(test_path("hmmer/src/hmmsearch"))
+        .args([
+            "--noali",
+            "--pfamtblout",
+            pfamtblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmsearch");
+    assert!(
+        output.status.success(),
+        "bundled C hmmsearch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
+}
+
 fn parse_hmmsearch_rows(content: &str) -> Vec<(String, String, f64, f64)> {
     content
         .lines()
@@ -130,6 +173,26 @@ fn parse_hmmsearch_rows(content: &str) -> Vec<(String, String, f64, f64)> {
                 fields[2].to_string(),
                 fields[4].parse().ok()?,
                 fields[5].parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+fn parse_hmmsearch_score_bias_rows(content: &str) -> Vec<(String, String, String, String, String)> {
+    content
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 7 {
+                return None;
+            }
+            Some((
+                fields[0].to_string(),
+                fields[2].to_string(),
+                fields[4].to_string(),
+                fields[5].to_string(),
+                fields[6].to_string(),
             ))
         })
         .collect()
@@ -176,6 +239,25 @@ fn parse_domtbl_rows(content: &str) -> Vec<DomtblRow> {
             })
         })
         .collect()
+}
+
+fn parse_pfamtbl_rows(content: &str) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    let mut seq_rows = Vec::new();
+    let mut dom_rows = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+        if fields.len() >= 12 {
+            dom_rows.push(fields);
+        } else {
+            seq_rows.push(fields);
+        }
+    }
+
+    (seq_rows, dom_rows)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -633,6 +715,54 @@ fn test_gecco_missed4_real_world_query_hit_counts_match_golden() {
 }
 
 #[test]
+fn test_gecco_real_world_score_bias_rows_match_golden_exactly() {
+    let cases = [
+        (
+            "gecco_pfam5",
+            test_path("tests/golden/gecco_pfam5_vs_gecco.tblout"),
+            test_path("hmmer/testsuite/gecco_pfam5.hmm"),
+            test_path("hmmer/testsuite/gecco_proteins.faa"),
+        ),
+        (
+            "gecco_missed",
+            test_path("tests/golden/gecco_missed_vs_missed.tblout"),
+            test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
+            test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+        ),
+        (
+            "gecco_missed2",
+            test_path("tests/golden/gecco_missed2.tblout"),
+            test_path("hmmer/testsuite/gecco_missed2_hmms.hmm"),
+            test_path("hmmer/testsuite/gecco_missed2_proteins.faa"),
+        ),
+        (
+            "gecco_missed3",
+            test_path("tests/golden/gecco_missed3.tblout"),
+            test_path("hmmer/testsuite/gecco_missed3_hmms.hmm"),
+            test_path("hmmer/testsuite/gecco_missed3_proteins.faa"),
+        ),
+        (
+            "gecco_missed4",
+            test_path("tests/golden/gecco_missed4.tblout"),
+            test_path("hmmer/testsuite/gecco_missed4_hmms.hmm"),
+            test_path("hmmer/testsuite/gecco_missed4_proteins.faa"),
+        ),
+    ];
+
+    for (label, golden_path, hmm_path, seqdb_path) in cases {
+        let golden = std::fs::read_to_string(golden_path).unwrap();
+        let rust = run_hmmsearch_tblout(&hmm_path, &seqdb_path);
+
+        assert_eq!(
+            parse_hmmsearch_score_bias_rows(&rust),
+            parse_hmmsearch_score_bias_rows(&golden),
+            "{} score/bias rows diverged from golden output",
+            label
+        );
+    }
+}
+
+#[test]
 fn test_gecco_pfam5_top_hits_match_golden_rows() {
     let golden =
         std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
@@ -692,6 +822,24 @@ fn test_representative_pfam_real_world_top_hits_match_golden() {
             family
         );
     }
+}
+
+#[test]
+fn test_gecco_pfam5_pfamtblout_matches_bundled_c_exactly() {
+    let rust = run_hmmsearch_pfamtblout(
+        &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
+        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+    );
+    let c = run_c_hmmsearch_pfamtblout(
+        &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
+        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+    );
+
+    assert_eq!(
+        parse_pfamtbl_rows(&rust),
+        parse_pfamtbl_rows(&c),
+        "gecco_pfam5 pfamtblout rows diverged from bundled C output"
+    );
 }
 
 #[test]
@@ -789,6 +937,31 @@ fn test_pfam_top3_rows_match_golden_for_all_families() {
                 .map(|r| (&r.0, &r.1))
                 .collect::<Vec<_>>(),
             "{} top-{} rows diverged from golden output",
+            family,
+            n
+        );
+    }
+}
+
+#[test]
+#[ignore = "slow parity sweep across all committed Pfam golden fixtures"]
+fn test_pfam_top3_score_bias_rows_match_golden_for_all_families() {
+    let seqdb = test_path("test_data/human_swissprot_2k.fasta");
+    for family in PFAM_FAMILIES {
+        let golden =
+            std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family)))
+                .unwrap();
+        let rust = run_hmmsearch_tblout(
+            &test_path(&format!("test_data/{}_pfam.hmm", family)),
+            &seqdb,
+        );
+        let golden_rows = parse_hmmsearch_score_bias_rows(&golden);
+        let rust_rows = parse_hmmsearch_score_bias_rows(&rust);
+        let n = golden_rows.len().min(rust_rows.len()).min(3);
+        assert_eq!(
+            rust_rows.iter().take(n).collect::<Vec<_>>(),
+            golden_rows.iter().take(n).collect::<Vec<_>>(),
+            "{} top-{} score/bias rows diverged from golden output",
             family,
             n
         );

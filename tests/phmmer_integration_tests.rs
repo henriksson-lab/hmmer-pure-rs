@@ -286,3 +286,63 @@ fn phmmer_globins45_preserves_top_hit_order_and_known_score_inflation() {
         top_score
     );
 }
+
+#[test]
+fn phmmer_nonull2_zeroes_bias_and_raises_globins_scores() {
+    let output = run_phmmer(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--nonull2"],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let top_hits = top_hit_rows_from_stdout(&stdout, 4);
+
+    assert_eq!(
+        top_hits,
+        vec![
+            (
+                "2.6e-97".to_string(),
+                "315.1".to_string(),
+                "HBB_CALAR".to_string()
+            ),
+            (
+                "5.1e-97".to_string(),
+                "314.2".to_string(),
+                "HBB_MANSP".to_string()
+            ),
+            (
+                "3.2e-91".to_string(),
+                "295.4".to_string(),
+                "HBB_URSMA".to_string()
+            ),
+            (
+                "4.3e-91".to_string(),
+                "294.9".to_string(),
+                "HBB_RABIT".to_string()
+            ),
+        ],
+        "phmmer --nonull2 globins top rows changed"
+    );
+    assert!(stdout.contains(" 2.6e-97  315.1   0.0"));
+}
+
+#[test]
+fn phmmer_nobias_is_accepted_on_globins_fixture() {
+    let output = run_phmmer(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--nobias"],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let top_hits = top_hit_rows_from_stdout(&stdout, 3);
+
+    assert!(stdout.contains("[ok]"));
+    assert_eq!(
+        top_hits
+            .iter()
+            .map(|(_, _, name)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["HBB_CALAR", "HBB_MANSP", "HBB_URSMA"],
+        "phmmer --nobias globins top-hit ordering changed"
+    );
+}

@@ -342,7 +342,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let nobias = args.nobias;
         let nonull2 = args.nonull2;
         let seed = args.seed;
-        let do_alignment = !args.noali || args.domtblout.is_some();
+        let do_alignment = !args.noali || args.domtblout.is_some() || args.pfamtblout.is_some();
         let do_alignment_display = !args.noali;
         let mut total_residues: u64 = 0;
         let mut n_targets: u64 = 0;
@@ -793,7 +793,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             write_domtblout(f, &hmm.name, hmm.acc.as_deref(), hmm.m, &th, z, domz);
         }
         if let Some(ref mut f) = pfamtblout_file {
-            write_pfamtblout(f, &hmm.name, hmm.acc.as_deref(), &th, z, domz);
+            write_pfamtblout(f, &hmm.name, hmm.acc.as_deref(), hmm.m, &th, z, domz);
         }
         if let Some(ref mut f) = ali_outfile {
             write_ali_output(f, hmm, &th, domz, textw);
@@ -939,7 +939,7 @@ pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &T
     }
 }
 
-fn write_domtblout<W: Write>(
+pub fn write_domtblout<W: Write>(
     f: &mut W,
     qname: &str,
     qacc: Option<&str>,
@@ -1096,26 +1096,98 @@ fn write_pfamtblout<W: Write>(
     f: &mut W,
     _qname: &str,
     _qacc: Option<&str>,
+    qlen: usize,
     th: &TopHits,
     z: f64,
     _domz: f64,
 ) {
-    // Sequence scores section
+    writeln!(f, "# Sequence scores").unwrap();
+    writeln!(f, "# ---------------").unwrap();
+    writeln!(f, "#").unwrap();
+    writeln!(
+        f,
+        "# name                  bits   E-value   n   exp  bias    description"
+    )
+    .unwrap();
+    writeln!(
+        f,
+        "# ------------------- ------ --------- --- ----- -----    ---------------------"
+    )
+    .unwrap();
+
     for hit in &th.hits {
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
         let evalue = z * hit.lnp.exp();
-        let bias = hit.pre_score - hit.score;
         writeln!(
             f,
-            "{:<20} {:6.1} {:9.2e} {:3} {:5.1} {:5.1}    {}",
+            "{:<20} {:>6.1} {:>9} {:>3} {:>5.1} {:>5.1}    {}",
             hit.name,
             hit.score,
-            evalue,
-            hit.ndom,
+            hmmer_pure_rs::output::fmt_evalue(evalue),
+            hit.nreported,
             hit.nexpected,
-            bias,
+            hit.bias,
+            if hit.desc.is_empty() { "-" } else { &hit.desc },
+        )
+        .unwrap();
+    }
+
+    writeln!(f).unwrap();
+    writeln!(f, "# Domain scores").unwrap();
+    writeln!(f, "# -------------").unwrap();
+    writeln!(f, "#").unwrap();
+    writeln!(
+        f,
+        "#  name                 bits   E-value   hit  bias env-st env-en ali-st ali-en hmm-st hmm-en     description"
+    )
+    .unwrap();
+    writeln!(
+        f,
+        "# ------------------- ------ --------- ----- ----- ------ ------ ------ ------ ------ ------      ---------------------"
+    )
+    .unwrap();
+
+    let mut reported_domains = Vec::new();
+    for (hit_idx, hit) in th.hits.iter().enumerate() {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
+            continue;
+        }
+        for (dom_idx, dom) in hit.dcl.iter().enumerate() {
+            if dom.is_reported {
+                reported_domains.push((hit_idx, dom_idx, hit, dom));
+            }
+        }
+    }
+    reported_domains.sort_by(|a, b| {
+        b.3.bitscore
+            .total_cmp(&a.3.bitscore)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    for (_hit_idx, dom_idx, hit, dom) in reported_domains {
+        let i_evalue = z * dom.lnp.exp();
+        let (hmmfrom, hmmto) = if let Some(ref ad) = dom.ad {
+            (ad.hmmfrom, ad.hmmto)
+        } else {
+            (1, qlen)
+        };
+        writeln!(
+            f,
+            "{:<20} {:>6.1} {:>9} {:>5} {:>5.1} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}     {}",
+            hit.name,
+            dom.bitscore,
+            hmmer_pure_rs::output::fmt_evalue(i_evalue),
+            dom_idx + 1,
+            dom.dombias,
+            dom.ienv,
+            dom.jenv,
+            dom.iali,
+            dom.jali,
+            hmmfrom,
+            hmmto,
             if hit.desc.is_empty() { "-" } else { &hit.desc },
         )
         .unwrap();
