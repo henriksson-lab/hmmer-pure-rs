@@ -640,6 +640,15 @@ impl OProfile {
     }
 
     /// Reconfigure for a new target sequence length.
+    /// Reconfigure only the MSV filter length model (i.e. `tjb_b`) for a new
+    /// expected target length, matching C `p7_oprofile_ReconfigMSVLength`.
+    /// Used by nhmmer's long_target pipeline, which sets tjb_b to
+    /// max_length for the SSV scan (independent of the actual sequence
+    /// length).
+    pub fn reconfig_msv_length(&mut self, l: i32) {
+        self.tjb_b = unbiased_byteify(self.scale_b, (3.0_f32 / (l as f32 + 3.0)).ln());
+    }
+
     pub fn reconfig_length(&mut self, l: i32) {
         self.l = l;
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
@@ -684,6 +693,141 @@ impl OProfile {
         self.xw[P7O_E][P7O_LOOP] = i16::MIN;
 
         self.reconfig_length(l);
+    }
+
+    /// Gather the Forward-space match emission probabilities from the striped
+    /// `rfv` table into a flat `(M+1) * Kp` array, mirroring C
+    /// `p7_oprofile_GetFwdEmissionArray` (hmmer/src/impl_sse/p7_oprofile.c:1428).
+    ///
+    /// Canonical residues: `arr[k * Kp + x] = rfv[x][q][z] * bg.f[x]`.
+    /// Degenerate / ambiguity codes are filled via `f_expect_sc_vec`-style
+    /// expectation over canonical residues weighted by `bg.f`.
+    pub fn get_fwd_emissions(&self, bg: &crate::bg::Bg, abc: &crate::alphabet::Alphabet) -> Vec<f32> {
+        let m = self.m;
+        let kp = self.abc_kp;
+        let k = abc.k;
+        let nq = nqf(m);
+        let cell_cnt = (m + 1) * kp;
+        let mut arr = vec![0.0_f32; cell_cnt];
+
+        for x in 0..k {
+            for q in 0..nq {
+                let lanes = self.rfv[x][q];
+                for z in 0..4 {
+                    let node = q + 1 + z * nq;
+                    let idx = kp * node + x;
+                    if idx < cell_cnt {
+                        arr[idx] = lanes[z] * bg.f[x];
+                    }
+                }
+            }
+        }
+
+        // Degenerate residue expectations: for each model position, fill in the
+        // ambiguity columns as the bg.f-weighted mean of the matching canonical
+        // values. Mirrors esl_abc_FExpectScVec over raw probabilities.
+        for pos in 0..=m {
+            let row = &mut arr[pos * kp..(pos + 1) * kp];
+            for x in (k + 1)..=kp.saturating_sub(3) {
+                if !abc.is_residue(x as u8) {
+                    continue;
+                }
+                let mut numer = 0.0_f32;
+                let mut denom = 0.0_f32;
+                for i in 0..k {
+                    if abc.degen[x][i] {
+                        numer += row[i] * bg.f[i];
+                        denom += bg.f[i];
+                    }
+                }
+                row[x] = if denom > 0.0 { numer / denom } else { 0.0 };
+            }
+        }
+
+        arr
+    }
+
+    /// Rewrite the Forward match-emission log-odds in place given a new bg
+    /// distribution and the precomputed raw Forward emissions from
+    /// `get_fwd_emissions`, mirroring C `p7_oprofile_UpdateFwdEmissionScores`
+    /// (hmmer/src/impl_sse/p7_oprofile.c:502). Used by nhmmer long_target
+    /// per-envelope reparameterization.
+    #[cfg(target_arch = "x86_64")]
+    pub fn update_fwd_emission_scores(
+        &mut self,
+        bg: &crate::bg::Bg,
+        fwd_emissions: &[f32],
+        abc: &crate::alphabet::Alphabet,
+    ) {
+        let m = self.m;
+        let kp = self.abc_kp;
+        let k = abc.k;
+        let nq = nqf(m);
+
+        // Row in sc_arr: for each of the 4 lanes (z), Kp residue scores.
+        let mut sc_arr = vec![0.0_f32; kp * 4];
+
+        for q in 0..nq {
+            // Canonical residues — compute log(prob / bg.f)
+            for x in 0..k {
+                for z in 0..4 {
+                    let node = q + 1 + z * nq;
+                    sc_arr[z * kp + x] = if node <= m {
+                        ((fwd_emissions[kp * node + x] as f64) / (bg.f[x] as f64))
+                            .ln() as f32
+                    } else {
+                        f32::NEG_INFINITY
+                    };
+                }
+                let tmp = [
+                    sc_arr[0 * kp + x],
+                    sc_arr[1 * kp + x],
+                    sc_arr[2 * kp + x],
+                    sc_arr[3 * kp + x],
+                ];
+                let packed = unsafe { esl_sse_expf4(tmp) };
+                self.rfv[x][q] = packed;
+                self.rfv_a[x][q] = AlignedF32x4::from_array(packed);
+            }
+
+            // Gap, nonresidue, missing codes — -infinity.
+            for z in 0..4 {
+                sc_arr[z * kp + k] = f32::NEG_INFINITY;
+                sc_arr[z * kp + kp - 2] = f32::NEG_INFINITY;
+                sc_arr[z * kp + kp - 1] = f32::NEG_INFINITY;
+            }
+
+            // Ambiguity codes: expectation over canonical codes.
+            for z in 0..4 {
+                let base = z * kp;
+                for x in (k + 1)..=kp.saturating_sub(3) {
+                    if !abc.is_residue(x as u8) {
+                        continue;
+                    }
+                    let mut numer = 0.0_f32;
+                    let mut denom = 0.0_f32;
+                    for i in 0..k {
+                        if abc.degen[x][i] {
+                            numer += sc_arr[base + i] * bg.f[i];
+                            denom += bg.f[i];
+                        }
+                    }
+                    sc_arr[base + x] = if denom > 0.0 { numer / denom } else { 0.0 };
+                }
+            }
+
+            for x in k..kp {
+                let tmp = [
+                    sc_arr[0 * kp + x],
+                    sc_arr[1 * kp + x],
+                    sc_arr[2 * kp + x],
+                    sc_arr[3 * kp + x],
+                ];
+                let packed = unsafe { esl_sse_expf4(tmp) };
+                self.rfv[x][q] = packed;
+                self.rfv_a[x][q] = AlignedF32x4::from_array(packed);
+            }
+        }
     }
 
     /// Access a transition score from the underlying profile data.

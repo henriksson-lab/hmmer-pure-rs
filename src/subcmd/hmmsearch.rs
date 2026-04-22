@@ -679,41 +679,28 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         .unwrap();
 
                         if let Some(ref ad) = dom.ad {
-                            let name_width = hmm.name.len().max(hit.name.len()).max(5);
-                            // Model line
-                            writeln!(
-                                out,
-                                "  {:>width$} {:>3} {} {:>3}",
-                                hmm.name,
-                                ad.hmmfrom,
-                                ad.model,
-                                ad.hmmto,
-                                width = name_width
-                            )
-                            .unwrap();
-                            // Match line
-                            writeln!(out, "  {:>width$}     {}", "", ad.mline, width = name_width)
-                                .unwrap();
-                            // Target sequence line
-                            writeln!(
-                                out,
-                                "  {:>width$} {:>3} {} {:>3}",
-                                hit.name,
-                                ad.sqfrom,
-                                ad.aseq,
-                                ad.sqto,
-                                width = name_width
-                            )
-                            .unwrap();
-                            // PP annotation line
-                            writeln!(
-                                out,
-                                "  {:>width$}     {} PP",
-                                "",
-                                ad.ppline,
-                                width = name_width
-                            )
-                            .unwrap();
+                            // Build CS line from hmm.cs over the alignment span.
+                            let cs_line = hmm.cs.as_ref().map(|cs| {
+                                let mut s = String::with_capacity(ad.model.len());
+                                let mut cs_idx = ad.hmmfrom;
+                                for ch in ad.model.chars() {
+                                    if ch == '.' {
+                                        s.push('.');
+                                    } else {
+                                        s.push(if cs_idx < cs.len() { cs[cs_idx] as char } else { ' ' });
+                                        cs_idx += 1;
+                                    }
+                                }
+                                s
+                            });
+                            hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                                &mut out,
+                                &hmm.name,
+                                &hit.name,
+                                ad,
+                                cs_line.as_deref(),
+                                textw,
+                            );
                         }
                         writeln!(out).unwrap();
                     }
@@ -827,7 +814,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
+pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
     let tnamew = th
         .hits
         .iter()

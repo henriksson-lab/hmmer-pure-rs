@@ -328,6 +328,22 @@ pub fn alignment_display_with_pp(
     abc: &Alphabet,
     pp: Option<&crate::dp::gmx::Gmx>,
 ) -> Option<AlignmentDisplay> {
+    alignment_display_with_pp_bg(tr, dsq, hmm, abc, pp, None)
+}
+
+/// Like `alignment_display_with_pp` but with an override for the per-residue
+/// background frequencies. Used in long_target mode where the model is
+/// reparameterized: C's p7_alidisplay_Create compares `FGetEmission > 1.0`
+/// (i.e. emission / reparameterized_bg > 1), so Rust's mline `+` threshold
+/// needs the same reparameterized bg to be byte-identical.
+pub fn alignment_display_with_pp_bg(
+    tr: &Trace,
+    dsq: &[Dsq],
+    hmm: &crate::hmm::Hmm,
+    abc: &Alphabet,
+    pp: Option<&crate::dp::gmx::Gmx>,
+    bg_override: Option<&[f32]>,
+) -> Option<AlignmentDisplay> {
     // Find first and last M states (domain boundaries)
     let mut z1 = None;
     let mut z2 = None;
@@ -347,6 +363,8 @@ pub fn alignment_display_with_pp(
     let mut mline = String::new();
     let mut aseq = String::new();
     let mut ppline = String::new();
+    let mut rfline = String::new();
+    let has_rf = hmm.rf.as_ref().map_or(false, |rf| !rf.is_empty() && rf[0] != 0);
     let mut hmmfrom = 0;
     let mut hmmto = 0;
     let mut sqfrom = 0;
@@ -363,6 +381,10 @@ pub fn alignment_display_with_pp(
                 }
                 hmmto = k;
                 sqto = i;
+                if has_rf {
+                    let rf = hmm.rf.as_ref().unwrap();
+                    rfline.push(if k < rf.len() { rf[k] as char } else { '.' });
+                }
 
                 // Model consensus
                 let cons_ch = if let Some(ref cons) = hmm.consensus {
@@ -384,9 +406,11 @@ pub fn alignment_display_with_pp(
                 };
                 aseq.push(seq_ch);
 
-                // Match line: identity or similarity
+                // Match line: C HMMER (p7_alidisplay.c:220-224) pushes the
+                // model character on identity, `+` when emission-odds ratio
+                // exceeds 1.0 (positive log-odds), space otherwise.
                 if cons_ch.to_ascii_uppercase() == seq_ch.to_ascii_uppercase() {
-                    mline.push(seq_ch.to_ascii_uppercase());
+                    mline.push(cons_ch);
                 } else {
                     let x = dsq[i] as usize;
                     let sc = hmm
@@ -395,8 +419,14 @@ pub fn alignment_display_with_pp(
                         .and_then(|row| row.get(x))
                         .copied()
                         .unwrap_or(0.0);
-                    let bg = crate::bg::AMINO_FREQUENCIES.get(x).copied().unwrap_or(0.05);
-                    if x < hmm.abc_k && sc > bg * 1.5 {
+                    let bg = if let Some(bg_f) = bg_override {
+                        bg_f.get(x).copied().unwrap_or(0.25)
+                    } else if hmm.abc_k == 4 {
+                        0.25_f32
+                    } else {
+                        crate::bg::AMINO_FREQUENCIES.get(x).copied().unwrap_or(0.05)
+                    };
+                    if x < hmm.abc_k && sc > bg {
                         mline.push('+');
                     } else {
                         mline.push(' ');
@@ -412,6 +442,10 @@ pub fn alignment_display_with_pp(
             }
             State::I => {
                 let i = tr.i[z];
+                let k = tr.k[z];
+                if has_rf {
+                    rfline.push('.');
+                }
                 model.push('.');
                 let seq_ch = if i > 0 && (dsq[i] as usize) < abc.kp {
                     (abc.sym[dsq[i] as usize] as char).to_ascii_lowercase()
@@ -420,7 +454,14 @@ pub fn alignment_display_with_pp(
                 };
                 aseq.push(seq_ch);
                 mline.push(' ');
-                ppline.push('.');
+                // PP for insert state: C HMMER uses the I-state posterior at
+                // (i, k). We look at pp.imx(i, k) when available, else '.'.
+                if let Some(pp_mx) = pp {
+                    let pp_val = pp_mx.imx(i, k);
+                    ppline.push(crate::dp::generic_optacc::pp_to_char(pp_val.min(1.0)));
+                } else {
+                    ppline.push('.');
+                }
                 if sqto == 0 && sqfrom == 0 {
                     sqfrom = i;
                 }
@@ -432,6 +473,10 @@ pub fn alignment_display_with_pp(
                     hmmfrom = k;
                 }
                 hmmto = k;
+                if has_rf {
+                    let rf = hmm.rf.as_ref().unwrap();
+                    rfline.push(if k < rf.len() { rf[k] as char } else { '.' });
+                }
 
                 let cons_ch = if let Some(ref cons) = hmm.consensus {
                     if k < cons.len() {
@@ -456,6 +501,7 @@ pub fn alignment_display_with_pp(
         mline,
         aseq,
         ppline,
+        rfline,
         hmmfrom,
         hmmto,
         sqfrom,
@@ -523,6 +569,7 @@ pub struct AlignmentDisplay {
     pub mline: String,
     pub ppline: String,
     pub aseq: String,
+    pub rfline: String,
     pub hmmfrom: usize,
     pub hmmto: usize,
     pub sqfrom: usize,

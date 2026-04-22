@@ -222,6 +222,10 @@ pub struct Pipeline {
     pub do_alignment: bool,
     pub do_alignment_display: bool,
     pub seed: u32, // RNG seed for stochastic traceback (default 42, 0 = arbitrary)
+    // long_target = nhmmer-style DNA genome search. Switches domain-scoring to
+    // reconfigure the profile's rest-length per envelope, matching C
+    // `rescore_isolated_domain()`'s `if (long_target) ReconfigRestLength(om, j-i+1)`.
+    pub long_target: bool,
 
     // Statistics
     pub n_past_msv: u64,
@@ -270,6 +274,7 @@ impl Pipeline {
             do_alignment: true,
             do_alignment_display: true,
             seed: 42,
+            long_target: false,
             n_past_msv: 0,
             n_past_bias: 0,
             n_past_vit: 0,
@@ -389,7 +394,11 @@ impl Pipeline {
         // C HMMER runs the bias filter only after MSV passes; keep it lazy.
         let mut filtersc = null_sc;
 
-        if !self.do_max {
+        // For long_target, SSV_longtarget and ViterbiFilter_longtarget already
+        // ran at the postSSV stage (in nhmmer::search_longtarget); C's
+        // postViterbi_LongTarget (p7_pipeline.c:1289) does NOT re-run MSV or
+        // Viterbi — it calls p7_ForwardParser directly. Match that here.
+        if !self.do_max && !self.long_target {
             let mut filter_p = 0.0_f64;
 
             // Stage 1: SIMD MSV filter
@@ -557,6 +566,25 @@ impl Pipeline {
             self.n_past_vit += 1;
         }
 
+        // Long-target bias scaling for Forward stage: match C
+        // p7_pli_postViterbi_LongTarget (p7_pipeline.c:1330):
+        //   F3_L = min(window_len, B3=1000);
+        //   filtersc = nullsc + bias_filtersc * (F3_L == window_len ? 1.0 : F3_L/window_len).
+        // This caps the bias contribution at B3=1000 residues, making the F3
+        // filter more permissive on long windows.
+        if self.long_target && self.do_biasfilter {
+            let bias_full = bg.filter_score(&sq.dsq, l);
+            let bias_delta = bias_full - null_sc;
+            const B3: usize = 1000;
+            let f3_l = l.min(B3);
+            let scale = if f3_l == l {
+                1.0_f32
+            } else {
+                f3_l as f32 / l as f32
+            };
+            filtersc = null_sc + bias_delta * scale;
+        }
+
         // Stage 3: full Forward parser.
         let fwd_sc;
         #[cfg(target_arch = "x86_64")]
@@ -606,6 +634,7 @@ impl Pipeline {
                 &mut self.domain_scratch,
                 self.do_alignment,
                 self.do_alignment_display,
+                self.long_target,
             );
         #[cfg(not(feature = "tracehash"))]
         let _ = seq_correction_sum;
@@ -735,19 +764,42 @@ impl Pipeline {
         let lnp = stats::exponential::logsurv(seq_score as f64, mu_f, lam_f);
         let pre_lnp = stats::exponential::logsurv(pre_score as f64, mu_f, lam_f);
 
+        // nhmmer (long_target) reports the best per-envelope score as hit.score;
+        // it does not aggregate across domains the way hmmsearch does.
+        // Mirrors C p7_pipeline.c:1462 `hit->sum_score = hit->score = dom_score`.
+        let (hit_score, hit_pre_score, hit_bias, hit_lnp, hit_pre_lnp) = if self.long_target {
+            let best = domains
+                .iter()
+                .min_by(|a, b| a.lnp.total_cmp(&b.lnp))
+                .expect("long_target hit must have at least one domain");
+            let best_bitscore = best.bitscore;
+            // dom.dombias is already in bits (see domaindef.rs).
+            let best_bias = best.dombias.max(0.0);
+            let pre = best_bitscore + best_bias;
+            let best_lnp = best.lnp as f32;
+            let pre_lnp_lt = stats::exponential::logsurv(pre as f64, mu_f, lam_f);
+            (best_bitscore, pre, best_bias, best_lnp, pre_lnp_lt)
+        } else {
+            (seq_score, pre_score, seq_bias_bits, lnp as f32, pre_lnp)
+        };
+
         let hit = th.create_next_hit();
         hit.name = sq.name.clone();
         hit.acc = sq.acc.clone();
         hit.desc = sq.desc.clone();
         hit.n = sq.n;
-        hit.score = seq_score;
-        hit.bias = seq_bias_bits;
-        hit.pre_score = pre_score;
-        hit.sum_score = sum_score;
-        hit.lnp = lnp;
-        hit.pre_lnp = pre_lnp;
-        hit.sum_lnp = stats::exponential::logsurv(sum_score as f64, mu_f, lam_f);
-        hit.sortkey = lnp;
+        hit.score = hit_score;
+        hit.bias = hit_bias;
+        hit.pre_score = hit_pre_score;
+        hit.sum_score = if self.long_target { hit_score } else { sum_score };
+        hit.lnp = hit_lnp as f64;
+        hit.pre_lnp = hit_pre_lnp;
+        hit.sum_lnp = if self.long_target {
+            hit_lnp as f64
+        } else {
+            stats::exponential::logsurv(sum_score as f64, mu_f, lam_f)
+        };
+        hit.sortkey = hit.lnp;
         hit.nexpected = nexpected;
         hit.nregions = domain_stats.nregions;
         hit.nclustered = domain_stats.nclustered;
@@ -762,7 +814,7 @@ impl Pipeline {
 
 
 /// Calculate MSV p-value from raw score.
-fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
+pub fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
     let score = nats_to_bits_from_scores(msv_sc, null_sc);
     let mu = evparam[crate::hmm::P7_MMU] as f64;
     let lambda = evparam[crate::hmm::P7_MLAMBDA] as f64;

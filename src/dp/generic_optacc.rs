@@ -397,13 +397,15 @@ pub fn get_postprob(pp: &Gmx, state: u8, i: usize, k: usize) -> f32 {
     }
 }
 
-/// Convert a posterior probability to a display character.
-/// 0-9 for deciles, * for >= 0.95.
+/// Convert a posterior probability to a display character, matching Easel's
+/// rule: <0 → '.', ≥0.95 → '*', else round-to-nearest digit 0..9.
 pub fn pp_to_char(pp: f32) -> char {
-    if pp >= 0.95 {
+    if pp < 0.0 {
+        '.'
+    } else if pp >= 0.95 {
         '*'
     } else {
-        let d = (pp * 10.0) as u32;
-        char::from_digit(d.min(9), 10).unwrap_or('0')
+        let n = ((pp + 0.05) * 10.0) as u32;
+        char::from_digit(n.min(9), 10).unwrap_or('0')
     }
 }

@@ -1392,6 +1392,8 @@ unsafe fn forward_parser_pmx_offset_direct(
         if i == 19 {
             trace_forward_engine_row19_xev_bits(dsq, dsq_offset, l, om.m, xev);
         }
+        #[cfg(feature = "tracehash")]
+        let trace_xev_before_hsum = xev;
         xev = _mm_add_ps(
             xev,
             _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(xev, xev),
@@ -1470,6 +1472,20 @@ unsafe fn forward_parser_pmx_offset_direct(
         store_xmx(xmx_ptr, i, xe, xn, xj, xb, xc);
         *scale_ptr.add(i) = totscale as f64;
         *row_scale_ptr.add(i) = row_scale;
+
+        #[cfg(feature = "tracehash")]
+        if i <= 8 || i == l {
+            trace_forward_engine_step_bits(
+                dsq,
+                dsq_offset,
+                l,
+                om.m,
+                i,
+                trace_xev_before_hsum,
+                xe,
+                row_scale,
+            );
+        }
     }
 
     #[cfg(feature = "tracehash")]

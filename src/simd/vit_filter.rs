@@ -182,6 +182,218 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
     }
 }
 
+/// Viterbi-longtarget filter: scans the sequence for stretches where the E
+/// state score exceeds a P-value threshold, producing one window per peak.
+/// Port of p7_ViterbiFilter_longtarget (hmmer/src/impl_sse/vitfilter.c:292).
+///
+/// After a row's E-state peak crosses the threshold, we emit a window at that
+/// position (start=i-1, length=1, peak model position k) and reset the M/D/I
+/// state vectors so the search can restart for the next peak.
+///
+/// `filtersc` is the combined (nullsc + bias-scaled) filter score in nats.
+/// `p_thresh` is the F2 P-value threshold.
+///
+/// # Safety
+/// Requires SSE2. `om` must be in local or unilocal mode (needed for bounded
+/// dynamic range of int16 arithmetic).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub unsafe fn viterbi_filter_longtarget(
+    dsq: &[Dsq],
+    l: usize,
+    om: &OProfile,
+    filtersc: f32,
+    p_thresh: f64,
+) -> Vec<crate::simd::ssv_longtarget::HmmWindow> {
+    use crate::simd::ssv_longtarget::HmmWindow;
+    use crate::stats::gumbel;
+
+    let q_count = nqw(om.m);
+    let nscells = 3;
+    let mut dp: Vec<__m128i> = vec![_mm_set1_epi16(-32768); q_count * nscells];
+
+    // Convert the P-value threshold into a raw int16 E-state score threshold,
+    // inverting C's VitFilter bit-score conversion (vitfilter.c:334):
+    //   invP = esl_gumbel_invsurv(P, VMU, VLAMBDA)
+    //   sc_thresh = ceil((filtersc + LOG2*invP + 3.0) * scale_w)
+    //                - xw[E][MOVE] - xw[C][MOVE] + base_w
+    let inv_p = gumbel::invsurv(
+        p_thresh,
+        om.evparam[crate::hmm::P7_VMU] as f64,
+        om.evparam[crate::hmm::P7_VLAMBDA] as f64,
+    );
+    let ln2 = std::f64::consts::LN_2;
+    let raw = (filtersc as f64 + ln2 * inv_p + 3.0) * om.scale_w as f64;
+    let sc_thresh: i32 = raw.ceil() as i32
+        - om.xw[P7O_E][P7O_MOVE] as i32
+        - om.xw[P7O_C][P7O_MOVE] as i32
+        + om.base_w as i32;
+
+    let neg_inf_v = {
+        let v = _mm_set1_epi16(-32768);
+        _mm_srli_si128::<14>(v)
+    };
+
+    let mut xn: i16 = om.base_w;
+    let mut xb: i16 = add_i16(xn, om.xw[P7O_N][P7O_MOVE]);
+    let mut xj: i16 = -32768;
+    let mut xc: i16 = -32768;
+
+    macro_rules! mmx {
+        ($q:expr) => {
+            dp[$q * nscells + 0]
+        };
+    }
+    macro_rules! dmx {
+        ($q:expr) => {
+            dp[$q * nscells + 1]
+        };
+    }
+    macro_rules! imx {
+        ($q:expr) => {
+            dp[$q * nscells + 2]
+        };
+    }
+
+    let mut windows: Vec<HmmWindow> = Vec::new();
+
+    for i in 1..=l {
+        let xi = dsq[i] as usize;
+        if xi >= om.abc_kp {
+            continue;
+        }
+        let rsc = &om.rwv[xi];
+
+        let mut dcv = _mm_set1_epi16(-32768);
+        let mut xev = _mm_set1_epi16(-32768);
+        let mut dmaxv = _mm_set1_epi16(-32768);
+        let xbv = _mm_set1_epi16(xb);
+
+        let mut mpv = _mm_slli_si128::<2>(mmx!(q_count - 1));
+        mpv = _mm_or_si128(mpv, neg_inf_v);
+        let mut dpv = _mm_slli_si128::<2>(dmx!(q_count - 1));
+        dpv = _mm_or_si128(dpv, neg_inf_v);
+        let mut ipv = _mm_slli_si128::<2>(imx!(q_count - 1));
+        ipv = _mm_or_si128(ipv, neg_inf_v);
+
+        let mut tsc_idx = 0;
+        for q in 0..q_count {
+            let tsc_bm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_mm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_im = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_dm = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+
+            let mut sv = _mm_adds_epi16(xbv, tsc_bm);
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(mpv, tsc_mm));
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(ipv, tsc_im));
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(dpv, tsc_dm));
+
+            let rsc_v = _mm_loadu_si128(rsc[q].as_ptr() as *const __m128i);
+            sv = _mm_adds_epi16(sv, rsc_v);
+            xev = _mm_max_epi16(xev, sv);
+
+            mpv = mmx!(q);
+            dpv = dmx!(q);
+            ipv = imx!(q);
+
+            mmx!(q) = sv;
+            dmx!(q) = dcv;
+
+            let tsc_md = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            dcv = _mm_adds_epi16(sv, tsc_md);
+            dmaxv = _mm_max_epi16(dcv, dmaxv);
+
+            let tsc_mi = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let tsc_ii = _mm_loadu_si128(om.twv[tsc_idx].as_ptr() as *const __m128i);
+            tsc_idx += 1;
+            let isv = _mm_max_epi16(_mm_adds_epi16(mpv, tsc_mi), _mm_adds_epi16(ipv, tsc_ii));
+            imx!(q) = isv;
+        }
+
+        let xe = hmax_epi16(xev) as i32;
+        if xe >= sc_thresh {
+            // Peak! Add a window at this row and reset the DP state.
+            // Find the position k responsible for the peak by un-striping
+            // the M stripe that hit the max. Emit one window per matching k
+            // (mirrors C loop at vitfilter.c:418-425).
+            let mut union_buf = [0i16; 8];
+            for q in 0..q_count {
+                _mm_storeu_si128(union_buf.as_mut_ptr() as *mut __m128i, mmx!(q));
+                for z in 0..8 {
+                    if union_buf[z] as i32 == xe && (q + q_count * z + 1) <= om.m {
+                        let k = q + q_count * z + 1;
+                        windows.push(HmmWindow {
+                            // C vitfilter.c:423 passes `pos=i` (1-based sequence
+                            // position where Vit peak fires).
+                            n: i,
+                            k,
+                            length: 1,
+                            score: 0.0,
+                            target_len: l,
+                            complement: false,
+                        });
+                    }
+                }
+                // Reset M/D/I to -infinity so the search restarts.
+                mmx!(q) = _mm_set1_epi16(-32768);
+                dmx!(q) = _mm_set1_epi16(-32768);
+                imx!(q) = _mm_set1_epi16(-32768);
+            }
+        } else {
+            // Normal special-state update and lazy F loop.
+            xn = add_i16(xn, om.xw[P7O_N][P7O_LOOP]);
+            xc = add_i16(xc, om.xw[P7O_C][P7O_LOOP])
+                .max(add_i16(xe as i16, om.xw[P7O_E][P7O_MOVE]));
+            xj = add_i16(xj, om.xw[P7O_J][P7O_LOOP])
+                .max(add_i16(xe as i16, om.xw[P7O_E][P7O_LOOP]));
+            xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE])
+                .max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
+
+            let dmax = hmax_epi16(dmaxv);
+            if (dmax as i32) + (om.ddbound_w as i32) > (xb as i32) {
+                dcv = _mm_slli_si128::<2>(dcv);
+                dcv = _mm_or_si128(dcv, neg_inf_v);
+                let dd_offset = 7 * q_count;
+                for q in 0..q_count {
+                    dmx!(q) = _mm_max_epi16(dcv, dmx!(q));
+                    let tsc_dd =
+                        _mm_loadu_si128(om.twv[dd_offset + q].as_ptr() as *const __m128i);
+                    dcv = _mm_adds_epi16(dmx!(q), tsc_dd);
+                }
+                loop {
+                    dcv = _mm_slli_si128::<2>(dcv);
+                    dcv = _mm_or_si128(dcv, neg_inf_v);
+                    let mut broke = false;
+                    for q in 0..q_count {
+                        if !any_gt_epi16(dcv, dmx!(q)) {
+                            broke = true;
+                            break;
+                        }
+                        dmx!(q) = _mm_max_epi16(dcv, dmx!(q));
+                        let tsc_dd =
+                            _mm_loadu_si128(om.twv[dd_offset + q].as_ptr() as *const __m128i);
+                        dcv = _mm_adds_epi16(dmx!(q), tsc_dd);
+                    }
+                    if broke {
+                        break;
+                    }
+                }
+            } else {
+                dcv = _mm_slli_si128::<2>(dcv);
+                dmx!(0) = _mm_or_si128(dcv, neg_inf_v);
+            }
+        }
+    }
+
+    windows
+}
+
 /// Horizontal max of 8 int16 elements in an SSE2 vector.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]

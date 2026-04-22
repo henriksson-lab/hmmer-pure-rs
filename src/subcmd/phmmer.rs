@@ -69,6 +69,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
+    let mut tblout_file = args.tblout.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating tblout file: {}", e);
+            std::process::exit(1);
+        })
+    });
+
     writeln!(
         out,
         "# phmmer :: search a protein sequence against a protein database"
@@ -246,7 +253,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         )
         .unwrap();
         writeln!(out, "//").unwrap();
+
+        if let Some(ref mut f) = tblout_file {
+            crate::subcmd::hmmsearch::write_tblout(f, &query_sq.name, None, &th, z);
+        }
+
         query_sq.reuse();
+    }
+
+    if let Some(ref mut f) = tblout_file {
+        f.flush().unwrap();
     }
 
     writeln!(out, "[ok]").unwrap();

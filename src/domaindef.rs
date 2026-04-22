@@ -1592,7 +1592,7 @@ fn score_domain_envelope(
     ienv: usize,
     jenv: usize,
     null_sc: f32,
-    _bg_f: &[f32],
+    bg: &Bg,
     mut n2sc: Option<&mut [f32]>,
     null2_is_done: bool,
     _match_odds: Option<&[f32]>,
@@ -1600,11 +1600,18 @@ fn score_domain_envelope(
     mut simd_scratch: Option<&mut DomainSimdScratch>,
     make_alignment: bool,
     make_alignment_display: bool,
+    long_target: bool,
 ) -> Domain {
     debug_assert!(ienv >= 1 && jenv <= seq_len);
     debug_assert!(null_sc.is_finite());
     let env_len = jenv - ienv + 1;
     let l = seq_len; // full sequence length for length correction
+    if std::env::var("NHMMER_DEBUG_IN").is_ok() && long_target && seq_len > 1000 {
+        eprintln!(
+            "score_env INPUT: seq_len={} ienv={} jenv={} env_len={} long_target={}",
+            seq_len, ienv, jenv, env_len, long_target
+        );
+    }
 
     // Forward score for the envelope.
     let env_fwd_sc;
@@ -1615,7 +1622,11 @@ fn score_domain_envelope(
     #[cfg(target_arch = "x86_64")]
     let mut simd_oa_coords: Option<(usize, usize, usize, usize)> = None;
     #[cfg(target_arch = "x86_64")]
+    let mut simd_oa_trace: Option<crate::trace::Trace> = None;
+    #[cfg(target_arch = "x86_64")]
     let mut simd_oasc: Option<f32> = None;
+    #[cfg(target_arch = "x86_64")]
+    let mut pre_trim_local_bg_f: Option<Vec<f32>> = None;
     if make_alignment {
         if let Some(ref mut scratch) = simd_scratch {
             scratch.pp_gmx.grow_to_zeroed(gm.m, env_len);
@@ -1643,12 +1654,50 @@ fn score_domain_envelope(
         {
             use crate::simd::oprofile::OProfile;
             let env_om_storage;
+            let long_target_om_storage;
             let env_om = if let Some(om) = env_om {
                 om
             } else {
                 env_om_storage = OProfile::convert(env_gm);
                 &env_om_storage
             };
+            // nhmmer (long_target) path: rescore the envelope with the profile's
+            // rest length set to env_len AND the match emission log-odds
+            // reparameterized against envelope-local residue frequency.
+            // Matches C p7_domaindef.c:2108 `ReconfigRestLength(om, j-i+1)` and
+            // p7_domaindef.c:2115 `reparameterize_model(bg, om, sq, i, j-i+1, ...)`.
+            let (env_om, pre_trim_local_bg_f_inner) = if long_target {
+                let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
+                let k = abc_lt.k;
+                let mut counts = vec![0.0_f32; k];
+                for p in ienv..=jenv {
+                    let x = dsq[p] as usize;
+                    if x < k {
+                        counts[x] += 1.0;
+                    }
+                }
+                let total: f32 = counts.iter().sum();
+                if total > 0.0 {
+                    for c in &mut counts {
+                        *c /= total;
+                    }
+                }
+                let clamped_n = seq_len.max(50).min(100) as f32;
+                let bg_smooth = 25.0_f32 / clamped_n;
+                let mut local_bg = bg.clone();
+                for i in 0..k {
+                    local_bg.f[i] = bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
+                }
+                let fwd_emissions = env_om.get_fwd_emissions(bg, &abc_lt);
+                let mut clone = env_om.clone();
+                clone.reconfig_length(env_len as i32);
+                clone.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                long_target_om_storage = clone;
+                (&long_target_om_storage, Some(local_bg.f.clone()))
+            } else {
+                (env_om, None)
+            };
+            pre_trim_local_bg_f = pre_trim_local_bg_f_inner;
             if make_alignment || !null2_is_done {
                 use crate::simd::oprofile::{P7O_C, P7O_J, P7O_LOOP, P7O_N};
                 use crate::simd::probmx::{
@@ -1723,6 +1772,39 @@ fn score_domain_envelope(
                         env_om.xf[P7O_C][P7O_LOOP],
                     ];
                     if make_alignment {
+                        // Always populate SIMD pp matrix and run SIMD OA.
+                        // Match C p7_OptimalAccuracy + p7_OATrace which are
+                        // SIMD on the striped pp matrix — gives byte-identical
+                        // trace boundaries. (Previously alignment_display path
+                        // fell back to generic OA which drifted by 1 residue.)
+                        unsafe {
+                            crate::simd::optacc::posterior_decoding_pmx(
+                                &scratch.fwd_pmx,
+                                &scratch.bck_pmx,
+                                env_om,
+                                &mut scratch.pp_pmx,
+                            );
+                            simd_oasc = Some(crate::simd::optacc::optimal_accuracy_pmx(
+                                env_om,
+                                &scratch.pp_pmx,
+                                &mut scratch.oa_pmx,
+                            ));
+                            simd_oa_coords = crate::simd::optacc::oa_trace_coords_pmx(
+                                env_om,
+                                &scratch.pp_pmx,
+                                &scratch.oa_pmx,
+                            );
+                            // Full Trace for alignment_display_with_pp.
+                            if make_alignment_display {
+                                simd_oa_trace = Some(crate::simd::optacc::oa_trace_pmx(
+                                    env_om,
+                                    &scratch.pp_pmx,
+                                    &scratch.oa_pmx,
+                                ));
+                            }
+                        }
+                        // Also populate generic env_pp for alignment_display
+                        // PP-line annotations (still uses generic Gmx format).
                         if make_alignment_display {
                             p_decoding_to_gmx(
                                 &scratch.fwd_pmx,
@@ -1731,25 +1813,6 @@ fn score_domain_envelope(
                                 njc_loop,
                                 unsafe { &mut *env_pp_ptr },
                             );
-                        } else {
-                            unsafe {
-                                crate::simd::optacc::posterior_decoding_pmx(
-                                    &scratch.fwd_pmx,
-                                    &scratch.bck_pmx,
-                                    env_om,
-                                    &mut scratch.pp_pmx,
-                                );
-                                simd_oasc = Some(crate::simd::optacc::optimal_accuracy_pmx(
-                                    env_om,
-                                    &scratch.pp_pmx,
-                                    &mut scratch.oa_pmx,
-                                ));
-                                simd_oa_coords = crate::simd::optacc::oa_trace_coords_pmx(
-                                    env_om,
-                                    &scratch.pp_pmx,
-                                    &scratch.oa_pmx,
-                                );
-                            }
                         }
                     }
                     if !null2_is_done {
@@ -1954,7 +2017,36 @@ fn score_domain_envelope(
     let mut oasc = 0.0_f32;
     let ad = if make_alignment {
         #[cfg(target_arch = "x86_64")]
-        if let Some((hmmfrom, hmmto, mut sqfrom, mut sqto)) = simd_oa_coords.take() {
+        if let Some(tr) = simd_oa_trace.take() {
+            // When make_alignment_display=true: use SIMD trace with env_pp for
+            // PP-line annotations. Matches C p7_alidisplay_Create with SIMD OA.
+            oasc = simd_oasc.unwrap_or(0.0);
+            let env_pp = unsafe { &*env_pp_ptr };
+            let abc = Alphabet::new(hmm.abc_type);
+            crate::trace::alignment_display_with_pp_bg(
+                &tr,
+                &sub_dsq,
+                hmm,
+                &abc,
+                Some(env_pp),
+                pre_trim_local_bg_f.as_deref(),
+            )
+                .map(|mut ad| {
+                    ad.sqfrom += ienv - 1;
+                    ad.sqto += ienv - 1;
+                    AliDisplay {
+                        model: ad.model,
+                        mline: ad.mline,
+                        aseq: ad.aseq,
+                        hmmfrom: ad.hmmfrom,
+                        hmmto: ad.hmmto,
+                        sqfrom: ad.sqfrom,
+                        sqto: ad.sqto,
+                        ppline: ad.ppline,
+                        rfline: ad.rfline,
+                    }
+                })
+        } else if let Some((hmmfrom, hmmto, mut sqfrom, mut sqto)) = simd_oa_coords.take() {
             oasc = simd_oasc.unwrap_or(0.0);
             if sqfrom > 0 {
                 sqfrom += ienv - 1;
@@ -1971,6 +2063,7 @@ fn score_domain_envelope(
                 sqfrom,
                 sqto,
                 ppline: String::new(),
+                rfline: String::new(),
             })
         } else {
             let env_pp = unsafe { &*env_pp_ptr };
@@ -1998,6 +2091,7 @@ fn score_domain_envelope(
                                 sqfrom: ad.sqfrom,
                                 sqto: ad.sqto,
                                 ppline: ad.ppline,
+                                rfline: ad.rfline,
                             }
                         })
                 } else {
@@ -2018,6 +2112,7 @@ fn score_domain_envelope(
                                 sqfrom,
                                 sqto,
                                 ppline: String::new(),
+                                rfline: String::new(),
                             }
                         },
                     )
@@ -2041,6 +2136,7 @@ fn score_domain_envelope(
                                 sqfrom: ad.sqfrom,
                                 sqto: ad.sqto,
                                 ppline: ad.ppline,
+                                rfline: ad.rfline,
                             }
                         })
                 } else {
@@ -2061,6 +2157,7 @@ fn score_domain_envelope(
                                 sqfrom,
                                 sqto,
                                 ppline: String::new(),
+                                rfline: String::new(),
                             }
                         },
                     )
@@ -2077,22 +2174,282 @@ fn score_domain_envelope(
         (ienv as i64, jenv as i64)
     };
 
+    // long_target envelope trim + second Forward pass for bias correction
+    // (C p7_domaindef.c:2155-2216).
+    //
+    // If the envelope extends more than max_env_extra (=20) residues beyond
+    // the alignment bounds on either side, trim it to fit and re-run Forward
+    // on the trimmed region with the profile reparameterized against that
+    // shorter region. This matches C's "truncate away random-match tail"
+    // behavior for nhmmer.
+    //
+    // Then run Forward with the DEFAULT (non-reparameterized) profile to get
+    // domcorrection, used for bias. Final envsc = min(reparam, default);
+    // domcorrection (nats) = default - envsc.
+    #[cfg(target_arch = "x86_64")]
+    let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) = if long_target {
+        if let Some(base_om) = env_om {
+            const MAX_ENV_EXTRA: i64 = 20;
+            let mut new_ienv = ienv;
+            let mut new_jenv = jenv;
+            let mut new_env_len = env_len;
+            let mut new_dsq_offset = dsq_offset;
+            let mut env_fwd_sc_current = env_fwd_sc;
+            let mut trim_rebuilt_ad: Option<(
+                crate::trace::AlignmentDisplay,
+                f32,
+            )> = None;
+
+            let envelope_extends =
+                (iali - ienv as i64) > MAX_ENV_EXTRA || (jenv as i64 - jali) > MAX_ENV_EXTRA;
+            if envelope_extends {
+                let trimmed_ienv = ((iali - MAX_ENV_EXTRA).max(1) as usize).max(ienv);
+                let trimmed_jenv =
+                    ((jali + MAX_ENV_EXTRA).max(1) as usize).min(jenv);
+                if trimmed_jenv >= trimmed_ienv {
+                    new_ienv = trimmed_ienv;
+                    new_jenv = trimmed_jenv;
+                    new_env_len = new_jenv - new_ienv + 1;
+                    new_dsq_offset = new_ienv - 1;
+
+                    // Reparameterize env_om for the trimmed region and re-run
+                    // Forward (mirrors p7_domaindef.c:2168-2176).
+                    let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
+                    let k = abc_lt.k;
+                    let mut counts = vec![0.0_f32; k];
+                    for p in new_ienv..=new_jenv {
+                        let x = dsq[p] as usize;
+                        if x < k {
+                            counts[x] += 1.0;
+                        }
+                    }
+                    let total: f32 = counts.iter().sum();
+                    if total > 0.0 {
+                        for c in &mut counts {
+                            *c /= total;
+                        }
+                    }
+                    let clamped_n = seq_len.max(50).min(100) as f32;
+                    let bg_smooth = 25.0_f32 / clamped_n;
+                    let mut local_bg = bg.clone();
+                    for i in 0..k {
+                        local_bg.f[i] =
+                            bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
+                    }
+                    let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
+                    let mut trim_om = base_om.clone();
+                    trim_om.reconfig_length(new_env_len as i32);
+                    trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                    let mut trim_pmx = crate::simd::probmx::ProbMx::new(0);
+                    trim_pmx.resize_full(gm.m, new_env_len);
+                    env_fwd_sc_current = unsafe {
+                        crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                            dsq,
+                            new_dsq_offset,
+                            new_env_len,
+                            &trim_om,
+                            &mut trim_pmx,
+                        )
+                    };
+
+                    // Match C p7_domaindef.c:2180-2200: after trim Forward, also
+                    // re-run Backward, Decoding, OA, OATrace and REBUILD the
+                    // AliDisplay. Without this, Rust keeps the pre-trim ad with
+                    // stale hmmto/sqto that diverge from C by 1 residue.
+                    if make_alignment {
+                        let mut trim_bck_pmx = crate::simd::probmx::ProbMx::new(0);
+                        trim_bck_pmx.resize_full(gm.m, new_env_len);
+                        unsafe {
+                            crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                                dsq,
+                                new_dsq_offset,
+                                new_env_len,
+                                &trim_om,
+                                &mut trim_bck_pmx,
+                                Some(&trim_pmx.row_scale),
+                            );
+                        }
+                        let mut trim_pp_pmx = crate::simd::probmx::ProbMx::new(0);
+                        trim_pp_pmx.resize_full(gm.m, new_env_len);
+                        unsafe {
+                            crate::simd::optacc::posterior_decoding_pmx(
+                                &trim_pmx,
+                                &trim_bck_pmx,
+                                &trim_om,
+                                &mut trim_pp_pmx,
+                            );
+                        }
+                        let mut trim_oa_pmx = crate::simd::probmx::ProbMx::new(0);
+                        trim_oa_pmx.resize_full(gm.m, new_env_len);
+                        let trim_oasc = unsafe {
+                            crate::simd::optacc::optimal_accuracy_pmx(
+                                &trim_om,
+                                &trim_pp_pmx,
+                                &mut trim_oa_pmx,
+                            )
+                        };
+                        let trim_tr = unsafe {
+                            crate::simd::optacc::oa_trace_pmx(
+                                &trim_om,
+                                &trim_pp_pmx,
+                                &trim_oa_pmx,
+                            )
+                        };
+                        let mut trim_pp_gmx = Gmx::new(gm.m, new_env_len);
+                        let njc_loop_trim = [
+                            trim_om.xf[crate::simd::oprofile::P7O_N]
+                                [crate::simd::oprofile::P7O_LOOP],
+                            trim_om.xf[crate::simd::oprofile::P7O_J]
+                                [crate::simd::oprofile::P7O_LOOP],
+                            trim_om.xf[crate::simd::oprofile::P7O_C]
+                                [crate::simd::oprofile::P7O_LOOP],
+                        ];
+                        crate::simd::probmx::p_decoding_to_gmx(
+                            &trim_pmx,
+                            &trim_bck_pmx,
+                            gm.m,
+                            njc_loop_trim,
+                            &mut trim_pp_gmx,
+                        );
+                        let trim_sub_start = new_dsq_offset;
+                        let trim_sub_end = trim_sub_start + new_env_len;
+                        let trim_sub_dsq = {
+                            let mut buf = vec![crate::alphabet::DSQ_SENTINEL];
+                            buf.extend_from_slice(&dsq[trim_sub_start + 1..=trim_sub_end]);
+                            buf.push(crate::alphabet::DSQ_SENTINEL);
+                            buf
+                        };
+                        let abc = crate::alphabet::Alphabet::new(hmm.abc_type);
+                        if let Some(new_ad) = crate::trace::alignment_display_with_pp_bg(
+                            &trim_tr,
+                            &trim_sub_dsq,
+                            hmm,
+                            &abc,
+                            Some(&trim_pp_gmx),
+                            Some(&local_bg.f),
+                        ) {
+                            trim_rebuilt_ad = Some((new_ad, trim_oasc));
+                        }
+                    }
+                }
+            }
+
+            // Default-model Forward on the (possibly trimmed) region.
+            let mut default_om = base_om.clone();
+            default_om.reconfig_length(new_env_len as i32);
+            let mut default_pmx = crate::simd::probmx::ProbMx::new(0);
+            default_pmx.resize_full(gm.m, new_env_len);
+            let default_fwd_sc = unsafe {
+                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                    dsq,
+                    new_dsq_offset,
+                    new_env_len,
+                    &default_om,
+                    &mut default_pmx,
+                )
+            };
+            let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
+            let lt_domcorrection = default_fwd_sc - envsc_min;
+            if std::env::var("NHMMER_DEBUG_IN").is_ok() && seq_len > 1000 {
+                eprintln!(
+                    "  env=[{}..{}] env_len={} iali={} jali={} reparam={:.3} default={:.3} envsc_min={:.3}",
+                    new_ienv, new_jenv, new_env_len, iali, jali,
+                    env_fwd_sc_current, default_fwd_sc, envsc_min
+                );
+            }
+            (envsc_min, lt_domcorrection, new_env_len, new_ienv, new_jenv, new_dsq_offset, trim_rebuilt_ad)
+        } else {
+            (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, None)
+        }
+    } else {
+        (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, None)
+    };
+    // If trim rebuilt the ad, replace ad/iali/jali/oasc with post-trim values.
+    #[cfg(target_arch = "x86_64")]
+    let (ad, iali, jali, oasc) = if let Some((new_ad, new_oasc)) = trim_rebuilt_ad {
+        // new_ad.sqfrom/sqto are 1-based in the trim sub_dsq. Convert to
+        // absolute coords via the (post-trim) dsq_offset.
+        let abs_sqfrom = new_ad.sqfrom + dsq_offset;
+        let abs_sqto = new_ad.sqto + dsq_offset;
+        let new_iali = abs_sqfrom as i64;
+        let new_jali = abs_sqto as i64;
+        let new_ad_abs = AliDisplay {
+            model: new_ad.model,
+            mline: new_ad.mline,
+            aseq: new_ad.aseq,
+            hmmfrom: new_ad.hmmfrom,
+            hmmto: new_ad.hmmto,
+            sqfrom: abs_sqfrom,
+            sqto: abs_sqto,
+            ppline: new_ad.ppline,
+            rfline: new_ad.rfline,
+        };
+        (Some(new_ad_abs), new_iali, new_jali, new_oasc)
+    } else {
+        (ad, iali, jali, oasc)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let (env_fwd_sc, dom_correction) = (env_fwd_sc, dom_correction);
+
     // Omega-weighted null2 bias.
     let omega = 1.0_f32 / 256.0;
     let dom_bias = crate::logsum::p7_flogsum(0.0, omega.ln() + dom_correction);
 
-    // Domain bitscore matching C's rescore_isolated_domain():
-    // C: bitscore = envsc + (L - Ld) * log(L / (L+3))
-    //    bitscore = (bitscore - (nullsc + dombias)) / log(2)
-    // The first line adds a correction for non-envelope residues under the null model.
-    // nullsc is the full-sequence null model score.
-    let length_correction = (l - env_len) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
-    let dom_bitscore =
-        (env_fwd_sc + length_correction - (null_sc + dom_bias)) / std::f32::consts::LN_2;
+    // Domain bitscore:
+    // * long_target: use C nhmmer's post-Viterbi long-target rescaling
+    //   (hmmer/src/p7_pipeline.c:1390-1420). Shift entry/exit costs from env_len
+    //   to max_length, adjust extension term, then bits = (bitscore - nullsc)/log(2).
+    //   The dom_bias is NOT subtracted here; it's reported separately as dom.dombias.
+    // * otherwise: hmmsearch-style formula (matches C rescore_isolated_domain).
+    let dom_bitscore = if long_target {
+        // Mirror C p7_pli_postViterbi_LongTarget (hmmer/src/p7_pipeline.c:1382-1416)
+        // exactly. Keep the inner ratios in f32 where C uses `(float)` casts,
+        // then promote to f64 for log and the running bitscore accumulator.
+        let env_len_i = env_len as i32;
+        let ali_len_i = (jali - iali + 1).max(1) as i32;
+        let max_length_i = if hmm.max_length > 0 {
+            hmm.max_length as i32
+        } else {
+            env_len_i
+        };
+        let mut bitscore = env_fwd_sc as f64;
+        // (1) entrance/exit costs: env_len → max_length.
+        // C: `2 * log(2. / (env_len+2))` — `2.` is double, (env_len+2) is int →
+        // division yields double.
+        bitscore -= 2.0 * (2.0_f64 / (env_len_i + 2) as f64).ln();
+        bitscore += 2.0 * (2.0_f64 / (max_length_i + 2) as f64).ln();
+        // (2) extension cost: replace env-bounds extension with max-bounds one.
+        // C: `log((float)env_len / (env_len+2))` — ratio computed in f32, then
+        // promoted to f64 for log. Multiplier `(env_len-ali_len)` is int.
+        let env_ratio = (env_len_i as f32) / ((env_len_i + 2) as f32);
+        bitscore -= (env_len_i - ali_len_i) as f64 * (env_ratio as f64).ln();
+        let max_len_or_env_i = max_length_i.max(env_len_i);
+        // C: `log((float)om->max_length / (float)(om->max_length+2))`.
+        let max_ratio = (max_length_i as f32) / ((max_length_i + 2) as f32);
+        bitscore += (max_len_or_env_i - ali_len_i) as f64 * (max_ratio as f64).ln();
+        // Null score at max(max_length, env_len).
+        let nsc_length = max_len_or_env_i as usize;
+        let mut bg_local = bg.clone();
+        bg_local.set_length(nsc_length);
+        let nullsc = bg_local.null_one(nsc_length) as f64;
+        ((bitscore - nullsc) / std::f64::consts::LN_2) as f32
+    } else {
+        let length_correction = (l - env_len) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
+        (env_fwd_sc + length_correction - (null_sc + dom_bias)) / std::f32::consts::LN_2
+    };
     let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
     let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
     let dom_lnp = crate::stats::exponential::logsurv(dom_bitscore as f64, tau, lambda);
 
+    // C p7_pipeline.c:1455 sets `hit->dcl[0].dombias = dom_bias` where
+    // dom_bias = dom->domcorrection (raw nats). For the hmmsearch path the
+    // existing convention is to store dombias in bits. Keep both paths
+    // consistent by storing in bits.
+    let domain_dombias = if long_target {
+        dom_correction / std::f32::consts::LN_2
+    } else {
+        dom_bias / std::f32::consts::LN_2
+    };
     let domain = Domain {
         iali,
         jali,
@@ -2100,7 +2457,7 @@ fn score_domain_envelope(
         jenv: jenv as i64,
         bitscore: dom_bitscore,
         lnp: dom_lnp,
-        dombias: (dom_bias / std::f32::consts::LN_2).max(0.0),
+        dombias: domain_dombias.max(0.0),
         oasc,
         envsc: env_fwd_sc,
         domcorrection: dom_correction,
@@ -2184,6 +2541,7 @@ pub(crate) fn define_domains(
     #[cfg(target_arch = "x86_64")] simd_scratch: &mut DomainSimdScratch,
     make_alignment: bool,
     make_alignment_display: bool,
+    long_target: bool,
 ) -> (Vec<Domain>, f32, f32, f32, DomainDefinitionStats) {
     crate::logsum::p7_flogsuminit();
 
@@ -2423,7 +2781,7 @@ pub(crate) fn define_domains(
                 1,
                 l,
                 null_sc,
-                &bg.f,
+                bg,
                 Some(&mut n2sc),
                 false,
                 simd_match_odds.as_deref(),
@@ -2431,6 +2789,7 @@ pub(crate) fn define_domains(
                 Some(&mut *simd_scratch),
                 make_alignment,
                 make_alignment_display,
+                long_target,
             );
             stats.nenvelopes += 1;
             let seq_bias = c_fsum(&n2sc);
@@ -2671,7 +3030,7 @@ pub(crate) fn define_domains(
                             ienv,
                             jenv,
                             null_sc,
-                            &bg.f,
+                            bg,
                             Some(&mut n2sc),
                             true,
                             simd_match_odds.as_deref(),
@@ -2679,6 +3038,7 @@ pub(crate) fn define_domains(
                             Some(&mut *simd_scratch),
                             make_alignment,
                             make_alignment_display,
+                            long_target,
                         ));
                         last_jenv = jenv;
                     }
@@ -2700,7 +3060,7 @@ pub(crate) fn define_domains(
                     ri,
                     rj,
                     null_sc,
-                    &bg.f,
+                    bg,
                     Some(&mut n2sc),
                     false,
                     simd_match_odds.as_deref(),
@@ -2708,6 +3068,7 @@ pub(crate) fn define_domains(
                     Some(&mut *simd_scratch),
                     make_alignment,
                     make_alignment_display,
+                    long_target,
                 ));
             }
         } else {
@@ -2725,7 +3086,7 @@ pub(crate) fn define_domains(
                 ri,
                 rj,
                 null_sc,
-                &bg.f,
+                bg,
                 Some(&mut n2sc),
                 false,
                 simd_match_odds.as_deref(),
@@ -2733,6 +3094,7 @@ pub(crate) fn define_domains(
                 Some(&mut *simd_scratch),
                 make_alignment,
                 make_alignment_display,
+                long_target,
             ));
         }
     }

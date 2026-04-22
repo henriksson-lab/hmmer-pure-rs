@@ -626,6 +626,10 @@ fn select_j(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
 }
 
 unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> State {
+    // Mirror C hmmer/src/impl_sse/optacc.c:select_e iteration order: for each
+    // q, check all 4 M lanes first (M ties beat D via `>=`), then all 4 D
+    // lanes (D only wins on strict `>`). Interleaving M/D per lane changes
+    // tie-break picks and can shift the chosen k.
     let q_count = ox.q_count();
     let mut max = f32::NEG_INFINITY;
     let mut smax = State::M;
@@ -641,6 +645,12 @@ unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> S
                 max = m;
                 smax = State::M;
                 kmax = k;
+            }
+        }
+        for lane in 0..4 {
+            let k = lane * q_count + q + 1;
+            if k > om.m {
+                continue;
             }
             let d = cell_lane(ox, i, q, OM_D, lane);
             if d > max {

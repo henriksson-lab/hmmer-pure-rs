@@ -395,17 +395,22 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
                 }
             }
         }
-        // mm_flag would be at annot_start + 3 in 3f format, or cs at annot_start + 3
-        if mm_flag {
-            if let Some(&val) = parts.get(annot_start + 3) {
-                if let Some(mm) = &mut hmm.mm {
-                    mm[node] = val.as_bytes().first().copied().unwrap_or(b'-');
-                }
-            }
-        } else if cs_flag {
-            if let Some(&val) = parts.get(annot_start + 3) {
+        // CS is always the LAST token on a match-state line in HMMER3 format
+        // (placeholders `-` are emitted even for disabled RF/MM). mm lives just
+        // before cs if both are enabled, otherwise at the last slot.
+        if cs_flag {
+            if let Some(&val) = parts.last() {
                 if let Some(cs) = &mut hmm.cs {
                     cs[node] = val.as_bytes().first().copied().unwrap_or(b'-');
+                }
+            }
+        }
+        if mm_flag {
+            // mm sits at the position just before cs (or last if no cs).
+            let mm_idx = if cs_flag { parts.len().saturating_sub(2) } else { parts.len().saturating_sub(1) };
+            if let Some(&val) = parts.get(mm_idx) {
+                if let Some(mm) = &mut hmm.mm {
+                    mm[node] = val.as_bytes().first().copied().unwrap_or(b'-');
                 }
             }
         }

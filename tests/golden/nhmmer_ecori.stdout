@@ -1,3 +1,37 @@
+# nhmmer :: search a DNA model, alignment, or sequence against a DNA database
+# HMMER 3.4 (Aug 2023); http://hmmer.org/
+# Copyright (C) 2023 Howard Hughes Medical Institute.
+# Freely distributed under the BSD open source license.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# query file:                      hmmer/testsuite/ecori.hmm
+# target sequence database:        hmmer/testsuite/ecori.fa
+# input query is asserted as:      DNA
+# number of worker threads:        2
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-Error: Unable to guess alphabet for target sequence database file hmmer/testsuite/ecori.fa
+Query:       ecori  [M=6]
+Scores for complete hits:
+    E-value  score  bias  Sequence  start    end  Description
+    ------- ------ -----  --------  -----  -----  -----------
 
+   [No hits detected that satisfy reporting thresholds]
+
+
+Annotation for each hit  (and alignments):
+
+   [No targets detected that satisfy reporting thresholds]
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (6 nodes)
+Target sequences:                          1  (12 residues searched)
+Residues passing SSV filter:              12  (1); expected (0.02)
+Residues passing bias filter:             12  (1); expected (0.02)
+Residues passing Vit filter:              12  (1); expected (0.003)
+Residues passing Fwd filter:               0  (0); expected (3e-05)
+Total number of hits:                      0  (0)
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.00
+# Mc/sec: 0.046
+//
+[ok]

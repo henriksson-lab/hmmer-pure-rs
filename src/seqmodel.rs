@@ -128,56 +128,46 @@ pub fn build_single_seq_hmm(
     let mut hmm = Hmm::new(m, abc.abc_type, k);
     hmm.name = name.to_string();
 
-    // Set transitions and emissions for each node
-    for node in 1..=m {
-        let residue = dsq[node] as usize;
-
-        // Match emissions from conditional probability matrix
-        if residue < k {
-            for x in 0..k {
-                hmm.mat[node][x] = cond[residue][x];
-            }
-        } else {
-            // Unknown residue: use background
-            for x in 0..k {
-                hmm.mat[node][x] = bg.f[x];
+    // Mirror C p7_Seqmodel (hmmer/src/seqmodel.c:55) exactly: set transitions
+    // for every node k in 0..=M with the same formula, then override a
+    // subset of node M's transitions at the end. Rust previously hand-wrote
+    // node 0 with t[0][MM]=1-popen and node M with all-zeroed I/D
+    // transitions, producing ~21-bit score inflation vs C phmmer.
+    for node in 0..=m {
+        // Match emissions from conditional probability matrix (only for k>0).
+        if node > 0 {
+            let residue = dsq[node] as usize;
+            if residue < k {
+                for x in 0..k {
+                    hmm.mat[node][x] = cond[residue][x];
+                }
+            } else {
+                for x in 0..k {
+                    hmm.mat[node][x] = bg.f[x];
+                }
             }
         }
 
-        // Insert emissions = background
+        // Insert emissions = background, for every node including 0.
         for x in 0..k {
             hmm.ins[node][x] = bg.f[x];
         }
 
-        // Transitions
-        if node < m {
-            hmm.t[node][MM] = 1.0 - 2.0 * popen;
-            hmm.t[node][MI] = popen;
-            hmm.t[node][MD] = popen;
-            hmm.t[node][IM] = 1.0 - pextend;
-            hmm.t[node][II] = pextend;
-            hmm.t[node][DM] = 1.0 - pextend;
-            hmm.t[node][DD] = pextend;
-        } else {
-            // Last node: no I or D transitions out
-            hmm.t[node][MM] = 1.0;
-            hmm.t[node][MI] = 0.0;
-            hmm.t[node][MD] = 0.0;
-            hmm.t[node][IM] = 1.0;
-            hmm.t[node][II] = 0.0;
-            hmm.t[node][DM] = 1.0;
-            hmm.t[node][DD] = 0.0;
-        }
+        hmm.t[node][MM] = 1.0 - 2.0 * popen;
+        hmm.t[node][MI] = popen;
+        hmm.t[node][MD] = popen;
+        hmm.t[node][IM] = 1.0 - pextend;
+        hmm.t[node][II] = pextend;
+        hmm.t[node][DM] = 1.0 - pextend;
+        hmm.t[node][DD] = pextend;
     }
 
-    // Node 0 (begin) transitions
-    hmm.t[0][MM] = 1.0 - popen; // B->M1
-    hmm.t[0][MI] = popen; // B->I0 (actually not used)
-    hmm.t[0][MD] = popen; // B->D1
-    hmm.t[0][IM] = 1.0 - pextend;
-    hmm.t[0][II] = pextend;
-    hmm.t[0][DM] = 1.0 - pextend;
-    hmm.t[0][DD] = pextend;
+    // Special handling at node M (C seqmodel.c:85): overrides MM, MD, DM, DD
+    // ONLY. MI, IM, II keep their general-formula values from the loop above.
+    hmm.t[m][MM] = 1.0 - popen;
+    hmm.t[m][MD] = 0.0;
+    hmm.t[m][DM] = 1.0;
+    hmm.t[m][DD] = 0.0;
 
     // Insert emissions at node 0
     for x in 0..k {

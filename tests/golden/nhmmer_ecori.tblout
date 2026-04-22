@@ -1,0 +1,12 @@
+# target name        accession  query name           accession  hmmfrom hmm to alifrom  ali to envfrom  env to  sq len strand   E-value  score  bias  description of target
+#------------------- ---------- -------------------- ---------- ------- ------- ------- ------- ------- ------- ------- ------ --------- ------ ----- ---------------------
+#
+# Program:         nhmmer
+# Version:         3.4 (Aug 2023)
+# Pipeline mode:   SEARCH
+# Query file:      hmmer/testsuite/ecori.hmm
+# Target file:     hmmer/testsuite/ecori.fa
+# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE hmmer/testsuite/ecori.hmm hmmer/testsuite/ecori.fa 
+# Current dir:     /data/henriksson/github/claude/newhmmer
+# Date:            Tue Apr 21 21:32:07 2026
+# [ok]
