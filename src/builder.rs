@@ -6,6 +6,21 @@ use crate::bg::Bg;
 use crate::hmm::*;
 use crate::msa::Msa;
 
+fn checksum_msa(msa: &Msa) -> u32 {
+    let mut val = 0u32;
+    for row in &msa.aseq {
+        for &ch in row {
+            val = val.wrapping_add(ch as u32);
+            val = val.wrapping_add(val << 10);
+            val ^= val >> 6;
+        }
+    }
+    val = val.wrapping_add(val << 3);
+    val ^= val >> 11;
+    val = val.wrapping_add(val << 15);
+    val
+}
+
 /// Henikoff position-based sequence weighting.
 /// Returns weights[0..nseq] that sum to nseq.
 pub fn pb_weights(msa: &Msa, abc: &Alphabet) -> Vec<f32> {
@@ -279,6 +294,22 @@ pub fn build_hmm_from_msa(msa: &Msa, abc: &Alphabet, bg: &Bg, symfrac: f32) -> H
         hmm.rf = Some(rf);
         hmm.flags |= P7H_RF;
     }
+
+    // Store alignment column map for hmmalign --mapali.
+    let mut map = vec![0i32; m + 1];
+    let mut node = 0usize;
+    for col in 0..msa.alen {
+        if matassign[col] {
+            node += 1;
+            map[node] = (col + 1) as i32;
+        }
+    }
+    hmm.map = Some(map);
+    hmm.flags |= P7H_MAP;
+
+    // Store the training alignment checksum for hmmalign --mapali verification.
+    hmm.checksum = checksum_msa(msa);
+    hmm.flags |= P7H_CHKSUM;
 
     // Apply Dirichlet priors to emission/transition counts
     crate::prior::apply_priors(&mut hmm);

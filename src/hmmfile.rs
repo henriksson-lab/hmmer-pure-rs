@@ -407,7 +407,11 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
         }
         if mm_flag {
             // mm sits at the position just before cs (or last if no cs).
-            let mm_idx = if cs_flag { parts.len().saturating_sub(2) } else { parts.len().saturating_sub(1) };
+            let mm_idx = if cs_flag {
+                parts.len().saturating_sub(2)
+            } else {
+                parts.len().saturating_sub(1)
+            };
             if let Some(&val) = parts.get(mm_idx) {
                 if let Some(mm) = &mut hmm.mm {
                     mm[node] = val.as_bytes().first().copied().unwrap_or(b'-');

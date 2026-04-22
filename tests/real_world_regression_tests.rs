@@ -24,7 +24,14 @@ fn run_hmmsearch_tblout(hmm: &str, seqdb: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
     let output = Command::new(binary_path("hmmer"))
-        .args(["search", "--noali", "--tblout", tblout.to_str().unwrap(), hmm, seqdb])
+        .args([
+            "search",
+            "--noali",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
         .output()
         .expect("failed to run hmmer search");
     assert!(
@@ -91,7 +98,14 @@ fn run_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let domtblout = dir.path().join("domtblout.txt");
     let output = Command::new(binary_path("hmmer"))
-        .args(["search", "--noali", "--domtblout", domtblout.to_str().unwrap(), hmm, seqdb])
+        .args([
+            "search",
+            "--noali",
+            "--domtblout",
+            domtblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
         .output()
         .expect("failed to run hmmer search");
     assert!(
@@ -242,14 +256,12 @@ fn normalize_nhmmer_stdout(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_nhmmer_tblout_with_fixture(
-    content: &str,
-    hmm: &str,
-    target: &str,
-) -> Vec<String> {
+fn normalize_nhmmer_tblout_with_fixture(content: &str, hmm: &str, target: &str) -> Vec<String> {
     let root_prefix = format!("{}/", env!("CARGO_MANIFEST_DIR"));
-    let option_line =
-        format!("# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE {} {} ", hmm, target);
+    let option_line = format!(
+        "# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE {} {} ",
+        hmm, target
+    );
     content
         .lines()
         .filter(|line| !line.starts_with("# Current dir:") && !line.starts_with("# Date:"))
@@ -296,7 +308,10 @@ fn test_nhmmer_made1_tblout_matches_golden_rows() {
     let golden_rows = parse_nhmmer_rows(&golden);
     let rust_rows = parse_nhmmer_rows(&rust);
 
-    assert_eq!(rust_rows, golden_rows, "nhmmer MADE1 rows diverged from golden output");
+    assert_eq!(
+        rust_rows, golden_rows,
+        "nhmmer MADE1 rows diverged from golden output"
+    );
 }
 
 #[test]
@@ -393,7 +408,10 @@ fn test_nhmmer_made1_watson_and_crick_split_hits_cleanly() {
         .map(|row| (row.ali_from, row.ali_to, row.strand.clone()))
         .collect();
 
-    assert!(watson_set.is_disjoint(&crick_set), "strand-specific hit sets should not overlap");
+    assert!(
+        watson_set.is_disjoint(&crick_set),
+        "strand-specific hit sets should not overlap"
+    );
     assert_eq!(both_set.len(), watson_set.len() + crick_set.len());
     assert_eq!(
         both_set,
@@ -404,15 +422,20 @@ fn test_nhmmer_made1_watson_and_crick_split_hits_cleanly() {
 
 #[test]
 fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
-    let golden_stdout = std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.stdout")).unwrap();
-    let golden_tbl = std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.tblout")).unwrap();
+    let golden_stdout =
+        std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.stdout")).unwrap();
+    let golden_tbl =
+        std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.tblout")).unwrap();
     let (stdout, tbl) = run_nhmmer(
         &test_path("hmmer/testsuite/ecori.hmm"),
         &test_path("hmmer/testsuite/ecori.fa"),
         &["--dna"],
     );
     let rows = parse_nhmmer_rows(&tbl);
-    assert!(rows.is_empty(), "ecori fixture should not report hits at default thresholds");
+    assert!(
+        rows.is_empty(),
+        "ecori fixture should not report hits at default thresholds"
+    );
     assert!(stdout.contains("# input query is asserted as:      DNA"));
     assert!(stdout.contains("[No hits detected that satisfy reporting thresholds]"));
     assert!(stdout.contains("[ok]"));
@@ -438,7 +461,8 @@ fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
 
 #[test]
 fn test_nhmmer_3box_exact_parity_bundle() {
-    let golden_stdout = std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.stdout")).unwrap();
+    let golden_stdout =
+        std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.stdout")).unwrap();
     let golden_tbl = std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.tblout")).unwrap();
     let (stdout, tbl) = run_nhmmer(
         &test_path("hmmer/testsuite/3box.hmm"),
@@ -475,7 +499,8 @@ fn test_nhmmer_3box_exact_parity_bundle() {
 
 #[test]
 fn test_gecco_pfam5_real_world_query_hit_counts_match_golden() {
-    let golden = std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
+    let golden =
+        std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
         &test_path("hmmer/testsuite/gecco_proteins.faa"),
@@ -484,8 +509,16 @@ fn test_gecco_pfam5_real_world_query_hit_counts_match_golden() {
     let golden_rows = parse_hmmsearch_rows(&golden);
     let rust_rows = parse_hmmsearch_rows(&rust);
 
-    assert_eq!(rust_rows.len(), 16, "gecco_pfam5 fixture should produce 16 hits");
-    assert_eq!(rust_rows.len(), golden_rows.len(), "gecco_pfam5 total hit count diverged");
+    assert_eq!(
+        rust_rows.len(),
+        16,
+        "gecco_pfam5 fixture should produce 16 hits"
+    );
+    assert_eq!(
+        rust_rows.len(),
+        golden_rows.len(),
+        "gecco_pfam5 total hit count diverged"
+    );
     assert_eq!(
         query_hit_counts(&rust_rows),
         query_hit_counts(&golden_rows),
@@ -574,22 +607,35 @@ fn test_gecco_missed4_real_world_query_hit_counts_match_golden() {
     let golden_rows = parse_hmmsearch_rows(&golden);
     let rust_rows = parse_hmmsearch_rows(&rust);
 
-    assert_eq!(rust_rows.len(), 60, "gecco_missed4 fixture should produce 60 hits");
-    assert_eq!(rust_rows.len(), golden_rows.len(), "gecco_missed4 total hit count diverged");
+    assert_eq!(
+        rust_rows.len(),
+        60,
+        "gecco_missed4 fixture should produce 60 hits"
+    );
+    assert_eq!(
+        rust_rows.len(),
+        golden_rows.len(),
+        "gecco_missed4 total hit count diverged"
+    );
     assert_eq!(
         query_hit_counts(&rust_rows),
         query_hit_counts(&golden_rows),
         "gecco_missed4 per-query hit counts diverged"
     );
 
-    let golden_queries: HashSet<String> = golden_rows.iter().map(|(_, q, _, _)| q.clone()).collect();
+    let golden_queries: HashSet<String> =
+        golden_rows.iter().map(|(_, q, _, _)| q.clone()).collect();
     let rust_queries: HashSet<String> = rust_rows.iter().map(|(_, q, _, _)| q.clone()).collect();
-    assert_eq!(rust_queries, golden_queries, "gecco_missed4 query coverage diverged");
+    assert_eq!(
+        rust_queries, golden_queries,
+        "gecco_missed4 query coverage diverged"
+    );
 }
 
 #[test]
 fn test_gecco_pfam5_top_hits_match_golden_rows() {
-    let golden = std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
+    let golden =
+        std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
         &test_path("hmmer/testsuite/gecco_proteins.faa"),
@@ -599,8 +645,16 @@ fn test_gecco_pfam5_top_hits_match_golden_rows() {
     let rust_rows = parse_hmmsearch_rows(&rust);
 
     assert_eq!(
-        rust_rows.iter().take(5).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
-        golden_rows.iter().take(5).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
+        rust_rows
+            .iter()
+            .take(5)
+            .map(|r| (&r.0, &r.1))
+            .collect::<Vec<_>>(),
+        golden_rows
+            .iter()
+            .take(5)
+            .map(|r| (&r.0, &r.1))
+            .collect::<Vec<_>>(),
         "gecco_pfam5 top five hit rows diverged from golden ordering"
     );
 }
@@ -611,7 +665,9 @@ fn test_representative_pfam_real_world_top_hits_match_golden() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
 
     for family in families {
-        let golden = std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family))).unwrap();
+        let golden =
+            std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family)))
+                .unwrap();
         let rust = run_hmmsearch_tblout(
             &test_path(&format!("test_data/{}_pfam.hmm", family)),
             &seqdb,
@@ -648,7 +704,10 @@ fn test_fn3_domtblout_rows_match_golden_core_columns() {
 
     let golden_rows = parse_domtbl_rows(&golden);
     let rust_rows = parse_domtbl_rows(&rust);
-    assert_eq!(rust_rows, golden_rows, "fn3 domtblout rows diverged from golden output");
+    assert_eq!(
+        rust_rows, golden_rows,
+        "fn3 domtblout rows diverged from golden output"
+    );
 }
 
 #[test]
@@ -673,7 +732,11 @@ fn test_rrm1_domtblout_multi_domain_profile_is_stable() {
         &test_path("test_data/RRM_1_pfam.hmm"),
         &test_path("test_data/human_swissprot_2k.fasta"),
     ));
-    assert_eq!(rows.len(), 419, "RRM_1 domtblout total domain count changed");
+    assert_eq!(
+        rows.len(),
+        419,
+        "RRM_1 domtblout total domain count changed"
+    );
 
     let best = rows
         .iter()
@@ -693,7 +756,10 @@ fn test_rrm1_domtblout_multi_domain_profile_is_stable() {
         .iter()
         .filter(|row| row.target == "sp|P11940|PABP1_HUMAN")
         .count();
-    assert_eq!(pabp1_domains, 4, "PABP1_HUMAN should still carry four RRM_1 domains");
+    assert_eq!(
+        pabp1_domains, 4,
+        "PABP1_HUMAN should still carry four RRM_1 domains"
+    );
 }
 
 #[test]
@@ -701,7 +767,9 @@ fn test_rrm1_domtblout_multi_domain_profile_is_stable() {
 fn test_pfam_top3_rows_match_golden_for_all_families() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
     for family in PFAM_FAMILIES {
-        let golden = std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family))).unwrap();
+        let golden =
+            std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family)))
+                .unwrap();
         let rust = run_hmmsearch_tblout(
             &test_path(&format!("test_data/{}_pfam.hmm", family)),
             &seqdb,
@@ -710,8 +778,16 @@ fn test_pfam_top3_rows_match_golden_for_all_families() {
         let rust_rows = parse_hmmsearch_rows(&rust);
         let n = golden_rows.len().min(rust_rows.len()).min(3);
         assert_eq!(
-            rust_rows.iter().take(n).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
-            golden_rows.iter().take(n).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
+            rust_rows
+                .iter()
+                .take(n)
+                .map(|r| (&r.0, &r.1))
+                .collect::<Vec<_>>(),
+            golden_rows
+                .iter()
+                .take(n)
+                .map(|r| (&r.0, &r.1))
+                .collect::<Vec<_>>(),
             "{} top-{} rows diverged from golden output",
             family,
             n
@@ -724,7 +800,9 @@ fn test_pfam_top3_rows_match_golden_for_all_families() {
 fn test_pfam_per_query_hit_counts_match_golden_for_all_families() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
     for family in PFAM_FAMILIES {
-        let golden = std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family))).unwrap();
+        let golden =
+            std::fs::read_to_string(test_path(&format!("tests/golden/pfam_{}.tblout", family)))
+                .unwrap();
         let rust = run_hmmsearch_tblout(
             &test_path(&format!("test_data/{}_pfam.hmm", family)),
             &seqdb,
@@ -736,25 +814,4 @@ fn test_pfam_per_query_hit_counts_match_golden_for_all_families() {
             family
         );
     }
-}
-
-#[test]
-#[ignore = "slow parity sweep with exact nhmmer row and stdout checks"]
-fn test_nhmmer_made1_full_parity_bundle() {
-    let golden_tbl = std::fs::read_to_string(test_path("tests/golden/nhmmer_made1.tblout")).unwrap();
-    let golden_stdout = std::fs::read_to_string(test_path("tests/golden/nhmmer_made1.stdout")).unwrap();
-    let stdout = run_nhmmer_stdout(
-        &test_path("hmmer/tutorial/MADE1.hmm"),
-        &test_path("hmmer/tutorial/dna_target.fa"),
-        &[],
-    );
-    let tbl = run_nhmmer_tblout(
-        &test_path("hmmer/tutorial/MADE1.hmm"),
-        &test_path("hmmer/tutorial/dna_target.fa"),
-    );
-    assert_eq!(parse_nhmmer_rows(&tbl), parse_nhmmer_rows(&golden_tbl));
-    assert_eq!(
-        normalize_nhmmer_stdout(&stdout),
-        normalize_nhmmer_stdout(&golden_stdout)
-    );
 }

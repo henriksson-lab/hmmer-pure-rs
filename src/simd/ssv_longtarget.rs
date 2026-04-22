@@ -108,10 +108,13 @@ pub unsafe fn ssv_filter_longtarget(
     // Note: C computes nullsc as a float via p7_bg_NullOne, which internally uses
     // double log(). We mirror that by computing in f64 and casting the final
     // result to f32.
-    let ml = if max_length > 0 { max_length as usize } else { m * 4 };
+    let ml = if max_length > 0 {
+        max_length as usize
+    } else {
+        m * 4
+    };
     let p1: f32 = ml as f32 / (ml as f32 + 1.0);
-    let nullsc: f32 =
-        (ml as f64 * (p1 as f64).ln() + (1.0_f64 - p1 as f64).ln()) as f32;
+    let nullsc: f32 = (ml as f64 * (p1 as f64).ln() + (1.0_f64 - p1 as f64).ln()) as f32;
 
     // Use om->tjb_b directly (matching C line 324, 334, 385, 420)
     // C reconfigures om->tjb_b via ReconfigMSVLength before calling this function.
@@ -126,9 +129,7 @@ pub unsafe fn ssv_filter_longtarget(
     // Rust's invsurv returns f64; keeping full f64 precision shifts the ceil()
     // boundary for a few sequences and produces different SSV peak sets.
     let inv_p_f32 = inv_p as f32;
-    let sc_thresh_d: f64 = (((nullsc as f64)
-        + (inv_p_f32 as f64 * std::f64::consts::LN_2)
-        + 3.0)
+    let sc_thresh_d: f64 = (((nullsc as f64) + (inv_p_f32 as f64 * std::f64::consts::LN_2) + 3.0)
         * (om.scale_b as f64))
         + (om.base_b as f64)
         + (om.tec_b as f64)
@@ -193,8 +194,6 @@ pub unsafe fn ssv_filter_longtarget(
         let temp_v = _mm_adds_epu8(xe_v, sc_thresh_v);
         let temp_v = _mm_cmpeq_epi8(temp_v, ceiling_v);
         let cmp = _mm_movemask_epi8(temp_v);
-
-
 
         if cmp != 0 {
             // Find which model state exceeded threshold.
@@ -504,9 +503,17 @@ pub fn extend_and_merge_windows_with_scoredata(
         // Match C: (int64_t)(n - double), (int64_t)(n + length + double) with
         // truncation toward zero.
         let start_f = (w.n as i64) as f64 - pre_ext_f;
-        let start = if start_f < 1.0 { 1 } else { start_f as i64 as usize };
+        let start = if start_f < 1.0 {
+            1
+        } else {
+            start_f as i64 as usize
+        };
         let end_f = ((w.n + w.length) as i64) as f64 + suf_ext_f;
-        let end_raw = if end_f < 1.0 { 1 } else { end_f as i64 as usize };
+        let end_raw = if end_f < 1.0 {
+            1
+        } else {
+            end_f as i64 as usize
+        };
         let end = end_raw.min(target_len);
         w.length = end - start + 1;
         w.n = start;

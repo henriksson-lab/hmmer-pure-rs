@@ -201,7 +201,31 @@ The Pfam equivalence tests search 18 diverse Pfam HMMs (model lengths 23-452) ag
 
 ## Status
 
-Full port of HMMER 3.4 search pipeline. 118 tests, zero warnings.
+Full port of HMMER 3.4 command surface, with the search pipeline at exact or
+near-exact parity on the committed regression corpus and targeted remaining
+gaps called out below.
+
+### Remaining Feature Gaps
+
+The command surface is broadly present, but a few areas are still incomplete or
+not yet C-identical:
+
+- `hmmalign` now reconstructs model-guided alignments and supports Stockholm,
+  A2M, `--trim`, `-o`, and strict upstream-style `--mapali` checksum
+  validation. The remaining gap is breadth, not core functionality: only the
+  implemented output formats are accepted, and parity coverage is still growing
+  around legacy fixture edge cases.
+- `phmmer` and first-iteration `jackhmmer` now use the upstream-style
+  single-sequence score-matrix conversion path instead of the earlier
+  renormalized shortcut. Current committed regressions cover the improved
+  baseline, but parity coverage here is still lighter than for
+  `hmmsearch`/`nhmmer`.
+- Domain-definition speed still lags behind C on larger workloads because some
+  per-envelope Forward/Backward/Decoding work remains on generic DP paths
+  instead of the corresponding SIMD paths.
+- Sequence-level null2 bias for multi-domain hits is still an approximation.
+  Per-domain scores match well, but the full-sequence bias calculation does not
+  yet follow C's full-sequence posterior-decoding route exactly.
 
 Currently supported programs:
 - `hmmsearch` - Search HMM(s) against a sequence database (FASTA/UniProt/gzipped)

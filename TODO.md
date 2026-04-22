@@ -5,6 +5,22 @@ HMMER, then making it at least as fast as the original. Keep it current. When a
 trace result or a failed experiment changes what the next useful target is,
 update this file in the same change.
 
+## Remaining Feature Checklist
+
+- [ ] `hmmalign`: replace the current Viterbi-only placeholder with real
+      traceback and Stockholm/model-guided gapped alignment output.
+- [ ] `phmmer`: make single-sequence build/profile scoring C-identical so
+      absolute bit scores and E-values match, not just hit ordering.
+- [ ] Domain definition: finish the remaining SIMD/full-matrix Forward,
+      Backward, and Decoding work needed to remove the generic DP bottleneck in
+      per-envelope rescoring.
+- [ ] Sequence-level null2 bias: match C's full-sequence posterior-decoding
+      route for multi-domain hits instead of deriving it from summed per-domain
+      corrections.
+- [ ] Keep command-surface parity honest: whenever a command exists but is not
+      behaviorally complete, document the limitation in both `README.md` and
+      the relevant subcommand source file until it is fixed.
+
 ## Ground Rules
 
 - Prefer faithful C behavior over idiomatic Rust when they differ in arithmetic,
@@ -928,15 +944,20 @@ cases to byte-identical output.
   `pub` in `src/subcmd/hmmsearch.rs`). File layout matches C's `phmmer
   --tblout` format.
 
-### 8.8 phmmer scoring is not yet C-identical
+### 8.8 phmmer single-sequence score-matrix conversion drift
 
-- On `hmmer/tutorial/HBB_HUMAN` vs `hmmer/tutorial/globins45.fa`, Rust
-  phmmer scores each hit roughly 21 bits higher than C phmmer (e.g.
-  HBB_CALAR Rust=335.4 bits, C=314.3 bits). Hit ORDER is preserved, but
-  the absolute scores diverge. This is a phmmer-specific bug in the
-  single-sequence HMM build or profile configuration — not related to
-  nhmmer or hmmsearch, which do match C exactly.
-- Likely suspects: `p7_SingleBuilder` port, the `popen`/`pextend` gap
-  parameterization, or profile log-odds scoring.
-- Action: defer until phmmer parity is prioritized; hmmsearch/nhmmer are
-  the current focus and are already byte-identical.
+- Fixed 2026-04-22. Rust's `seqmodel.rs` had two mismatches from the
+  upstream Easel/HMMER path:
+  1. it set `hmm.compo[]` to background frequencies instead of using the
+     occupancy-weighted `p7_hmm_SetComposition()` calculation; and
+  2. it reverse-engineered the BLOSUM62 conditional matrix with a fixed
+     lambda plus an extra renormalization step, instead of solving lambda
+     from the background frequencies and using the implied joint
+     probabilities directly.
+- After matching the upstream score-matrix conversion shape, the documented
+  `phmmer` globins regression moved from the inflated
+  `HBB_CALAR = 335.4 bits` down to `314.3 bits`, matching the earlier C
+  reference value that motivated the bug note.
+- Regression coverage now lives in
+  `tests/phmmer_integration_tests.rs`, covering the small 20aa fixture and
+  the real-world `HBB_HUMAN` vs `globins45.fa` case.

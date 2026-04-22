@@ -244,7 +244,11 @@ fn write_nhmmer_tblout<W: std::io::Write>(
         let acc_s = hit.acc.as_str();
         let acc_display: &str = if acc_s.is_empty() { "-" } else { acc_s };
         let qacc_display = qacc.filter(|s| !s.is_empty()).unwrap_or("-");
-        let desc_display = if hit.desc.is_empty() { "-" } else { hit.desc.as_str() };
+        let desc_display = if hit.desc.is_empty() {
+            "-"
+        } else {
+            hit.desc.as_str()
+        };
         let ev_str = format_pct2g(hit.lnp.exp(), 9);
         writeln!(
             f,
@@ -290,7 +294,10 @@ fn write_nhmmer_tblout<W: std::io::Write>(
 
 fn format_date(t: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // Very minimal date; mirror `Mon Day HH:MM:SS YYYY` shape. Using a rough
     // ctime-style format via time-of-day arithmetic.
     let (sec, min, hour, day, month, year) = broken_down_time(secs);
@@ -459,11 +466,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     )
     .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
-    writeln!(
-        out,
-        "# Copyright (C) 2023 Howard Hughes Medical Institute."
-    )
-    .unwrap();
+    writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
     writeln!(
         out,
         "# Freely distributed under the BSD open source license."
@@ -474,10 +477,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
     )
     .unwrap();
-    writeln!(out, "# query file:                      {}", args.hmmfile.display()).unwrap();
-    writeln!(out, "# target sequence database:        {}", args.seqdb.display()).unwrap();
+    writeln!(
+        out,
+        "# query file:                      {}",
+        args.hmmfile.display()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# target sequence database:        {}",
+        args.seqdb.display()
+    )
+    .unwrap();
     if args.tblout.is_some() {
-        writeln!(out, "# hits tabular output:             {}", args.tblout.as_ref().unwrap().display()).unwrap();
+        writeln!(
+            out,
+            "# hits tabular output:             {}",
+            args.tblout.as_ref().unwrap().display()
+        )
+        .unwrap();
     }
     // Mirror C nhmmer.c:341-342 — emit alphabet assertion when flag is used.
     if args.dna {
@@ -837,22 +855,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             // Print "inclusion threshold" separator when transitioning from
             // included to reported-but-not-included hits (match C
             // p7_tophits.c:1181).
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0
-                && !have_printed_incthresh
-            {
+            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 && !have_printed_incthresh {
                 writeln!(out, "  ------ inclusion threshold ------").unwrap();
                 have_printed_incthresh = true;
             }
-            let best_dom = hit
-                .dcl
-                .iter()
-                .min_by(|a, b| a.lnp.total_cmp(&b.lnp));
-            let (iali, jali) = best_dom
-                .map(|d| (d.iali, d.jali))
-                .unwrap_or((0, 0));
-            let dom_bias_bits = best_dom
-                .map(|d| d.dombias)
-                .unwrap_or(hit.bias);
+            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let (iali, jali) = best_dom.map(|d| (d.iali, d.jali)).unwrap_or((0, 0));
+            let dom_bias_bits = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
             // Match C's "%c %9.2g %6.1f %5.1f  %-*s %*ld %*ld" — newness,
             // then E-value in %g format.
             writeln!(
@@ -969,7 +978,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 let hmmfrom_bracket = if hmmfrom == 1 { '[' } else { '.' };
                 let hmmto_bracket = if hmmto == hmm.m { ']' } else { '.' };
                 let sqfrom_bracket = if sqfrom == 1 { '[' } else { '.' };
-                let sqto_bracket = if sqto as i64 == hit.n as i64 { ']' } else { '.' };
+                let sqto_bracket = if sqto as i64 == hit.n as i64 {
+                    ']'
+                } else {
+                    '.'
+                };
                 let envfrom_bracket = if dom.ienv == 1 { '[' } else { '.' };
                 let envto_bracket = if dom.jenv == hit.n as i64 { ']' } else { '.' };
                 let env_span = (dom.jenv - dom.ienv).abs() as f32;
@@ -1017,7 +1030,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                                 if ch == '.' {
                                     s.push('.');
                                 } else {
-                                    s.push(if cs_idx < cs.len() { cs[cs_idx] as char } else { ' ' });
+                                    s.push(if cs_idx < cs.len() {
+                                        cs[cs_idx] as char
+                                    } else {
+                                        ' '
+                                    });
                                     cs_idx += 1;
                                 }
                             }
@@ -1257,13 +1274,15 @@ fn search_longtarget(
         hmm.m * 4
     };
     #[cfg(target_arch = "x86_64")]
-    let (prefix_lens, suffix_lens) =
-        ssv_longtarget::compute_prefix_suffix_lengths_from_om(om);
+    let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths_from_om(om);
     #[cfg(not(target_arch = "x86_64"))]
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths(hmm);
     if std::env::var("DEBUG_PRE_MERGE_RUST").is_ok() {
         for (i, w) in windows.iter().enumerate() {
-            eprintln!("DEBUG_RUST pre_merge idx={} n={} len={} k={}", i, w.n, w.length, w.k);
+            eprintln!(
+                "DEBUG_RUST pre_merge idx={} n={} len={} k={}",
+                i, w.n, w.length, w.k
+            );
         }
     }
     ssv_longtarget::extend_and_merge_windows_with_scoredata(
@@ -1276,7 +1295,10 @@ fn search_longtarget(
     );
     if std::env::var("DEBUG_POST_MERGE_RUST").is_ok() {
         for (i, w) in windows.iter().enumerate() {
-            eprintln!("DEBUG_RUST post_merge idx={} n={} len={} k={}", i, w.n, w.length, w.k);
+            eprintln!(
+                "DEBUG_RUST post_merge idx={} n={} len={} k={}",
+                i, w.n, w.length, w.k
+            );
         }
     }
 
@@ -1305,18 +1327,13 @@ fn search_longtarget(
         let mut bg_win = bg.clone();
         bg_win.set_length(win_len);
         let nullsc = bg_win.null_one(win_len);
-        let usc_result = unsafe {
-            hmmer_pure_rs::simd::msv_filter::msv_filter(&sub_dsq, win_len, &msv_om)
-        };
+        let usc_result =
+            unsafe { hmmer_pure_rs::simd::msv_filter::msv_filter(&sub_dsq, win_len, &msv_om) };
         let usc = match usc_result {
             hmmer_pure_rs::simd::msv_filter::MsvResult::Ok(sc) => sc,
             hmmer_pure_rs::simd::msv_filter::MsvResult::Overflow => f32::INFINITY,
         };
-        let msv_pval = hmmer_pure_rs::pipeline::msv_pvalue(
-            usc,
-            nullsc,
-            &hmm.evparam,
-        );
+        let msv_pval = hmmer_pure_rs::pipeline::msv_pvalue(usc, nullsc, &hmm.evparam);
         if msv_pval > f1_thresh {
             continue;
         }
@@ -1390,11 +1407,7 @@ fn search_longtarget(
             };
             let filtersc_f1 = nullsc_full + bias_delta * f1_scale;
             let usc = msv.score;
-            let bias_pval = hmmer_pure_rs::pipeline::msv_pvalue(
-                usc,
-                filtersc_f1,
-                &hmm.evparam,
-            );
+            let bias_pval = hmmer_pure_rs::pipeline::msv_pvalue(usc, filtersc_f1, &hmm.evparam);
             if bias_pval > f1_thresh {
                 continue;
             }

@@ -364,7 +364,10 @@ pub fn alignment_display_with_pp_bg(
     let mut aseq = String::new();
     let mut ppline = String::new();
     let mut rfline = String::new();
-    let has_rf = hmm.rf.as_ref().map_or(false, |rf| !rf.is_empty() && rf[0] != 0);
+    let has_rf = hmm
+        .rf
+        .as_ref()
+        .map_or(false, |rf| !rf.is_empty() && rf[0] != 0);
     let mut hmmfrom = 0;
     let mut hmmto = 0;
     let mut sqfrom = 0;

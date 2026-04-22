@@ -687,7 +687,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                                     if ch == '.' {
                                         s.push('.');
                                     } else {
-                                        s.push(if cs_idx < cs.len() { cs[cs_idx] as char } else { ' ' });
+                                        s.push(if cs_idx < cs.len() {
+                                            cs[cs_idx] as char
+                                        } else {
+                                            ' '
+                                        });
                                         cs_idx += 1;
                                     }
                                 }

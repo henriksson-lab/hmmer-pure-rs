@@ -71,25 +71,11 @@ pub fn print_alidisplay_blocks(
 
         if let Some(ref cs) = cs_chars {
             let chunk: String = cs[pos..end.min(cs.len())].iter().collect();
-            writeln!(
-                out,
-                "  {:>indent_w$} {} CS",
-                "",
-                chunk,
-                indent_w = indent_w
-            )
-            .unwrap();
+            writeln!(out, "  {:>indent_w$} {} CS", "", chunk, indent_w = indent_w).unwrap();
         }
         if !rf_chars.is_empty() {
             let chunk: String = rf_chars[pos..end.min(rf_chars.len())].iter().collect();
-            writeln!(
-                out,
-                "  {:>indent_w$} {} RF",
-                "",
-                chunk,
-                indent_w = indent_w
-            )
-            .unwrap();
+            writeln!(out, "  {:>indent_w$} {} RF", "", chunk, indent_w = indent_w).unwrap();
         }
         {
             let chunk: String = model_chars[pos..end].iter().collect();
@@ -106,15 +92,10 @@ pub fn print_alidisplay_blocks(
             .unwrap();
         }
         {
-            let chunk: String = mline_chars[pos..end.min(mline_chars.len())].iter().collect();
-            writeln!(
-                out,
-                "  {:>indent_w$} {}",
-                "",
-                chunk,
-                indent_w = indent_w
-            )
-            .unwrap();
+            let chunk: String = mline_chars[pos..end.min(mline_chars.len())]
+                .iter()
+                .collect();
+            writeln!(out, "  {:>indent_w$} {}", "", chunk, indent_w = indent_w).unwrap();
         }
         if ni > 0 {
             let chunk: String = aseq_chars[pos..end].iter().collect();
@@ -145,14 +126,7 @@ pub fn print_alidisplay_blocks(
         }
         if !pp_chars.is_empty() {
             let chunk: String = pp_chars[pos..end.min(pp_chars.len())].iter().collect();
-            writeln!(
-                out,
-                "  {:>indent_w$} {} PP",
-                "",
-                chunk,
-                indent_w = indent_w
-            )
-            .unwrap();
+            writeln!(out, "  {:>indent_w$} {} PP", "", chunk, indent_w = indent_w).unwrap();
         }
 
         k1 += nk;
@@ -345,10 +319,8 @@ impl TopHits {
 
             let flush_start = (s_i - s_j).abs() <= 3;
             let flush_end = (e_i - e_j).abs() <= 3;
-            let mostly_i = len_i > 0
-                && (intersect_alilen as f64) >= (len_i as f64 * 0.95);
-            let mostly_j = len_j > 0
-                && (intersect_alilen as f64) >= (len_j as f64 * 0.95);
+            let mostly_i = len_i > 0 && (intersect_alilen as f64) >= (len_i as f64 * 0.95);
+            let mostly_j = len_j > 0 && (intersect_alilen as f64) >= (len_j as f64 * 0.95);
 
             let is_dup = name_i == name_j
                 && seqidx_i == seqidx_j
@@ -371,8 +343,16 @@ impl TopHits {
             }
         }
         // Recount reported/included.
-        self.nreported = self.hits.iter().filter(|h| h.flags & P7_IS_REPORTED != 0).count();
-        self.nincluded = self.hits.iter().filter(|h| h.flags & P7_IS_INCLUDED != 0).count();
+        self.nreported = self
+            .hits
+            .iter()
+            .filter(|h| h.flags & P7_IS_REPORTED != 0)
+            .count();
+        self.nincluded = self
+            .hits
+            .iter()
+            .filter(|h| h.flags & P7_IS_INCLUDED != 0)
+            .count();
     }
 
     /// Sort hits by (seqidx, alignment start position) for duplicate

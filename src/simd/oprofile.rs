@@ -702,7 +702,11 @@ impl OProfile {
     /// Canonical residues: `arr[k * Kp + x] = rfv[x][q][z] * bg.f[x]`.
     /// Degenerate / ambiguity codes are filled via `f_expect_sc_vec`-style
     /// expectation over canonical residues weighted by `bg.f`.
-    pub fn get_fwd_emissions(&self, bg: &crate::bg::Bg, abc: &crate::alphabet::Alphabet) -> Vec<f32> {
+    pub fn get_fwd_emissions(
+        &self,
+        bg: &crate::bg::Bg,
+        abc: &crate::alphabet::Alphabet,
+    ) -> Vec<f32> {
         let m = self.m;
         let kp = self.abc_kp;
         let k = abc.k;
@@ -773,8 +777,7 @@ impl OProfile {
                 for z in 0..4 {
                     let node = q + 1 + z * nq;
                     sc_arr[z * kp + x] = if node <= m {
-                        ((fwd_emissions[kp * node + x] as f64) / (bg.f[x] as f64))
-                            .ln() as f32
+                        ((fwd_emissions[kp * node + x] as f64) / (bg.f[x] as f64)).ln() as f32
                     } else {
                         f32::NEG_INFINITY
                     };

@@ -224,10 +224,9 @@ pub unsafe fn viterbi_filter_longtarget(
     );
     let ln2 = std::f64::consts::LN_2;
     let raw = (filtersc as f64 + ln2 * inv_p + 3.0) * om.scale_w as f64;
-    let sc_thresh: i32 = raw.ceil() as i32
-        - om.xw[P7O_E][P7O_MOVE] as i32
-        - om.xw[P7O_C][P7O_MOVE] as i32
-        + om.base_w as i32;
+    let sc_thresh: i32 =
+        raw.ceil() as i32 - om.xw[P7O_E][P7O_MOVE] as i32 - om.xw[P7O_C][P7O_MOVE] as i32
+            + om.base_w as i32;
 
     let neg_inf_v = {
         let v = _mm_set1_epi16(-32768);
@@ -348,12 +347,11 @@ pub unsafe fn viterbi_filter_longtarget(
         } else {
             // Normal special-state update and lazy F loop.
             xn = add_i16(xn, om.xw[P7O_N][P7O_LOOP]);
-            xc = add_i16(xc, om.xw[P7O_C][P7O_LOOP])
-                .max(add_i16(xe as i16, om.xw[P7O_E][P7O_MOVE]));
-            xj = add_i16(xj, om.xw[P7O_J][P7O_LOOP])
-                .max(add_i16(xe as i16, om.xw[P7O_E][P7O_LOOP]));
-            xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE])
-                .max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
+            xc =
+                add_i16(xc, om.xw[P7O_C][P7O_LOOP]).max(add_i16(xe as i16, om.xw[P7O_E][P7O_MOVE]));
+            xj =
+                add_i16(xj, om.xw[P7O_J][P7O_LOOP]).max(add_i16(xe as i16, om.xw[P7O_E][P7O_LOOP]));
+            xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE]).max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
 
             let dmax = hmax_epi16(dmaxv);
             if (dmax as i32) + (om.ddbound_w as i32) > (xb as i32) {
@@ -362,8 +360,7 @@ pub unsafe fn viterbi_filter_longtarget(
                 let dd_offset = 7 * q_count;
                 for q in 0..q_count {
                     dmx!(q) = _mm_max_epi16(dcv, dmx!(q));
-                    let tsc_dd =
-                        _mm_loadu_si128(om.twv[dd_offset + q].as_ptr() as *const __m128i);
+                    let tsc_dd = _mm_loadu_si128(om.twv[dd_offset + q].as_ptr() as *const __m128i);
                     dcv = _mm_adds_epi16(dmx!(q), tsc_dd);
                 }
                 loop {

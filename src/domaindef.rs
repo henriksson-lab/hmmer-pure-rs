@@ -2031,21 +2031,21 @@ fn score_domain_envelope(
                 Some(env_pp),
                 pre_trim_local_bg_f.as_deref(),
             )
-                .map(|mut ad| {
-                    ad.sqfrom += ienv - 1;
-                    ad.sqto += ienv - 1;
-                    AliDisplay {
-                        model: ad.model,
-                        mline: ad.mline,
-                        aseq: ad.aseq,
-                        hmmfrom: ad.hmmfrom,
-                        hmmto: ad.hmmto,
-                        sqfrom: ad.sqfrom,
-                        sqto: ad.sqto,
-                        ppline: ad.ppline,
-                        rfline: ad.rfline,
-                    }
-                })
+            .map(|mut ad| {
+                ad.sqfrom += ienv - 1;
+                ad.sqto += ienv - 1;
+                AliDisplay {
+                    model: ad.model,
+                    mline: ad.mline,
+                    aseq: ad.aseq,
+                    hmmfrom: ad.hmmfrom,
+                    hmmto: ad.hmmto,
+                    sqfrom: ad.sqfrom,
+                    sqto: ad.sqto,
+                    ppline: ad.ppline,
+                    rfline: ad.rfline,
+                }
+            })
         } else if let Some((hmmfrom, hmmto, mut sqfrom, mut sqto)) = simd_oa_coords.take() {
             oasc = simd_oasc.unwrap_or(0.0);
             if sqfrom > 0 {
@@ -2187,183 +2187,203 @@ fn score_domain_envelope(
     // domcorrection, used for bias. Final envsc = min(reparam, default);
     // domcorrection (nats) = default - envsc.
     #[cfg(target_arch = "x86_64")]
-    let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) = if long_target {
-        if let Some(base_om) = env_om {
-            const MAX_ENV_EXTRA: i64 = 20;
-            let mut new_ienv = ienv;
-            let mut new_jenv = jenv;
-            let mut new_env_len = env_len;
-            let mut new_dsq_offset = dsq_offset;
-            let mut env_fwd_sc_current = env_fwd_sc;
-            let mut trim_rebuilt_ad: Option<(
-                crate::trace::AlignmentDisplay,
-                f32,
-            )> = None;
+    let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) =
+        if long_target {
+            if let Some(base_om) = env_om {
+                const MAX_ENV_EXTRA: i64 = 20;
+                let mut new_ienv = ienv;
+                let mut new_jenv = jenv;
+                let mut new_env_len = env_len;
+                let mut new_dsq_offset = dsq_offset;
+                let mut env_fwd_sc_current = env_fwd_sc;
+                let mut trim_rebuilt_ad: Option<(crate::trace::AlignmentDisplay, f32)> = None;
 
-            let envelope_extends =
-                (iali - ienv as i64) > MAX_ENV_EXTRA || (jenv as i64 - jali) > MAX_ENV_EXTRA;
-            if envelope_extends {
-                let trimmed_ienv = ((iali - MAX_ENV_EXTRA).max(1) as usize).max(ienv);
-                let trimmed_jenv =
-                    ((jali + MAX_ENV_EXTRA).max(1) as usize).min(jenv);
-                if trimmed_jenv >= trimmed_ienv {
-                    new_ienv = trimmed_ienv;
-                    new_jenv = trimmed_jenv;
-                    new_env_len = new_jenv - new_ienv + 1;
-                    new_dsq_offset = new_ienv - 1;
+                let envelope_extends =
+                    (iali - ienv as i64) > MAX_ENV_EXTRA || (jenv as i64 - jali) > MAX_ENV_EXTRA;
+                if envelope_extends {
+                    let trimmed_ienv = ((iali - MAX_ENV_EXTRA).max(1) as usize).max(ienv);
+                    let trimmed_jenv = ((jali + MAX_ENV_EXTRA).max(1) as usize).min(jenv);
+                    if trimmed_jenv >= trimmed_ienv {
+                        new_ienv = trimmed_ienv;
+                        new_jenv = trimmed_jenv;
+                        new_env_len = new_jenv - new_ienv + 1;
+                        new_dsq_offset = new_ienv - 1;
 
-                    // Reparameterize env_om for the trimmed region and re-run
-                    // Forward (mirrors p7_domaindef.c:2168-2176).
-                    let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
-                    let k = abc_lt.k;
-                    let mut counts = vec![0.0_f32; k];
-                    for p in new_ienv..=new_jenv {
-                        let x = dsq[p] as usize;
-                        if x < k {
-                            counts[x] += 1.0;
+                        // Reparameterize env_om for the trimmed region and re-run
+                        // Forward (mirrors p7_domaindef.c:2168-2176).
+                        let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
+                        let k = abc_lt.k;
+                        let mut counts = vec![0.0_f32; k];
+                        for p in new_ienv..=new_jenv {
+                            let x = dsq[p] as usize;
+                            if x < k {
+                                counts[x] += 1.0;
+                            }
                         }
-                    }
-                    let total: f32 = counts.iter().sum();
-                    if total > 0.0 {
-                        for c in &mut counts {
-                            *c /= total;
+                        let total: f32 = counts.iter().sum();
+                        if total > 0.0 {
+                            for c in &mut counts {
+                                *c /= total;
+                            }
                         }
-                    }
-                    let clamped_n = seq_len.max(50).min(100) as f32;
-                    let bg_smooth = 25.0_f32 / clamped_n;
-                    let mut local_bg = bg.clone();
-                    for i in 0..k {
-                        local_bg.f[i] =
-                            bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
-                    }
-                    let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
-                    let mut trim_om = base_om.clone();
-                    trim_om.reconfig_length(new_env_len as i32);
-                    trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
-                    let mut trim_pmx = crate::simd::probmx::ProbMx::new(0);
-                    trim_pmx.resize_full(gm.m, new_env_len);
-                    env_fwd_sc_current = unsafe {
-                        crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                            dsq,
-                            new_dsq_offset,
-                            new_env_len,
-                            &trim_om,
-                            &mut trim_pmx,
-                        )
-                    };
-
-                    // Match C p7_domaindef.c:2180-2200: after trim Forward, also
-                    // re-run Backward, Decoding, OA, OATrace and REBUILD the
-                    // AliDisplay. Without this, Rust keeps the pre-trim ad with
-                    // stale hmmto/sqto that diverge from C by 1 residue.
-                    if make_alignment {
-                        let mut trim_bck_pmx = crate::simd::probmx::ProbMx::new(0);
-                        trim_bck_pmx.resize_full(gm.m, new_env_len);
-                        unsafe {
-                            crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                        let clamped_n = seq_len.max(50).min(100) as f32;
+                        let bg_smooth = 25.0_f32 / clamped_n;
+                        let mut local_bg = bg.clone();
+                        for i in 0..k {
+                            local_bg.f[i] = bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
+                        }
+                        let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
+                        let mut trim_om = base_om.clone();
+                        trim_om.reconfig_length(new_env_len as i32);
+                        trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                        let mut trim_pmx = crate::simd::probmx::ProbMx::new(0);
+                        trim_pmx.resize_full(gm.m, new_env_len);
+                        env_fwd_sc_current = unsafe {
+                            crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
                                 dsq,
                                 new_dsq_offset,
                                 new_env_len,
                                 &trim_om,
-                                &mut trim_bck_pmx,
-                                Some(&trim_pmx.row_scale),
-                            );
-                        }
-                        let mut trim_pp_pmx = crate::simd::probmx::ProbMx::new(0);
-                        trim_pp_pmx.resize_full(gm.m, new_env_len);
-                        unsafe {
-                            crate::simd::optacc::posterior_decoding_pmx(
+                                &mut trim_pmx,
+                            )
+                        };
+
+                        // Match C p7_domaindef.c:2180-2200: after trim Forward, also
+                        // re-run Backward, Decoding, OA, OATrace and REBUILD the
+                        // AliDisplay. Without this, Rust keeps the pre-trim ad with
+                        // stale hmmto/sqto that diverge from C by 1 residue.
+                        if make_alignment {
+                            let mut trim_bck_pmx = crate::simd::probmx::ProbMx::new(0);
+                            trim_bck_pmx.resize_full(gm.m, new_env_len);
+                            unsafe {
+                                crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                                    dsq,
+                                    new_dsq_offset,
+                                    new_env_len,
+                                    &trim_om,
+                                    &mut trim_bck_pmx,
+                                    Some(&trim_pmx.row_scale),
+                                );
+                            }
+                            let mut trim_pp_pmx = crate::simd::probmx::ProbMx::new(0);
+                            trim_pp_pmx.resize_full(gm.m, new_env_len);
+                            unsafe {
+                                crate::simd::optacc::posterior_decoding_pmx(
+                                    &trim_pmx,
+                                    &trim_bck_pmx,
+                                    &trim_om,
+                                    &mut trim_pp_pmx,
+                                );
+                            }
+                            let mut trim_oa_pmx = crate::simd::probmx::ProbMx::new(0);
+                            trim_oa_pmx.resize_full(gm.m, new_env_len);
+                            let trim_oasc = unsafe {
+                                crate::simd::optacc::optimal_accuracy_pmx(
+                                    &trim_om,
+                                    &trim_pp_pmx,
+                                    &mut trim_oa_pmx,
+                                )
+                            };
+                            let trim_tr = unsafe {
+                                crate::simd::optacc::oa_trace_pmx(
+                                    &trim_om,
+                                    &trim_pp_pmx,
+                                    &trim_oa_pmx,
+                                )
+                            };
+                            let mut trim_pp_gmx = Gmx::new(gm.m, new_env_len);
+                            let njc_loop_trim = [
+                                trim_om.xf[crate::simd::oprofile::P7O_N]
+                                    [crate::simd::oprofile::P7O_LOOP],
+                                trim_om.xf[crate::simd::oprofile::P7O_J]
+                                    [crate::simd::oprofile::P7O_LOOP],
+                                trim_om.xf[crate::simd::oprofile::P7O_C]
+                                    [crate::simd::oprofile::P7O_LOOP],
+                            ];
+                            crate::simd::probmx::p_decoding_to_gmx(
                                 &trim_pmx,
                                 &trim_bck_pmx,
-                                &trim_om,
-                                &mut trim_pp_pmx,
+                                gm.m,
+                                njc_loop_trim,
+                                &mut trim_pp_gmx,
                             );
-                        }
-                        let mut trim_oa_pmx = crate::simd::probmx::ProbMx::new(0);
-                        trim_oa_pmx.resize_full(gm.m, new_env_len);
-                        let trim_oasc = unsafe {
-                            crate::simd::optacc::optimal_accuracy_pmx(
-                                &trim_om,
-                                &trim_pp_pmx,
-                                &mut trim_oa_pmx,
-                            )
-                        };
-                        let trim_tr = unsafe {
-                            crate::simd::optacc::oa_trace_pmx(
-                                &trim_om,
-                                &trim_pp_pmx,
-                                &trim_oa_pmx,
-                            )
-                        };
-                        let mut trim_pp_gmx = Gmx::new(gm.m, new_env_len);
-                        let njc_loop_trim = [
-                            trim_om.xf[crate::simd::oprofile::P7O_N]
-                                [crate::simd::oprofile::P7O_LOOP],
-                            trim_om.xf[crate::simd::oprofile::P7O_J]
-                                [crate::simd::oprofile::P7O_LOOP],
-                            trim_om.xf[crate::simd::oprofile::P7O_C]
-                                [crate::simd::oprofile::P7O_LOOP],
-                        ];
-                        crate::simd::probmx::p_decoding_to_gmx(
-                            &trim_pmx,
-                            &trim_bck_pmx,
-                            gm.m,
-                            njc_loop_trim,
-                            &mut trim_pp_gmx,
-                        );
-                        let trim_sub_start = new_dsq_offset;
-                        let trim_sub_end = trim_sub_start + new_env_len;
-                        let trim_sub_dsq = {
-                            let mut buf = vec![crate::alphabet::DSQ_SENTINEL];
-                            buf.extend_from_slice(&dsq[trim_sub_start + 1..=trim_sub_end]);
-                            buf.push(crate::alphabet::DSQ_SENTINEL);
-                            buf
-                        };
-                        let abc = crate::alphabet::Alphabet::new(hmm.abc_type);
-                        if let Some(new_ad) = crate::trace::alignment_display_with_pp_bg(
-                            &trim_tr,
-                            &trim_sub_dsq,
-                            hmm,
-                            &abc,
-                            Some(&trim_pp_gmx),
-                            Some(&local_bg.f),
-                        ) {
-                            trim_rebuilt_ad = Some((new_ad, trim_oasc));
+                            let trim_sub_start = new_dsq_offset;
+                            let trim_sub_end = trim_sub_start + new_env_len;
+                            let trim_sub_dsq = {
+                                let mut buf = vec![crate::alphabet::DSQ_SENTINEL];
+                                buf.extend_from_slice(&dsq[trim_sub_start + 1..=trim_sub_end]);
+                                buf.push(crate::alphabet::DSQ_SENTINEL);
+                                buf
+                            };
+                            let abc = crate::alphabet::Alphabet::new(hmm.abc_type);
+                            if let Some(new_ad) = crate::trace::alignment_display_with_pp_bg(
+                                &trim_tr,
+                                &trim_sub_dsq,
+                                hmm,
+                                &abc,
+                                Some(&trim_pp_gmx),
+                                Some(&local_bg.f),
+                            ) {
+                                trim_rebuilt_ad = Some((new_ad, trim_oasc));
+                            }
                         }
                     }
                 }
-            }
 
-            // Default-model Forward on the (possibly trimmed) region.
-            let mut default_om = base_om.clone();
-            default_om.reconfig_length(new_env_len as i32);
-            let mut default_pmx = crate::simd::probmx::ProbMx::new(0);
-            default_pmx.resize_full(gm.m, new_env_len);
-            let default_fwd_sc = unsafe {
-                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                    dsq,
-                    new_dsq_offset,
-                    new_env_len,
-                    &default_om,
-                    &mut default_pmx,
-                )
-            };
-            let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
-            let lt_domcorrection = default_fwd_sc - envsc_min;
-            if std::env::var("NHMMER_DEBUG_IN").is_ok() && seq_len > 1000 {
-                eprintln!(
+                // Default-model Forward on the (possibly trimmed) region.
+                let mut default_om = base_om.clone();
+                default_om.reconfig_length(new_env_len as i32);
+                let mut default_pmx = crate::simd::probmx::ProbMx::new(0);
+                default_pmx.resize_full(gm.m, new_env_len);
+                let default_fwd_sc = unsafe {
+                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                        dsq,
+                        new_dsq_offset,
+                        new_env_len,
+                        &default_om,
+                        &mut default_pmx,
+                    )
+                };
+                let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
+                let lt_domcorrection = default_fwd_sc - envsc_min;
+                if std::env::var("NHMMER_DEBUG_IN").is_ok() && seq_len > 1000 {
+                    eprintln!(
                     "  env=[{}..{}] env_len={} iali={} jali={} reparam={:.3} default={:.3} envsc_min={:.3}",
                     new_ienv, new_jenv, new_env_len, iali, jali,
                     env_fwd_sc_current, default_fwd_sc, envsc_min
                 );
+                }
+                (
+                    envsc_min,
+                    lt_domcorrection,
+                    new_env_len,
+                    new_ienv,
+                    new_jenv,
+                    new_dsq_offset,
+                    trim_rebuilt_ad,
+                )
+            } else {
+                (
+                    env_fwd_sc,
+                    dom_correction,
+                    env_len,
+                    ienv,
+                    jenv,
+                    dsq_offset,
+                    None,
+                )
             }
-            (envsc_min, lt_domcorrection, new_env_len, new_ienv, new_jenv, new_dsq_offset, trim_rebuilt_ad)
         } else {
-            (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, None)
-        }
-    } else {
-        (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, None)
-    };
+            (
+                env_fwd_sc,
+                dom_correction,
+                env_len,
+                ienv,
+                jenv,
+                dsq_offset,
+                None,
+            )
+        };
     // If trim rebuilt the ad, replace ad/iali/jali/oasc with post-trim values.
     #[cfg(target_arch = "x86_64")]
     let (ad, iali, jali, oasc) = if let Some((new_ad, new_oasc)) = trim_rebuilt_ad {

@@ -791,7 +791,11 @@ impl Pipeline {
         hit.score = hit_score;
         hit.bias = hit_bias;
         hit.pre_score = hit_pre_score;
-        hit.sum_score = if self.long_target { hit_score } else { sum_score };
+        hit.sum_score = if self.long_target {
+            hit_score
+        } else {
+            sum_score
+        };
         hit.lnp = hit_lnp as f64;
         hit.pre_lnp = hit_pre_lnp;
         hit.sum_lnp = if self.long_target {
@@ -811,7 +815,6 @@ impl Pipeline {
         true
     }
 }
-
 
 /// Calculate MSV p-value from raw score.
 pub fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {

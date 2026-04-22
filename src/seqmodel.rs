@@ -73,28 +73,16 @@ const BLOSUM62_20: [[i32; 20]; 20] = [
 /// Returns a 20x20 matrix where row a gives P(target=b | query=a).
 fn score_to_conditional(bg_f: &[f32]) -> Vec<Vec<f32>> {
     let k = 20;
-    // Find lambda by searching for the value that makes sum(P_ij) = 1
-    // For BLOSUM62 with standard amino acid frequencies, lambda ≈ 0.3466
-    let lambda = 0.3466_f64;
+    let lambda = solve_lambda(bg_f);
 
-    // Convert scores to joint probabilities: P_ij = fi * fj * exp(lambda * S_ij)
     let mut joint = vec![vec![0.0_f64; k]; k];
-    let mut total = 0.0_f64;
     for a in 0..k {
         for b in 0..k {
             joint[a][b] =
                 (bg_f[a] as f64) * (bg_f[b] as f64) * (lambda * BLOSUM62_20[a][b] as f64).exp();
-            total += joint[a][b];
-        }
-    }
-    // Normalize
-    for a in 0..k {
-        for b in 0..k {
-            joint[a][b] /= total;
         }
     }
 
-    // Convert joint to conditional: P(b|a) = P_ab / P(a) where P(a) = sum_b P_ab
     let mut cond = vec![vec![0.0_f32; k]; k];
     for a in 0..k {
         let row_sum: f64 = joint[a].iter().sum();
@@ -107,6 +95,78 @@ fn score_to_conditional(bg_f: &[f32]) -> Vec<Vec<f32>> {
         }
     }
     cond
+}
+
+fn lambda_f(bg_f: &[f32], lambda: f64) -> f64 {
+    let mut fx = -1.0_f64;
+    for a in 0..20 {
+        for b in 0..20 {
+            fx += (bg_f[a] as f64) * (bg_f[b] as f64) * (lambda * BLOSUM62_20[a][b] as f64).exp();
+        }
+    }
+    fx
+}
+
+fn solve_lambda(bg_f: &[f32]) -> f64 {
+    let max_score = BLOSUM62_20
+        .iter()
+        .flat_map(|row| row.iter())
+        .copied()
+        .max()
+        .unwrap() as f64;
+    let mut hi = 1.0 / max_score;
+    while hi < 50.0 && lambda_f(bg_f, hi) <= 0.0 {
+        hi *= 2.0;
+    }
+    let mut lo = 0.0_f64;
+    for _ in 0..80 {
+        let mid = (lo + hi) * 0.5;
+        if lambda_f(bg_f, mid) > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    (lo + hi) * 0.5
+}
+
+fn calculate_occupancy(hmm: &Hmm) -> (Vec<f32>, Vec<f32>) {
+    let mut mocc = vec![0.0_f32; hmm.m + 1];
+    let mut iocc = vec![0.0_f32; hmm.m + 1];
+
+    mocc[0] = 0.0;
+    mocc[1] = hmm.t[0][MI] + hmm.t[0][MM];
+    for k in 2..=hmm.m {
+        mocc[k] = mocc[k - 1] * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI])
+            + (1.0 - mocc[k - 1]) * hmm.t[k - 1][DM];
+    }
+
+    iocc[0] = hmm.t[0][MI] / hmm.t[0][IM];
+    for k in 1..=hmm.m {
+        iocc[k] = mocc[k] * hmm.t[k][MI] / hmm.t[k][IM];
+    }
+
+    (mocc, iocc)
+}
+
+fn set_composition(hmm: &mut Hmm) {
+    let (mocc, iocc) = calculate_occupancy(hmm);
+    for x in 0..hmm.abc_k.min(MAXABET) {
+        hmm.compo[x] = hmm.ins[0][x] * iocc[0];
+    }
+    for k in 1..=hmm.m {
+        for x in 0..hmm.abc_k.min(MAXABET) {
+            hmm.compo[x] += hmm.mat[k][x] * mocc[k] + hmm.ins[k][x] * iocc[k];
+        }
+    }
+
+    let sum: f32 = hmm.compo[..hmm.abc_k.min(MAXABET)].iter().sum();
+    if sum > 0.0 {
+        for x in 0..hmm.abc_k.min(MAXABET) {
+            hmm.compo[x] /= sum;
+        }
+    }
+    hmm.flags |= P7H_COMPO;
 }
 
 /// Build an HMM from a single sequence using BLOSUM62 scoring.
@@ -174,13 +234,7 @@ pub fn build_single_seq_hmm(
         hmm.ins[0][x] = bg.f[x];
     }
 
-    // Set composition from background
-    for x in 0..k.min(MAXABET) {
-        hmm.compo[x] = bg.f[x];
-    }
-
-    // Set flags
-    hmm.flags |= P7H_COMPO;
+    set_composition(&mut hmm);
 
     // Set consensus from sequence
     let mut cons = vec![b' '; m + 2];
