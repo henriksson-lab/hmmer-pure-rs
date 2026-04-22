@@ -16,6 +16,8 @@ use hmmer_pure_rs::sequence::{self, Sequence};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 
+const TARGET_BATCH_SIZE: usize = 4096;
+
 #[derive(Parser)]
 #[command(
     name = "hmmsearch",
@@ -347,160 +349,160 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut total_residues: u64 = 0;
         let mut n_targets: u64 = 0;
 
-        let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> =
-            if args.cpu == 1 {
-                let mut local_bg = bg.clone();
-                let mut local_gm = gm.clone();
-                let mut local_om = om.clone();
-                let mut local_pli = Pipeline::new();
-                local_pli.new_model(&local_gm);
-                local_pli.f1 = f1;
-                local_pli.f2 = f2;
-                local_pli.f3 = f3;
-                local_pli.do_max = do_max;
-                if nobias {
-                    local_pli.do_biasfilter = false;
-                }
-                if nonull2 {
-                    local_pli.do_null2 = false;
-                }
-                local_pli.do_alignment = do_alignment;
-                local_pli.do_alignment_display = do_alignment_display;
-                local_pli.seed = seed;
+        let mut th = TopHits::new();
+        if args.cpu == 1 {
+            let mut local_bg = bg.clone();
+            let mut local_gm = gm.clone();
+            let mut local_om = om.clone();
+            let mut local_pli = Pipeline::new();
+            local_pli.new_model(&local_gm);
+            local_pli.f1 = f1;
+            local_pli.f2 = f2;
+            local_pli.f3 = f3;
+            local_pli.do_max = do_max;
+            if nobias {
+                local_pli.do_biasfilter = false;
+            }
+            if nonull2 {
+                local_pli.do_null2 = false;
+            }
+            local_pli.do_alignment = do_alignment;
+            local_pli.do_alignment_display = do_alignment_display;
+            local_pli.seed = seed;
 
-                let mut results = Vec::new();
-                let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-                    eprintln!("Error opening sequence file: {}", e);
-                    std::process::exit(1);
-                });
-                let mut sq = Sequence::new();
-                while sqf.read(&mut sq).unwrap() {
-                    total_residues += sq.n as u64;
-                    n_targets += 1;
+            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
+                eprintln!("Error opening sequence file: {}", e);
+                std::process::exit(1);
+            });
+            let mut sq = Sequence::new();
+            while sqf.read(&mut sq).unwrap() {
+                total_residues += sq.n as u64;
+                n_targets += 1;
 
-                    local_pli.n_targets = 0;
-                    local_pli.n_past_msv = 0;
-                    local_pli.n_past_bias = 0;
-                    local_pli.n_past_vit = 0;
-                    local_pli.n_past_fwd = 0;
-                    local_bg.set_length(sq.n);
+                local_pli.n_targets = 0;
+                local_pli.n_past_msv = 0;
+                local_pli.n_past_bias = 0;
+                local_pli.n_past_vit = 0;
+                local_pli.n_past_fwd = 0;
+                local_bg.set_length(sq.n);
 
-                    let mut local_th = TopHits::new();
-                    let hit = if local_pli.run(
-                        &mut local_gm,
-                        &mut local_om,
-                        &local_bg,
-                        hmm,
-                        &sq,
-                        &mut local_th,
-                    ) {
-                        local_th.hits.into_iter().next()
-                    } else {
-                        None
-                    };
-                    results.push((
-                        hit,
-                        local_pli.n_past_msv,
-                        local_pli.n_past_bias,
-                        local_pli.n_past_vit,
-                        local_pli.n_past_fwd,
-                    ));
-                    sq.reuse();
-                }
-                results
-            } else {
-                let mut sequences = Vec::new();
+                let mut local_th = TopHits::new();
+                if local_pli.run(&mut local_gm, &mut local_om, &local_bg, hmm, &sq, &mut local_th)
                 {
-                    let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-                        eprintln!("Error opening sequence file: {}", e);
-                        std::process::exit(1);
-                    });
-                    let mut sq = Sequence::new();
-                    while sqf.read(&mut sq).unwrap() {
-                        total_residues += sq.n as u64;
-                        n_targets += 1;
-                        sequences.push(sq.clone());
-                        sq.reuse();
+                    th.hits.extend(local_th.hits.into_iter());
+                }
+                pli.n_past_msv += local_pli.n_past_msv;
+                pli.n_past_bias += local_pli.n_past_bias;
+                pli.n_past_vit += local_pli.n_past_vit;
+                pli.n_past_fwd += local_pli.n_past_fwd;
+                sq.reuse();
+            }
+        } else {
+            use rayon::prelude::*;
+            use std::sync::Arc;
+            let shared_gm = Arc::new(gm.clone());
+            let shared_om = Arc::new(om.clone());
+
+            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
+                eprintln!("Error opening sequence file: {}", e);
+                std::process::exit(1);
+            });
+            let mut sq = Sequence::new();
+            let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
+
+            loop {
+                while batch.len() < TARGET_BATCH_SIZE {
+                    match sqf.read(&mut sq) {
+                        Ok(true) => {
+                            total_residues += sq.n as u64;
+                            n_targets += 1;
+                            batch.push(sq.clone());
+                            sq.reuse();
+                        }
+                        Ok(false) => break,
+                        Err(e) => {
+                            eprintln!("Error opening sequence file: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
 
-                use rayon::prelude::*;
-                use std::sync::Arc;
-                let shared_gm = Arc::new(gm.clone());
-                let shared_om = Arc::new(om.clone());
+                if batch.is_empty() {
+                    break;
+                }
 
-                sequences
-                    .par_iter()
-                    .map_init(
-                        || {
-                            hmmer_pure_rs::util::simd_env::init();
-                            let local_gm = (*shared_gm).clone();
-                            let mut local_pli = Pipeline::new();
-                            local_pli.new_model(&local_gm);
-                            local_pli.f1 = f1;
-                            local_pli.f2 = f2;
-                            local_pli.f3 = f3;
-                            local_pli.do_max = do_max;
-                            if nobias {
-                                local_pli.do_biasfilter = false;
-                            }
-                            if nonull2 {
-                                local_pli.do_null2 = false;
-                            }
-                            local_pli.do_alignment = do_alignment;
-                            local_pli.do_alignment_display = do_alignment_display;
-                            local_pli.seed = seed;
-                            (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
-                        },
-                        |(local_bg, local_gm, local_om, local_pli), sq| {
-                            local_pli.n_targets = 0;
-                            local_pli.n_past_msv = 0;
-                            local_pli.n_past_bias = 0;
-                            local_pli.n_past_vit = 0;
-                            local_pli.n_past_fwd = 0;
+                let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> =
+                    batch
+                        .par_iter()
+                        .map_init(
+                            || {
+                                hmmer_pure_rs::util::simd_env::init();
+                                let local_gm = (*shared_gm).clone();
+                                let mut local_pli = Pipeline::new();
+                                local_pli.new_model(&local_gm);
+                                local_pli.f1 = f1;
+                                local_pli.f2 = f2;
+                                local_pli.f3 = f3;
+                                local_pli.do_max = do_max;
+                                if nobias {
+                                    local_pli.do_biasfilter = false;
+                                }
+                                if nonull2 {
+                                    local_pli.do_null2 = false;
+                                }
+                                local_pli.do_alignment = do_alignment;
+                                local_pli.do_alignment_display = do_alignment_display;
+                                local_pli.seed = seed;
+                                (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
+                            },
+                            |(local_bg, local_gm, local_om, local_pli), sq| {
+                                local_pli.n_targets = 0;
+                                local_pli.n_past_msv = 0;
+                                local_pli.n_past_bias = 0;
+                                local_pli.n_past_vit = 0;
+                                local_pli.n_past_fwd = 0;
 
-                            local_bg.set_length(sq.n);
+                                local_bg.set_length(sq.n);
 
-                            let mut local_th = TopHits::new();
-                            let hit = if local_pli.run(
-                                local_gm,
-                                local_om,
-                                local_bg,
-                                hmm,
-                                sq,
-                                &mut local_th,
-                            ) {
-                                local_th.hits.into_iter().next()
-                            } else {
-                                None
-                            };
-                            (
-                                hit,
-                                local_pli.n_past_msv,
-                                local_pli.n_past_bias,
-                                local_pli.n_past_vit,
-                                local_pli.n_past_fwd,
-                            )
-                        },
-                    )
-                    .collect()
-            };
+                                let mut local_th = TopHits::new();
+                                let hit = if local_pli.run(
+                                    local_gm,
+                                    local_om,
+                                    local_bg,
+                                    hmm,
+                                    sq,
+                                    &mut local_th,
+                                ) {
+                                    local_th.hits.into_iter().next()
+                                } else {
+                                    None
+                                };
+                                (
+                                    hit,
+                                    local_pli.n_past_msv,
+                                    local_pli.n_past_bias,
+                                    local_pli.n_past_vit,
+                                    local_pli.n_past_fwd,
+                                )
+                            },
+                        )
+                        .collect();
 
-        let mut th = TopHits::new();
-        pli.n_targets = n_targets;
-        pli.n_past_msv = 0;
-        pli.n_past_bias = 0;
-        pli.n_past_vit = 0;
-        pli.n_past_fwd = 0;
-        for (hit, msv, bias, vit, fwd) in results {
-            pli.n_past_msv += msv;
-            pli.n_past_bias += bias;
-            pli.n_past_vit += vit;
-            pli.n_past_fwd += fwd;
-            if let Some(h) = hit {
-                th.hits.push(h);
+                for (hit, msv, bias, vit, fwd) in results {
+                    pli.n_past_msv += msv;
+                    pli.n_past_bias += bias;
+                    pli.n_past_vit += vit;
+                    pli.n_past_fwd += fwd;
+                    if let Some(h) = hit {
+                        th.hits.push(h);
+                    }
+                }
+
+                batch.clear();
             }
         }
+
+        pli.n_targets = n_targets;
 
         // Set Z (database size)
         let z = match pli.z_setby {

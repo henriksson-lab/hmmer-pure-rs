@@ -13,6 +13,7 @@ CLAUDE.md
 perf.data
 perf.data.old
 tracehash
+external/
 
 # Superseded duplicate mapping filename
 mapping.toml

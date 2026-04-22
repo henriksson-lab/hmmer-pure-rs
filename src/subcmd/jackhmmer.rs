@@ -19,6 +19,8 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
 use hmmer_pure_rs::trace::{State, Trace};
 
+const TARGET_BATCH_SIZE: usize = 256;
+
 #[derive(Parser)]
 #[command(
     name = "jackhmmer",
@@ -106,10 +108,52 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(
         out,
-        "# jackhmmer :: iteratively search a protein sequence against a database"
+        "# jackhmmer :: iteratively search a protein sequence against a protein database"
     )
     .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
+    writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
+    writeln!(out, "# Freely distributed under the BSD open source license.").unwrap();
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# query sequence file:             {}",
+        args.seqfile.display()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# target sequence database:        {}",
+        args.seqdb.display()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# maximum iterations set to:       {}",
+        args.max_iterations
+    )
+    .unwrap();
+    if let Some(tblout) = &args.tblout {
+        writeln!(
+            out,
+            "# per-seq hits tabular output:     {}",
+            tblout.display()
+        )
+        .unwrap();
+    }
+    if let Some(domtblout) = &args.domtblout {
+        writeln!(
+            out,
+            "# per-dom hits tabular output:     {}",
+            domtblout.display()
+        )
+        .unwrap();
+    }
+    writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
     writeln!(
         out,
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
@@ -128,31 +172,26 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     }
 
-    // Read all target sequences
-    let mut targets = Vec::new();
-    {
-        let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        });
-        let mut sq = Sequence::new();
-        while sqf.read(&mut sq).unwrap() {
-            targets.push(sq.clone());
-            sq.reuse();
-        }
+    writeln!(out, "Query:       {}  [L={}]", query_sq.name, query_sq.n).unwrap();
+    if !query_sq.acc.is_empty() {
+        writeln!(out, "Accession:   {}", query_sq.acc).unwrap();
     }
-    let z = targets.len() as f64;
+    if !query_sq.desc.is_empty() {
+        writeln!(out, "Description: {}", query_sq.desc).unwrap();
+    }
+    writeln!(out).unwrap();
+
     let query_tr = exact_match_query_trace(query_sq.n);
 
     let mut prev_included_names: Vec<String> = Vec::new();
+    let mut prev_msa_nseq = 1usize;
     let mut prev_hmm: Option<hmmer_pure_rs::hmm::Hmm> = None;
     let mut final_hits: Option<TopHits> = None;
+    let mut final_z: Option<f64> = None;
     let mut final_domz: Option<f64> = None;
     let mut final_model_len: Option<usize> = None;
 
     for iteration in 1..=args.max_iterations {
-        writeln!(out, "@@ Round: {}", iteration).unwrap();
-
         // Build HMM for this iteration
         let hmm = if iteration == 1 {
             // First iteration: single-sequence HMM (phmmer-style)
@@ -184,7 +223,21 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
                 break;
             };
-            builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true)
+            let hmm = builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true);
+            writeln!(out, "@@").unwrap();
+            writeln!(out, "@@ Round:                  {}", iteration).unwrap();
+            writeln!(
+                out,
+                "@@ Included in MSA:        {} subsequences (query + {} subseqs from {} targets)",
+                msa.nseq,
+                msa.nseq.saturating_sub(1),
+                prev_included_names.len()
+            )
+            .unwrap();
+            writeln!(out, "@@ Model size:             {} positions", hmm.m).unwrap();
+            writeln!(out, "@@").unwrap();
+            writeln!(out).unwrap();
+            hmm
         };
 
         if let Some(prefix) = &args.chkhmm {
@@ -198,32 +251,69 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         profile::profile_config(&hmm, &local_bg, &mut gm, 400, P7_LOCAL);
         let om = OProfile::convert(&gm);
 
-        // Search in parallel
+        // Search the target DB in bounded batches so RSS scales with
+        // the batch size instead of the full database size.
         use rayon::prelude::*;
-        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = targets
-            .par_iter()
-            .filter_map(|sq| {
-                let mut lb = local_bg.clone();
-                let mut lgm = gm.clone();
-                let mut lom = om.clone();
-                let mut lpli = Pipeline::new();
-                lpli.do_biasfilter = !args.nobias;
-                lpli.do_null2 = !args.nonull2;
-                lpli.new_model(&lgm);
+        let mut all_hits = Vec::new();
+        let mut z = 0usize;
+        {
+            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            });
+            let mut sq = Sequence::new();
+            let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
 
-                lb.set_length(sq.n);
-
-                let mut lth = TopHits::new();
-                if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
-                    lth.hits.into_iter().next()
-                } else {
-                    None
+            loop {
+                while batch.len() < TARGET_BATCH_SIZE {
+                    match sqf.read(&mut sq) {
+                        Ok(true) => {
+                            batch.push(sq.clone());
+                            z += 1;
+                            sq.reuse();
+                        }
+                        Ok(false) => break,
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
-            })
-            .collect();
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                let batch_hits: Vec<hmmer_pure_rs::tophits::Hit> = batch
+                    .par_iter()
+                    .filter_map(|sq| {
+                        let mut lb = local_bg.clone();
+                        let mut lgm = gm.clone();
+                        let mut lom = om.clone();
+                        let mut lpli = Pipeline::new();
+                        lpli.do_biasfilter = !args.nobias;
+                        lpli.do_null2 = !args.nonull2;
+                        lpli.new_model(&lgm);
+
+                        lb.set_length(sq.n);
+
+                        let mut lth = TopHits::new();
+                        if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
+                            lth.hits.into_iter().next()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                all_hits.extend(batch_hits);
+                batch.clear();
+            }
+        }
 
         let mut th = TopHits::new();
         th.hits = all_hits;
+        let z = z as f64;
+        final_z = Some(z);
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
@@ -240,7 +330,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             final_domz = Some(domz);
         }
         // Output results for this round
-        writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
+        if iteration > 1 {
+            writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
+            if !query_sq.acc.is_empty() {
+                writeln!(out, "Accession:   {}", query_sq.acc).unwrap();
+            }
+            if !query_sq.desc.is_empty() {
+                writeln!(out, "Description: {}", query_sq.desc).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
         writeln!(
             out,
             "Scores for complete sequences (score includes all domains):"
@@ -322,33 +421,44 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             .iter()
             .filter(|name| !prev_included_names.iter().any(|prev| prev == *name))
             .count();
+        let msa_nseq = new_included_names.len() + 1;
+
+        writeln!(out, "@@ New targets included:   {}", n_new).unwrap();
+        writeln!(
+            out,
+            "@@ New alignment includes: {} subseqs (was {}), including original query",
+            msa_nseq,
+            prev_msa_nseq
+        )
+        .unwrap();
 
         if n_new == 0 && new_included_names.len() <= prev_included_names.len() && iteration > 1 {
-            writeln!(out, "@@ CONVERGED (in {} rounds).", iteration).unwrap();
+            writeln!(out, "@@").unwrap();
+            writeln!(out, "@@ CONVERGED (in {} rounds). ", iteration).unwrap();
+            writeln!(out, "@@").unwrap();
+            writeln!(out).unwrap();
             break;
         }
 
         if iteration < args.max_iterations {
-            writeln!(
-                out,
-                "@@ {} included, {} new. Continuing to next round.",
-                new_included_names.len(),
-                n_new
-            )
-            .unwrap();
+            writeln!(out, "@@ Continuing to next round.").unwrap();
+            writeln!(out).unwrap();
         }
 
         prev_included_names = new_included_names;
+        prev_msa_nseq = msa_nseq;
     }
 
     if let Some(ref mut f) = tblout_file {
-        if let Some(ref th) = final_hits {
+        if let (Some(ref th), Some(z)) = (&final_hits, final_z) {
             crate::subcmd::hmmsearch::write_tblout(f, &query_sq.name, None, th, z);
         }
         f.flush().unwrap();
     }
     if let Some(ref mut f) = domtblout_file {
-        if let (Some(ref th), Some(domz), Some(qlen)) = (&final_hits, final_domz, final_model_len) {
+        if let (Some(ref th), Some(z), Some(domz), Some(qlen)) =
+            (&final_hits, final_z, final_domz, final_model_len)
+        {
             crate::subcmd::hmmsearch::write_domtblout(f, &query_sq.name, None, qlen, th, z, domz);
         }
         f.flush().unwrap();

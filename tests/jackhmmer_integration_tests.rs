@@ -198,13 +198,23 @@ fn run_jackhmmer_with_chkhmm(
 }
 
 fn round_block<'a>(stdout: &'a str, round: usize) -> &'a str {
-    let marker = format!("@@ Round: {}", round);
-    let start = stdout.find(&marker).unwrap();
-    let rest = &stdout[start..];
-    if let Some(next) = rest[marker.len()..].find("@@ Round:") {
-        &rest[..marker.len() + next]
+    if round == 1 {
+        let start = stdout.find("Scores for complete sequences").unwrap();
+        let rest = &stdout[start..];
+        if let Some(next) = rest.find("@@ Round:                  2") {
+            &rest[..next]
+        } else {
+            rest
+        }
     } else {
-        rest
+        let marker = format!("@@ Round:                  {}", round);
+        let start = stdout.find(&marker).unwrap();
+        let rest = &stdout[start..];
+        if let Some(next) = rest[marker.len()..].find("@@ Round:                  ") {
+            &rest[..marker.len() + next]
+        } else {
+            rest
+        }
     }
 }
 
@@ -356,7 +366,7 @@ fn jackhmmer_round1_20aa_matches_current_single_sequence_baseline() {
     let round1 = round_block(&stdout, 1);
 
     assert!(stdout.contains("[ok]"));
-    assert!(round1.contains("Query:       test1  [M=20]"));
+    assert!(stdout.contains("Query:       test1  [L=20]"));
     assert_eq!(
         top_hit_rows(round1, 4),
         vec![
@@ -387,7 +397,9 @@ fn jackhmmer_globins_converges_in_two_rounds_with_expected_round_profiles() {
     let round1 = round_block(&stdout, 1);
     let round2 = round_block(&stdout, 2);
 
-    assert!(stdout.contains("@@ 45 included, 45 new. Continuing to next round."));
+    assert!(stdout.contains("@@ New targets included:   45"));
+    assert!(stdout.contains("@@ New alignment includes: 46 subseqs (was 1), including original query"));
+    assert!(stdout.contains("@@ Continuing to next round."));
     assert_eq!(
         top_hit_rows(round1, 5),
         vec![
@@ -462,11 +474,13 @@ fn jackhmmer_strict_thresholds_stop_after_empty_round_on_20aa() {
         &["-N", "2", "-E", "1e-20", "--incE", "1e-20"],
     );
 
-    assert!(stdout.contains("@@ Round: 1"));
     assert!(stdout.contains("[No hits detected that satisfy reporting thresholds]"));
-    assert!(stdout.contains("@@ 0 included, 0 new. Continuing to next round."));
-    assert!(stdout.contains("@@ Round: 2"));
-    assert!(stdout.contains("@@ No hits to build MSA from. Stopping."));
+    assert!(stdout.contains("@@ New targets included:   0"));
+    assert!(stdout.contains("@@ New alignment includes: 1 subseqs (was 1), including original query"));
+    assert!(stdout.contains("@@ Continuing to next round."));
+    assert!(stdout.contains("@@ Round:                  2"));
+    assert!(stdout.contains("@@ Included in MSA:        1 subsequences (query + 0 subseqs from 0 targets)"));
+    assert!(stdout.contains("Query:       test1-i1  [M=20]"));
 }
 
 #[test]
@@ -479,7 +493,8 @@ fn jackhmmer_globins_strict_inc_threshold_changes_round2_profile() {
     let round1 = round_block(&stdout, 1);
     let round2 = round_block(&stdout, 2);
 
-    assert!(stdout.contains("@@ 38 included, 38 new. Continuing to next round."));
+    assert!(stdout.contains("@@ New targets included:   38"));
+    assert!(stdout.contains("@@ New alignment includes: 39 subseqs (was 1), including original query"));
     assert_eq!(
         top_hit_rows(round1, 5),
         vec![
@@ -583,7 +598,7 @@ fn jackhmmer_tblout_globins_uses_final_converged_round() {
         &["-N", "2"],
     );
 
-    assert!(stdout.contains("@@ CONVERGED (in 2 rounds)."));
+    assert!(stdout.contains("@@ CONVERGED (in 2 rounds). "));
     assert_eq!(
         tblout_rows(&tblout, 5),
         vec![
@@ -652,7 +667,7 @@ fn jackhmmer_domtblout_globins_uses_final_model_length_with_original_query_name(
         &["-N", "2"],
     );
 
-    assert!(stdout.contains("@@ CONVERGED (in 2 rounds)."));
+    assert!(stdout.contains("@@ CONVERGED (in 2 rounds). "));
     let rows = domtblout_rows(&domtblout, 5);
     assert_eq!(rows.len(), 5);
 
@@ -819,7 +834,8 @@ fn jackhmmer_medium_realworld_round2_matches_expected_tbl_and_dom_counts() {
     );
     let _ = std::fs::remove_file(query);
 
-    assert!(stdout.contains("@@ 55 included, 55 new. Continuing to next round."));
+    assert!(stdout.contains("@@ New targets included:   55"));
+    assert!(stdout.contains("@@ New alignment includes: 56 subseqs (was 1), including original query"));
     assert_eq!(tblout.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).count(), 162);
     assert_eq!(
         domtblout
@@ -847,7 +863,8 @@ fn jackhmmer_haptoglobin_realworld_round2_matches_expected_tbl_and_dom_counts() 
     );
     let _ = std::fs::remove_file(query);
 
-    assert!(stdout.contains("@@ 107 included, 107 new. Continuing to next round."));
+    assert!(stdout.contains("@@ New targets included:   107"));
+    assert!(stdout.contains("@@ New alignment includes: 108 subseqs (was 1), including original query"));
     assert_eq!(
         tblout
             .lines()
@@ -892,7 +909,8 @@ fn jackhmmer_medium_realworld_round2_chkhmm_matches_c_header_fields() {
     );
     let _ = std::fs::remove_file(query);
 
-    assert!(rust_stdout.contains("@@ 55 included, 55 new. Continuing to next round."));
+    assert!(rust_stdout.contains("@@ New targets included:   55"));
+    assert!(rust_stdout.contains("@@ New alignment includes: 56 subseqs (was 1), including original query"));
     assert_eq!(rust_hmms.len(), 2);
     assert_eq!(c_hmms.len(), 2);
 
@@ -931,7 +949,8 @@ fn jackhmmer_haptoglobin_realworld_round2_chkhmm_matches_c_header_fields() {
     );
     let _ = std::fs::remove_file(query);
 
-    assert!(rust_stdout.contains("@@ 107 included, 107 new. Continuing to next round."));
+    assert!(rust_stdout.contains("@@ New targets included:   107"));
+    assert!(rust_stdout.contains("@@ New alignment includes: 108 subseqs (was 1), including original query"));
     assert_eq!(rust_hmms.len(), 2);
     assert_eq!(c_hmms.len(), 2);
 

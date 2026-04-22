@@ -515,16 +515,43 @@ pub fn included_alignment(
         .filter(|hit| hit.flags & P7_IS_INCLUDED != 0)
         .map(|hit| hit.dcl.iter().filter(|dom| dom.is_included).count())
         .sum::<usize>();
-    if ndom == 0 {
-        return None;
-    }
-
     let mut sequences = Vec::new();
     let mut traces = Vec::new();
 
     if let Some((sq, tr)) = extra {
         sequences.push(sq.clone());
         traces.push(tr.clone());
+    }
+
+    if ndom == 0 {
+        if sequences.is_empty() {
+            return None;
+        }
+        let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
+        let mut aseq = Vec::with_capacity(sequences.len());
+        let mut sqname = Vec::with_capacity(sequences.len());
+        for (sq, tr) in sequences.iter().zip(traces.iter()) {
+            let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
+            rejustify_insertions_text(&mut row, &inscount, &matmap, &matuse, model_len);
+            aseq.push(row);
+            sqname.push(sq.name.clone());
+        }
+
+        let mut rf = vec![b'.'; alen];
+        for k in 1..=model_len {
+            if matuse[k] {
+                rf[matmap[k] - 1] = b'x';
+            }
+        }
+
+        return Some(Msa {
+            name: msa_name.to_string(),
+            sqname,
+            aseq,
+            nseq: sequences.len(),
+            alen,
+            rf: Some(rf),
+        });
     }
 
     for hit in &th.hits {
