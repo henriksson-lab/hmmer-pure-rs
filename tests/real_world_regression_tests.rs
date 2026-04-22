@@ -242,15 +242,21 @@ fn normalize_nhmmer_stdout(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_nhmmer_tblout(content: &str) -> Vec<String> {
+fn normalize_nhmmer_tblout_with_fixture(
+    content: &str,
+    hmm: &str,
+    target: &str,
+) -> Vec<String> {
     let root_prefix = format!("{}/", env!("CARGO_MANIFEST_DIR"));
+    let option_line =
+        format!("# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE {} {} ", hmm, target);
     content
         .lines()
         .filter(|line| !line.starts_with("# Current dir:") && !line.starts_with("# Date:"))
         .map(|line| {
             let line = line.replace(&root_prefix, "");
             if line.starts_with("# Option settings:") {
-                "# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE hmmer/testsuite/ecori.hmm hmmer/testsuite/ecori.fa ".to_string()
+                option_line.clone()
             } else {
                 line
             }
@@ -416,9 +422,54 @@ fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
         "nhmmer ecori stdout diverged from golden output"
     );
     assert_eq!(
-        normalize_nhmmer_tblout(&tbl),
-        normalize_nhmmer_tblout(&golden_tbl),
+        normalize_nhmmer_tblout_with_fixture(
+            &tbl,
+            "hmmer/testsuite/ecori.hmm",
+            "hmmer/testsuite/ecori.fa",
+        ),
+        normalize_nhmmer_tblout_with_fixture(
+            &golden_tbl,
+            "hmmer/testsuite/ecori.hmm",
+            "hmmer/testsuite/ecori.fa",
+        ),
         "nhmmer ecori tblout diverged from golden output"
+    );
+}
+
+#[test]
+fn test_nhmmer_3box_exact_parity_bundle() {
+    let golden_stdout = std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.stdout")).unwrap();
+    let golden_tbl = std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.tblout")).unwrap();
+    let (stdout, tbl) = run_nhmmer(
+        &test_path("hmmer/testsuite/3box.hmm"),
+        &test_path("hmmer/testsuite/3box-alitest.fa"),
+        &["--dna"],
+    );
+
+    let rows = parse_nhmmer_rows(&tbl);
+    assert_eq!(rows.len(), 2, "3box fixture should report exactly two hits");
+    assert!(rows.iter().all(|row| row.strand == "+"));
+    assert_eq!(rows[0].target, "random");
+    assert_eq!((rows[0].ali_from, rows[0].ali_to), (4141, 4158));
+    assert_eq!((rows[1].ali_from, rows[1].ali_to), (7162, 7181));
+
+    assert_eq!(
+        normalize_nhmmer_stdout(&stdout),
+        normalize_nhmmer_stdout(&golden_stdout),
+        "nhmmer 3box stdout diverged from golden output"
+    );
+    assert_eq!(
+        normalize_nhmmer_tblout_with_fixture(
+            &tbl,
+            "hmmer/testsuite/3box.hmm",
+            "hmmer/testsuite/3box-alitest.fa",
+        ),
+        normalize_nhmmer_tblout_with_fixture(
+            &golden_tbl,
+            "hmmer/testsuite/3box.hmm",
+            "hmmer/testsuite/3box-alitest.fa",
+        ),
+        "nhmmer 3box tblout diverged from golden output"
     );
 }
 
@@ -439,6 +490,76 @@ fn test_gecco_pfam5_real_world_query_hit_counts_match_golden() {
         query_hit_counts(&rust_rows),
         query_hit_counts(&golden_rows),
         "gecco_pfam5 per-query hit counts diverged"
+    );
+}
+
+#[test]
+fn test_gecco_missed_real_world_query_hit_counts_match_golden() {
+    let golden =
+        std::fs::read_to_string(test_path("tests/golden/gecco_missed_vs_missed.tblout")).unwrap();
+    let rust = run_hmmsearch_tblout(
+        &test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
+        &test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+    );
+
+    let golden_rows = parse_hmmsearch_rows(&golden);
+    let rust_rows = parse_hmmsearch_rows(&rust);
+
+    assert_eq!(
+        rust_rows.len(),
+        golden_rows.len(),
+        "gecco_missed total hit count diverged"
+    );
+    assert_eq!(
+        query_hit_counts(&rust_rows),
+        query_hit_counts(&golden_rows),
+        "gecco_missed per-query hit counts diverged"
+    );
+}
+
+#[test]
+fn test_gecco_missed2_real_world_query_hit_counts_match_golden() {
+    let golden = std::fs::read_to_string(test_path("tests/golden/gecco_missed2.tblout")).unwrap();
+    let rust = run_hmmsearch_tblout(
+        &test_path("hmmer/testsuite/gecco_missed2_hmms.hmm"),
+        &test_path("hmmer/testsuite/gecco_missed2_proteins.faa"),
+    );
+
+    let golden_rows = parse_hmmsearch_rows(&golden);
+    let rust_rows = parse_hmmsearch_rows(&rust);
+
+    assert_eq!(
+        rust_rows.len(),
+        golden_rows.len(),
+        "gecco_missed2 total hit count diverged"
+    );
+    assert_eq!(
+        query_hit_counts(&rust_rows),
+        query_hit_counts(&golden_rows),
+        "gecco_missed2 per-query hit counts diverged"
+    );
+}
+
+#[test]
+fn test_gecco_missed3_real_world_query_hit_counts_match_golden() {
+    let golden = std::fs::read_to_string(test_path("tests/golden/gecco_missed3.tblout")).unwrap();
+    let rust = run_hmmsearch_tblout(
+        &test_path("hmmer/testsuite/gecco_missed3_hmms.hmm"),
+        &test_path("hmmer/testsuite/gecco_missed3_proteins.faa"),
+    );
+
+    let golden_rows = parse_hmmsearch_rows(&golden);
+    let rust_rows = parse_hmmsearch_rows(&rust);
+
+    assert_eq!(
+        rust_rows.len(),
+        golden_rows.len(),
+        "gecco_missed3 total hit count diverged"
+    );
+    assert_eq!(
+        query_hit_counts(&rust_rows),
+        query_hit_counts(&golden_rows),
+        "gecco_missed3 per-query hit counts diverged"
     );
 }
 
@@ -464,6 +585,24 @@ fn test_gecco_missed4_real_world_query_hit_counts_match_golden() {
     let golden_queries: HashSet<String> = golden_rows.iter().map(|(_, q, _, _)| q.clone()).collect();
     let rust_queries: HashSet<String> = rust_rows.iter().map(|(_, q, _, _)| q.clone()).collect();
     assert_eq!(rust_queries, golden_queries, "gecco_missed4 query coverage diverged");
+}
+
+#[test]
+fn test_gecco_pfam5_top_hits_match_golden_rows() {
+    let golden = std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
+    let rust = run_hmmsearch_tblout(
+        &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
+        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+    );
+
+    let golden_rows = parse_hmmsearch_rows(&golden);
+    let rust_rows = parse_hmmsearch_rows(&rust);
+
+    assert_eq!(
+        rust_rows.iter().take(5).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
+        golden_rows.iter().take(5).map(|r| (&r.0, &r.1)).collect::<Vec<_>>(),
+        "gecco_pfam5 top five hit rows diverged from golden ordering"
+    );
 }
 
 #[test]

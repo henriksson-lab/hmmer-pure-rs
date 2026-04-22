@@ -1,0 +1,64 @@
+# nhmmer :: search a DNA model, alignment, or sequence against a DNA database
+# HMMER 3.4 (Aug 2023); http://hmmer.org/
+# Copyright (C) 2023 Howard Hughes Medical Institute.
+# Freely distributed under the BSD open source license.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# query file:                      hmmer/testsuite/3box.hmm
+# target sequence database:        hmmer/testsuite/3box-alitest.fa
+# input query is asserted as:      DNA
+# number of worker threads:        2
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Query:       3box  [M=20]
+Scores for complete hits:
+    E-value  score  bias  Sequence  start    end  Description
+    ------- ------ -----  --------  -----  -----  -----------
+     0.0012   13.3   5.0  random     4141   4158 
+  ------ inclusion threshold ------
+       0.12    7.1   2.4  random     7162   7181 
+
+
+Annotation for each hit  (and alignments):
+>> random  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ !   13.3   5.0    0.0012         1        17 [.      4141      4158 ..      4141      4161 ..      9981    0.88
+
+  Alignment:
+  score: 13.3 bits
+              .................. CS
+              xxxxxxxxx.xxxxxx.x RF
+    3box    1 AAAtGAaattGTtTGA.t 17  
+              AAAtGAaattGTtTGA t
+  random 4141 AAATGAAATTGTTTGAgT 4158
+              79*************944 PP
+
+>> random  
+    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to       sq len      acc
+   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----
+ ?    7.1   2.4      0.12         1        20 []      7162      7181 ..      7162      7181 ..      9981    0.88
+
+  Alignment:
+  score: 7.1 bits
+              .................... CS
+              xxxxxxxxx.xxxxxxxxxx RF
+    3box    1 AAAtGAaattGTtTGAtTAg 20  
+              AA tGAa t+GTtTG  TAg
+  random 7162 AAGTGAACTAGTTTGTGTAG 7181
+              6789***********88875 PP
+
+
+
+Internal pipeline statistics summary:
+-------------------------------------
+Query model(s):                            1  (20 nodes)
+Target sequences:                          1  (19962 residues searched)
+Residues passing SSV filter:             680  (0.0341); expected (0.02)
+Residues passing bias filter:            611  (0.0306); expected (0.02)
+Residues passing Vit filter:             169  (0.00847); expected (0.003)
+Residues passing Fwd filter:              97  (0.00486); expected (3e-05)
+Total number of hits:                      2  (0.0019)
+# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: 00:00:00.02
+# Mc/sec: 19.6
+//
+[ok]
