@@ -151,7 +151,7 @@ fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
         .unwrap_or(0)
         .max("#=GC PP_cons".len())
         .max("#=GC RF".len())
-        .max(12);
+        .max(13);
 
     writeln!(out, "# STOCKHOLM 1.0").unwrap();
     writeln!(out).unwrap();
@@ -318,7 +318,7 @@ fn build_text_msa_with_mapali(
         eprintln!("HMM has no map. --mapali can't work without it.");
         std::process::exit(1);
     }
-    let checksum = checksum_msa(mapped);
+    let checksum = checksum_msa(mapped, abc);
     if checksum != hmm.checksum {
         eprintln!("--mapali MSA isn't same as the one HMM came from (checksum mismatch)");
         std::process::exit(1);
@@ -407,11 +407,11 @@ fn build_text_msa_with_mapali(
     }
 }
 
-fn checksum_msa(msa: &msa::Msa) -> u32 {
+fn checksum_msa(msa: &msa::Msa, abc: &Alphabet) -> u32 {
     let mut val = 0u32;
-    for row in &msa.aseq {
-        for &ch in row {
-            val = val.wrapping_add(ch as u32);
+    for row in msa.digitize(abc) {
+        for &sym in row.iter().skip(1).take(msa.alen) {
+            val = val.wrapping_add(sym as u32);
             val = val.wrapping_add(val << 10);
             val ^= val >> 6;
         }

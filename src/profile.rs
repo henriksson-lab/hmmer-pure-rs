@@ -365,7 +365,6 @@ pub fn reconfig_unihit(gm: &mut Profile, l: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alphabet::AlphabetType;
     use std::path::Path;
 
     fn load_test_hmm() -> Hmm {

@@ -8,6 +8,10 @@ use crate::alphabet::AlphabetType;
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
 
+unsafe extern "C" {
+    fn logf(x: f32) -> f32;
+}
+
 /// Read all HMMs from an HMM file.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     let file = std::fs::File::open(path).map_err(|e| HmmerError::Io(e))?;
@@ -576,7 +580,7 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         writeln!(w, "NSEQ  {}", hmm.nseq).map_err(HmmerError::Io)?;
     }
     if hmm.eff_nseq >= 0.0 {
-        writeln!(w, "EFFN  {}", hmm.eff_nseq).map_err(HmmerError::Io)?;
+        writeln!(w, "EFFN  {:.6}", hmm.eff_nseq).map_err(HmmerError::Io)?;
     }
     if hmm.flags & P7H_CHKSUM != 0 {
         writeln!(w, "CKSUM {}", hmm.checksum).map_err(HmmerError::Io)?;
@@ -650,15 +654,26 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         // Annotations
         if let Some(ref map) = hmm.map {
             write!(w, " {:>6}", map[node]).map_err(HmmerError::Io)?;
-        }
-        if let Some(ref cons) = hmm.consensus {
-            write!(w, " {}", cons[node] as char).map_err(HmmerError::Io)?;
-        }
-        if let Some(ref rf) = hmm.rf {
-            write!(w, " {}", rf[node] as char).map_err(HmmerError::Io)?;
-        }
-        if let Some(ref cs) = hmm.cs {
-            write!(w, " {}", cs[node] as char).map_err(HmmerError::Io)?;
+
+            let cons_ch = hmm
+                .consensus
+                .as_ref()
+                .map(|cons| cons[node] as char)
+                .unwrap_or('-');
+            let rf_ch = hmm.rf.as_ref().map(|rf| rf[node] as char).unwrap_or('-');
+            let mm_ch = hmm.mm.as_ref().map(|mm| mm[node] as char).unwrap_or('-');
+            let cs_ch = hmm.cs.as_ref().map(|cs| cs[node] as char).unwrap_or('-');
+            write!(w, " {} {} {} {}", cons_ch, rf_ch, mm_ch, cs_ch).map_err(HmmerError::Io)?;
+        } else {
+            if let Some(ref cons) = hmm.consensus {
+                write!(w, " {}", cons[node] as char).map_err(HmmerError::Io)?;
+            }
+            if let Some(ref rf) = hmm.rf {
+                write!(w, " {}", rf[node] as char).map_err(HmmerError::Io)?;
+            }
+            if let Some(ref cs) = hmm.cs {
+                write!(w, " {}", cs[node] as char).map_err(HmmerError::Io)?;
+            }
         }
         writeln!(w).map_err(HmmerError::Io)?;
 
@@ -685,8 +700,11 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
 fn fmt_prob(p: f32) -> String {
     if p <= 0.0 {
         "      *".to_string()
+    } else if p == 1.0 {
+        format!("{:7.5}", 0.0)
     } else {
-        format!("{:7.5}", -p.ln())
+        // HMMER's C writer uses logf(), not double-precision log().
+        format!("{:7.5}", -unsafe { logf(p) })
     }
 }
 

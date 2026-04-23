@@ -387,8 +387,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 local_bg.set_length(sq.n);
 
                 let mut local_th = TopHits::new();
-                if local_pli.run(&mut local_gm, &mut local_om, &local_bg, hmm, &sq, &mut local_th)
-                {
+                if local_pli.run(
+                    &mut local_gm,
+                    &mut local_om,
+                    &local_bg,
+                    hmm,
+                    &sq,
+                    &mut local_th,
+                ) {
                     th.hits.extend(local_th.hits.into_iter());
                 }
                 pli.n_past_msv += local_pli.n_past_msv;
@@ -431,62 +437,61 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     break;
                 }
 
-                let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> =
-                    batch
-                        .par_iter()
-                        .map_init(
-                            || {
-                                hmmer_pure_rs::util::simd_env::init();
-                                let local_gm = (*shared_gm).clone();
-                                let mut local_pli = Pipeline::new();
-                                local_pli.new_model(&local_gm);
-                                local_pli.f1 = f1;
-                                local_pli.f2 = f2;
-                                local_pli.f3 = f3;
-                                local_pli.do_max = do_max;
-                                if nobias {
-                                    local_pli.do_biasfilter = false;
-                                }
-                                if nonull2 {
-                                    local_pli.do_null2 = false;
-                                }
-                                local_pli.do_alignment = do_alignment;
-                                local_pli.do_alignment_display = do_alignment_display;
-                                local_pli.seed = seed;
-                                (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
-                            },
-                            |(local_bg, local_gm, local_om, local_pli), sq| {
-                                local_pli.n_targets = 0;
-                                local_pli.n_past_msv = 0;
-                                local_pli.n_past_bias = 0;
-                                local_pli.n_past_vit = 0;
-                                local_pli.n_past_fwd = 0;
+                let results: Vec<(Option<hmmer_pure_rs::tophits::Hit>, u64, u64, u64, u64)> = batch
+                    .par_iter()
+                    .map_init(
+                        || {
+                            hmmer_pure_rs::util::simd_env::init();
+                            let local_gm = (*shared_gm).clone();
+                            let mut local_pli = Pipeline::new();
+                            local_pli.new_model(&local_gm);
+                            local_pli.f1 = f1;
+                            local_pli.f2 = f2;
+                            local_pli.f3 = f3;
+                            local_pli.do_max = do_max;
+                            if nobias {
+                                local_pli.do_biasfilter = false;
+                            }
+                            if nonull2 {
+                                local_pli.do_null2 = false;
+                            }
+                            local_pli.do_alignment = do_alignment;
+                            local_pli.do_alignment_display = do_alignment_display;
+                            local_pli.seed = seed;
+                            (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
+                        },
+                        |(local_bg, local_gm, local_om, local_pli), sq| {
+                            local_pli.n_targets = 0;
+                            local_pli.n_past_msv = 0;
+                            local_pli.n_past_bias = 0;
+                            local_pli.n_past_vit = 0;
+                            local_pli.n_past_fwd = 0;
 
-                                local_bg.set_length(sq.n);
+                            local_bg.set_length(sq.n);
 
-                                let mut local_th = TopHits::new();
-                                let hit = if local_pli.run(
-                                    local_gm,
-                                    local_om,
-                                    local_bg,
-                                    hmm,
-                                    sq,
-                                    &mut local_th,
-                                ) {
-                                    local_th.hits.into_iter().next()
-                                } else {
-                                    None
-                                };
-                                (
-                                    hit,
-                                    local_pli.n_past_msv,
-                                    local_pli.n_past_bias,
-                                    local_pli.n_past_vit,
-                                    local_pli.n_past_fwd,
-                                )
-                            },
-                        )
-                        .collect();
+                            let mut local_th = TopHits::new();
+                            let hit = if local_pli.run(
+                                local_gm,
+                                local_om,
+                                local_bg,
+                                hmm,
+                                sq,
+                                &mut local_th,
+                            ) {
+                                local_th.hits.into_iter().next()
+                            } else {
+                                None
+                            };
+                            (
+                                hit,
+                                local_pli.n_past_msv,
+                                local_pli.n_past_bias,
+                                local_pli.n_past_vit,
+                                local_pli.n_past_fwd,
+                            )
+                        },
+                    )
+                    .collect();
 
                 for (hit, msv, bias, vit, fwd) in results {
                     pli.n_past_msv += msv;

@@ -529,11 +529,24 @@ pub fn included_alignment(
         }
         let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
         let mut aseq = Vec::with_capacity(sequences.len());
+        let mut pp = Vec::with_capacity(sequences.len());
         let mut sqname = Vec::with_capacity(sequences.len());
+        let mut pp_totals = vec![0.0_f32; alen];
+        let mut pp_counts = vec![0usize; alen];
         for (sq, tr) in sequences.iter().zip(traces.iter()) {
             let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
-            rejustify_insertions_text(&mut row, &inscount, &matmap, &matuse, model_len);
+            let mut pp_row =
+                make_pp_row(tr, &matmap, model_len, alen, &mut pp_totals, &mut pp_counts);
+            rejustify_insertions_text(
+                &mut row,
+                pp_row.as_deref_mut(),
+                &inscount,
+                &matmap,
+                &matuse,
+                model_len,
+            );
             aseq.push(row);
+            pp.push(pp_row);
             sqname.push(sq.name.clone());
         }
 
@@ -546,11 +559,16 @@ pub fn included_alignment(
 
         return Some(Msa {
             name: msa_name.to_string(),
+            desc: None,
+            author: None,
             sqname,
+            sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
+            pp,
             aseq,
             nseq: sequences.len(),
             alen,
             rf: Some(rf),
+            pp_cons: pp_consensus(&pp_totals, &pp_counts),
         });
     }
 
@@ -575,11 +593,23 @@ pub fn included_alignment(
 
     let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
     let mut aseq = Vec::with_capacity(sequences.len());
+    let mut pp = Vec::with_capacity(sequences.len());
     let mut sqname = Vec::with_capacity(sequences.len());
+    let mut pp_totals = vec![0.0_f32; alen];
+    let mut pp_counts = vec![0usize; alen];
     for (sq, tr) in sequences.iter().zip(traces.iter()) {
         let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
-        rejustify_insertions_text(&mut row, &inscount, &matmap, &matuse, model_len);
+        let mut pp_row = make_pp_row(tr, &matmap, model_len, alen, &mut pp_totals, &mut pp_counts);
+        rejustify_insertions_text(
+            &mut row,
+            pp_row.as_deref_mut(),
+            &inscount,
+            &matmap,
+            &matuse,
+            model_len,
+        );
         aseq.push(row);
+        pp.push(pp_row);
         sqname.push(sq.name.clone());
     }
 
@@ -592,11 +622,16 @@ pub fn included_alignment(
 
     Some(Msa {
         name: msa_name.to_string(),
+        desc: None,
+        author: None,
         sqname,
+        sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
+        pp,
         aseq,
         nseq: sequences.len(),
         alen,
         rf: Some(rf),
+        pp_cons: pp_consensus(&pp_totals, &pp_counts),
     })
 }
 
@@ -606,17 +641,20 @@ fn alidisplay_backconvert(
     ad: &AliDisplay,
     abc: &Alphabet,
 ) -> (Sequence, Trace) {
-    let sub_l = ad
-        .aseq
-        .bytes()
-        .filter(|&c| c != b'.' && c != b'-')
-        .count();
+    let sub_l = ad.aseq.bytes().filter(|&c| c != b'.' && c != b'-').count();
     let sqfrom = dom.iali.min(dom.jali);
     let sqto = dom.iali.max(dom.jali);
 
     let mut sq = Sequence::new();
     sq.name = format!("{}/{}-{}", hit.name, sqfrom, sqto);
-    sq.desc = format!("[subseq from] {}", hit.name);
+    sq.desc = format!(
+        "[subseq from] {}",
+        if hit.desc.is_empty() {
+            hit.name.as_str()
+        } else {
+            hit.desc.as_str()
+        }
+    );
     sq.acc = hit.acc.clone();
     sq.n = sub_l;
     sq.l = hit.n;
@@ -637,26 +675,75 @@ fn alidisplay_backconvert(
         let aseq_gap = aseq[a] == b'.' || aseq[a] == b'-';
         let state = if !model_gap {
             k += 1;
-            if !aseq_gap { State::M } else { State::D }
+            if !aseq_gap {
+                State::M
+            } else {
+                State::D
+            }
         } else {
             State::I
         };
-        tr.append(state, k, i);
+        let pp = ad
+            .ppline
+            .as_bytes()
+            .get(a)
+            .copied()
+            .map(decode_postprob)
+            .unwrap_or(0.0);
+        tr.append_with_pp(state, k, i, pp);
         match state {
             State::M | State::I => {
-                sq.dsq.push(abc.digitize_symbol(aseq[a].to_ascii_uppercase()));
+                sq.dsq
+                    .push(abc.digitize_symbol(aseq[a].to_ascii_uppercase()));
                 i += 1;
             }
             State::D => {}
             _ => unreachable!(),
         }
     }
-    tr.append(State::E, 0, 0);
-    tr.append(State::C, 0, 0);
-    tr.append(State::T, 0, 0);
+    tr.append_with_pp(State::E, 0, 0, 0.0);
+    tr.append_with_pp(State::C, 0, 0, 0.0);
+    tr.append_with_pp(State::T, 0, 0, 0.0);
     sq.dsq.push(crate::alphabet::DSQ_SENTINEL);
 
     (sq, tr)
+}
+
+fn encode_postprob(p: f32) -> u8 {
+    if p + 0.05 >= 1.0 {
+        b'*'
+    } else {
+        ((p + 0.05) * 10.0) as u8 + b'0'
+    }
+}
+
+fn decode_postprob(pc: u8) -> f32 {
+    match pc {
+        b'0' => 0.01,
+        b'*' => 1.0,
+        b'.' => 0.0,
+        b'1'..=b'9' => (pc - b'0') as f32 / 10.0,
+        _ => 0.0,
+    }
+}
+
+fn pp_consensus(pp_totals: &[f32], pp_counts: &[usize]) -> Option<Vec<u8>> {
+    if pp_counts.iter().all(|&count| count == 0) {
+        return None;
+    }
+    Some(
+        pp_totals
+            .iter()
+            .zip(pp_counts.iter())
+            .map(|(&total, &count)| {
+                if count > 0 {
+                    encode_postprob(total / count as f32)
+                } else {
+                    b'.'
+                }
+            })
+            .collect(),
+    )
 }
 
 fn map_new_msa(m: usize, traces: &[Trace]) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
@@ -750,8 +837,54 @@ fn make_text_row(
     aseq
 }
 
+fn make_pp_row(
+    tr: &Trace,
+    matmap: &[usize],
+    model_len: usize,
+    alen: usize,
+    pp_totals: &mut [f32],
+    pp_counts: &mut [usize],
+) -> Option<Vec<u8>> {
+    let pp_values = tr.pp.as_ref()?;
+    let mut pp = vec![b'.'; alen];
+    let mut apos = 0usize;
+    for z in 0..tr.n {
+        match tr.st[z] {
+            State::M => {
+                let idx = matmap[tr.k[z]] - 1;
+                let value = pp_values[z];
+                pp[idx] = encode_postprob(value);
+                pp_totals[idx] += value;
+                pp_counts[idx] += 1;
+                apos = matmap[tr.k[z]];
+            }
+            State::D => {
+                apos = matmap[tr.k[z]];
+            }
+            State::I => {
+                if tr.k[z] != 0 && tr.k[z] != model_len && apos < alen {
+                    pp[apos] = encode_postprob(pp_values[z]);
+                    apos += 1;
+                }
+            }
+            State::N | State::C => {
+                if tr.i[z] > 0 && apos < alen {
+                    pp[apos] = encode_postprob(pp_values[z]);
+                    apos += 1;
+                }
+            }
+            State::E => {
+                apos = matmap[model_len];
+            }
+            _ => {}
+        }
+    }
+    Some(pp)
+}
+
 fn rejustify_insertions_text(
     aseq: &mut [u8],
+    mut pp: Option<&mut [u8]>,
     inserts: &[usize],
     matmap: &[usize],
     matuse: &[bool],
@@ -786,11 +919,17 @@ fn rejustify_insertions_text(
                 continue;
             }
             aseq[npos as usize] = aseq[opos as usize];
+            if let Some(pp) = &mut pp {
+                pp[npos as usize] = pp[opos as usize];
+            }
             opos -= 1;
             npos -= 1;
         }
         while npos >= floor {
             aseq[npos as usize] = b'.';
+            if let Some(pp) = &mut pp {
+                pp[npos as usize] = b'.';
+            }
             npos -= 1;
         }
     }

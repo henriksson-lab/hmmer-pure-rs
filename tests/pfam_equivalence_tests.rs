@@ -182,8 +182,6 @@ fn seqdb_path() -> String {
     "test_data/human_swissprot_2k.fasta.gz".to_string()
 }
 
-const SEQDB_GZ: &str = "test_data/human_swissprot_2k.fasta.gz";
-
 // ============================================================
 // Per-family equivalence tests
 // ============================================================

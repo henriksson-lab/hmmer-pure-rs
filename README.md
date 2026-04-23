@@ -1,4 +1,4 @@
-# hmmer-pure-rs 0.6.0
+# hmmer-pure-rs 0.7.0
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
@@ -242,28 +242,30 @@ Current real-data coverage includes:
 
 ## Remaining Gaps
 
-The command surface is broadly present, but a few areas are still incomplete or
-not yet C-identical:
+The command surface is broadly present, but a few areas are still incomplete,
+not yet fully C-identical, or still need broader validation:
 
 - `hmmalign` now reconstructs model-guided alignments and supports Stockholm,
   A2M, `--trim`, `-o`, and strict upstream-style `--mapali` checksum
   validation. The remaining gap is breadth, not core functionality: only the
   implemented output formats are accepted, and parity coverage is still growing
   around legacy fixture edge cases.
-- `phmmer` and first-iteration `jackhmmer` now use the upstream-style
-  single-sequence score-matrix conversion path instead of the earlier
-  renormalized shortcut. Later `jackhmmer` rounds now rebuild from a
-  model-guided alignment to the previous-round HMM instead of the earlier raw
-  right-padding shortcut, which materially improved convergence behavior and
-  final-round scores. The remaining gap is that iterative rebuilds still use a
-  simplified `hmmbuild` path, so bundled-C final-round `jackhmmer` scores are
-  not yet exact even though the behavior is much closer than before.
+- `phmmer` and `jackhmmer` now use the upstream-style single-sequence
+  score-matrix conversion path instead of the earlier renormalized shortcut.
+  Later `jackhmmer` rounds rebuild from model-guided checkpoint alignments,
+  with exact bundled-C `--chkali` and `--chkhmm` parity covered on the globins
+  fixture. Remaining work is broader iterative-search score parity across more
+  real databases and threshold combinations.
 - `hmmsearch --pfamtblout` now writes both Pfam sections with C-style domain
   ordering and coordinate generation even under `--noali`. Current regressions
   cover exact bundled-C parity on small fixtures plus a real-world GECCO case.
 - Sequence-level null2 bias is currently covered by exact checked fixtures,
   including a multi-domain `fn3` regression, but the broader validation corpus
   here is still lighter than for the core `hmmsearch`/`nhmmer` search paths.
+- Performance work is no longer primarily about large-dataset RSS on
+  `hmmsearch`; the current remaining performance gap is mostly multi-thread
+  scaling and other workload breadth, not the earlier whole-database memory
+  retention issue.
 
 Currently supported programs:
 - `hmmsearch` - Search HMM(s) against a sequence database (FASTA/UniProt/gzipped)

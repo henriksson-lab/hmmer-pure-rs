@@ -1,6 +1,6 @@
 [package]
 name = "hmmer-pure-rs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Pure Rust port of HMMER 3.4 — biological sequence analysis using profile HMMs"
 license = "BSD-3-Clause"
@@ -60,7 +60,6 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
-deep-comparator-rs = { path = "../deep-comparator", default-features = false }
 
 [profile.release]
 opt-level = 3

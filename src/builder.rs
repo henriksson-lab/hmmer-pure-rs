@@ -28,12 +28,12 @@ fn checksum_msa(msa: &Msa, abc: &Alphabet) -> u32 {
 /// HMMER only restricts PB weighting to RF consensus columns in `--hand`
 /// mode. In default fast architecture mode, any input RF annotation is
 /// ignored for weighting.
-pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f32> {
+pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f64> {
     let nseq = msa.nseq;
     let k = abc.k;
 
     let ax = msa.digitize(abc);
-    let mut weights = vec![0.0_f32; nseq];
+    let mut weights = vec![0.0_f64; nseq];
 
     for col in 0..msa.alen {
         if use_rf {
@@ -67,7 +67,7 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f32> {
             if pos < ax[seq].len() - 1 {
                 let residue = ax[seq][pos] as usize;
                 if residue < k && counts[residue] > 0 {
-                    weights[seq] += 1.0 / (r as f32 * counts[residue] as f32);
+                    weights[seq] += 1.0 / (r * counts[residue]) as f64;
                 }
             }
         }
@@ -92,16 +92,22 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f32> {
             }
         }
         if n_res > 0 {
-            weights[seq] /= n_res as f32;
+            weights[seq] /= n_res as f64;
         }
     }
 
     // Normalize weights to sum to nseq
-    let sum: f32 = weights.iter().sum();
-    if sum > 0.0 {
-        let scale = nseq as f32 / sum;
+    let sum: f64 = weights.iter().sum();
+    if sum != 0.0 {
+        let scale = nseq as f64 / sum;
         for w in &mut weights {
             *w *= scale;
+        }
+    } else if nseq > 0 {
+        let uniform = 1.0 / nseq as f64;
+        weights.fill(uniform);
+        for w in &mut weights {
+            *w *= nseq as f64;
         }
     }
 
@@ -144,10 +150,10 @@ pub fn build_hmm_from_msa(
             if pos < ax[seq].len() - 1 {
                 let residue = ax[seq][pos];
                 if abc.is_residue(residue) {
-                    residue_wt += weights[seq];
-                    total_wt += weights[seq];
+                    residue_wt = (residue_wt as f64 + weights[seq]) as f32;
+                    total_wt = (total_wt as f64 + weights[seq]) as f32;
                 } else if residue == gap {
-                    total_wt += weights[seq];
+                    total_wt = (total_wt as f64 + weights[seq]) as f32;
                 } else if residue == missing {
                     continue;
                 }
@@ -159,9 +165,9 @@ pub fn build_hmm_from_msa(
     // Only `--hand` architecture uses input RF; fast architecture ignores it.
     if hand_arch {
         if let Some(ref rf) = msa.rf {
-        for col in 0..msa.alen.min(rf.len()) {
-            matassign[col] = rf[col] != b'.' && rf[col] != b'-' && rf[col] != b' ';
-        }
+            for col in 0..msa.alen.min(rf.len()) {
+                matassign[col] = rf[col] != b'.' && rf[col] != b'-' && rf[col] != b' ';
+            }
         }
     }
 
@@ -178,7 +184,7 @@ pub fn build_hmm_from_msa(
     hmm.nseq = nseq as i32;
     hmm.eff_nseq = nseq as f32;
 
-    let eff_nseq: f32 = weights.iter().sum();
+    let eff_nseq: f32 = weights.iter().sum::<f64>() as f32;
     hmm.eff_nseq = eff_nseq;
 
     // Step 2: Count weighted residues and transitions
@@ -196,33 +202,12 @@ pub fn build_hmm_from_msa(
     // matching C's build.c -> p7_trace_FauxFromMSA() -> p7_trace_Doctor()
     // -> p7_trace_Count() flow.
     for seq in 0..nseq {
-        let w = weights[seq];
+        let w = weights[seq] as f32;
         if traces[seq].n == 0 {
             continue;
         }
         count_trace(&mut hmm, &ax[seq], w, &traces[seq], abc);
     }
-
-    // Set consensus
-    let mut cons = vec![b' '; m + 2];
-    let mut node = 0;
-    for col in 0..msa.alen {
-        if matassign[col] {
-            node += 1;
-            // Find highest-probability residue
-            let mut best_x = 0;
-            let mut best_p = 0.0;
-            for x in 0..k {
-                if hmm.mat[node][x] > best_p {
-                    best_p = hmm.mat[node][x];
-                    best_x = x;
-                }
-            }
-            cons[node] = abc.sym[best_x];
-        }
-    }
-    hmm.consensus = Some(cons);
-    hmm.flags |= P7H_CONS;
 
     // Set RF from matassign
     if msa.rf.is_some() {
@@ -268,6 +253,7 @@ pub fn build_hmm_from_msa(
     crate::prior::apply_priors(&mut hmm);
 
     set_hmm_composition(&mut hmm);
+    set_hmm_consensus(&mut hmm, abc);
 
     // E-value calibration by simulation
     crate::calibrate::calibrate(&mut hmm, abc, bg);
@@ -315,6 +301,32 @@ fn set_hmm_composition(hmm: &mut Hmm) {
         }
     }
     hmm.flags |= P7H_COMPO;
+}
+
+fn set_hmm_consensus(hmm: &mut Hmm, abc: &Alphabet) {
+    let threshold = match hmm.abc_type {
+        crate::alphabet::AlphabetType::Dna | crate::alphabet::AlphabetType::Rna => 0.9,
+        _ => 0.5,
+    };
+    let mut cons = vec![b' '; hmm.m + 2];
+    for (node, cons_slot) in cons.iter_mut().enumerate().take(hmm.m + 1).skip(1) {
+        let mut best_x = 0usize;
+        let mut best_p = f32::NEG_INFINITY;
+        for x in 0..abc.k {
+            if hmm.mat[node][x] > best_p {
+                best_p = hmm.mat[node][x];
+                best_x = x;
+            }
+        }
+        let symbol = abc.sym[best_x];
+        *cons_slot = if best_p >= threshold {
+            symbol.to_ascii_uppercase()
+        } else {
+            symbol.to_ascii_lowercase()
+        };
+    }
+    hmm.consensus = Some(cons);
+    hmm.flags |= P7H_CONS;
 }
 
 fn faux_trace_from_msa(ax: &[Vec<u8>], matassign: &[bool], abc: &Alphabet) -> Vec<Trace> {

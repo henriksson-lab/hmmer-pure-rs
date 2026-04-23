@@ -145,6 +145,14 @@ fn run_c_hmmsearch_pfamtbl(hmm: &str, seqdb: &str, extra_args: &[&str]) -> Strin
     std::fs::read_to_string(&pfamtblout).unwrap_or_default()
 }
 
+fn data_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 /// Parse tblout into Vec<(target_name, query_name, evalue, score)>.
 fn parse_tblout(content: &str) -> Vec<(String, String, f64, f64)> {
     content
@@ -495,6 +503,22 @@ fn test_fn3_multi_domain_nonull2_zeroes_sequence_bias_but_keeps_domain_structure
         default_ranges, nonull2_ranges,
         "--nonull2 should preserve the multi-domain alignment structure"
     );
+}
+
+#[test]
+fn test_20aa_nonull2_pfamtbl_matches_bundled_c_exactly() {
+    let rust = run_hmmsearch_pfamtbl(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--nonull2"],
+    );
+    let c = run_c_hmmsearch_pfamtbl(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--nonull2"],
+    );
+
+    assert_eq!(data_lines(&rust), data_lines(&c));
 }
 
 #[test]

@@ -6,18 +6,26 @@
 /// `alpha` is the Dirichlet parameter vector [0..K-1].
 /// Returns the posterior mean estimate.
 pub fn apply_dirichlet(counts: &[f32], alpha: &[f32]) -> Vec<f32> {
+    let alpha_d: Vec<f64> = alpha.iter().map(|&v| v as f64).collect();
+    apply_dirichlet_f64(counts, &alpha_d)
+}
+
+fn apply_dirichlet_f64(counts: &[f32], alpha: &[f64]) -> Vec<f32> {
     let k = counts.len();
-    let mut result = vec![0.0_f32; k];
-    let count_sum: f32 = counts.iter().sum();
-    let alpha_sum: f32 = alpha.iter().sum();
+    let mut result = vec![0.0_f64; k];
+    let count_sum: f64 = counts.iter().map(|&v| v as f64).sum();
+    let alpha_sum: f64 = alpha.iter().sum();
     let total = count_sum + alpha_sum;
 
     if total > 0.0 {
         for i in 0..k {
-            result[i] = (counts[i] + alpha[i]) / total;
+            result[i] = (counts[i] as f64 + alpha[i]) / total;
         }
     }
-    result
+
+    dnorm(&mut result);
+
+    result.iter().map(|&v| v as f32).collect()
 }
 
 /// Sjolander 9-component mixture Dirichlet for amino acid match emissions.
@@ -97,17 +105,8 @@ pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
         log_pk[comp] = log_p;
     }
 
-    // Normalize posterior component probabilities
-    let max_log = log_pk.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let mut pk = [0.0_f64; 9];
-    let mut pk_sum = 0.0_f64;
-    for comp in 0..9 {
-        pk[comp] = (log_pk[comp] - max_log).exp();
-        pk_sum += pk[comp];
-    }
-    for comp in 0..9 {
-        pk[comp] /= pk_sum;
-    }
+    let mut pk = log_pk;
+    dlog_norm(&mut pk);
 
     // Compute mean posterior: p[a] = sum_k P(k|c) * (c[a] + alpha_k[a]) / (sum_c + sum_alpha_k)
     let mut result = vec![0.0_f64; k];
@@ -122,54 +121,84 @@ pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
     }
 
     // Normalize
-    let rsum: f64 = result.iter().sum();
-    if rsum > 0.0 {
-        for a in 0..k {
-            result[a] /= rsum;
-        }
-    }
+    dnorm(&mut result);
 
     result.iter().map(|&v| v as f32).collect()
 }
 
-/// Log-gamma using Lanczos approximation (accurate for all positive x).
+/// Easel's `esl_stats_LogGamma()` approximation.
 fn ln_gamma(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
     }
-    // Lanczos coefficients (g=7, n=9)
-    const C: [f64; 9] = [
-        0.99999999999980993,
-        676.5203681218851,
-        -1259.1392167224028,
-        771.32342877765313,
-        -176.61502916214059,
-        12.507343278686905,
-        -0.13857109526572012,
-        9.9843695780195716e-6,
-        1.5056327351493116e-7,
+    const COF: [f64; 11] = [
+        4.694580336184385e+04,
+        -1.560605207784446e+05,
+        2.065049568014106e+05,
+        -1.388934775095388e+05,
+        5.031796415085709e+04,
+        -9.601592329182778e+03,
+        8.785855930895250e+02,
+        -3.155153906098611e+01,
+        2.908143421162229e-01,
+        -2.319827630494973e-04,
+        1.251639670050933e-10,
     ];
-    if x < 0.5 {
-        let pi = std::f64::consts::PI;
-        return (pi / (pi * x).sin()).ln() - ln_gamma(1.0 - x);
+    let xx = x - 1.0;
+    let tx = xx + 11.0;
+    let mut tmp = tx;
+    let mut value = 1.0;
+    for cof in COF.iter().rev() {
+        value += cof / tmp;
+        tmp -= 1.0;
     }
-    let x = x - 1.0;
-    let mut sum = C[0];
-    for i in 1..9 {
-        sum += C[i] / (x + i as f64);
+    value.ln() + 0.918938533 + (xx + 0.5) * (tx + 0.5).ln() - (tx + 0.5)
+}
+
+fn dlog_sum(values: &[f64]) -> f64 {
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if max == f64::INFINITY {
+        return f64::INFINITY;
     }
-    let t = x + 7.5; // g + 0.5
-    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
+    let mut sum = 0.0;
+    for &value in values {
+        if value > max - 500.0 {
+            sum += (value - max).exp();
+        }
+    }
+    sum.ln() + max
+}
+
+fn dlog_norm(values: &mut [f64]) {
+    let denom = dlog_sum(values);
+    for value in values.iter_mut() {
+        *value = (*value - denom).exp();
+    }
+    dnorm(values);
+}
+
+fn dnorm(values: &mut [f64]) {
+    let sum: f64 = values.iter().sum();
+    if sum != 0.0 {
+        for value in values {
+            *value /= sum;
+        }
+    } else if !values.is_empty() {
+        let uniform = 1.0 / values.len() as f64;
+        for value in values {
+            *value = uniform;
+        }
+    }
 }
 
 /// Default transition Dirichlet prior parameters.
 pub struct TransitionPrior {
     /// Match transitions: MM, MI, MD
-    pub tm: [f32; 3],
+    pub tm: [f64; 3],
     /// Insert transitions: IM, II
-    pub ti: [f32; 2],
+    pub ti: [f64; 2],
     /// Delete transitions: DM, DD
-    pub td: [f32; 2],
+    pub td: [f64; 2],
 }
 
 impl Default for TransitionPrior {
@@ -182,10 +211,10 @@ impl Default for TransitionPrior {
     }
 }
 
-fn amino_insert_alpha() -> [f32; 20] {
+fn amino_insert_alpha() -> [f64; 20] {
     [
-        681.0, 120.0, 623.0, 651.0, 313.0, 902.0, 241.0, 371.0, 687.0, 676.0, 143.0, 548.0,
-        647.0, 415.0, 551.0, 926.0, 623.0, 505.0, 102.0, 269.0,
+        681.0, 120.0, 623.0, 651.0, 313.0, 902.0, 241.0, 371.0, 687.0, 676.0, 143.0, 548.0, 647.0,
+        415.0, 551.0, 926.0, 623.0, 505.0, 102.0, 269.0,
     ]
 }
 
@@ -200,7 +229,7 @@ fn nucleic_match_alpha() -> (&'static [f64], &'static [[f64; 4]]) {
     (&Q, &ALPHA)
 }
 
-fn nucleic_insert_alpha() -> [f32; 4] {
+fn nucleic_insert_alpha() -> [f64; 4] {
     [1.0, 1.0, 1.0, 1.0]
 }
 
@@ -224,16 +253,8 @@ fn apply_mixture_dirichlet_with_components(
         log_pk[comp] = log_p;
     }
 
-    let max_log = log_pk.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let mut pk = vec![0.0_f64; q.len()];
-    let mut pk_sum = 0.0_f64;
-    for comp in 0..q.len() {
-        pk[comp] = (log_pk[comp] - max_log).exp();
-        pk_sum += pk[comp];
-    }
-    for weight in &mut pk {
-        *weight /= pk_sum;
-    }
+    let mut pk = log_pk;
+    dlog_norm(&mut pk);
 
     let mut result = vec![0.0_f64; k];
     for comp in 0..q.len() {
@@ -246,12 +267,7 @@ fn apply_mixture_dirichlet_with_components(
         }
     }
 
-    let rsum: f64 = result.iter().sum();
-    if rsum > 0.0 {
-        for a in 0..k {
-            result[a] /= rsum;
-        }
-    }
+    dnorm(&mut result);
 
     result.iter().map(|&v| v as f32).collect()
 }
@@ -266,13 +282,13 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
 
     for node in 0..=m {
         let mt_counts = [hmm.t[node][MM], hmm.t[node][MI], hmm.t[node][MD]];
-        let mt_probs = apply_dirichlet(&mt_counts, &trans.tm);
+        let mt_probs = apply_dirichlet_f64(&mt_counts, &trans.tm);
         hmm.t[node][MM] = mt_probs[0];
         hmm.t[node][MI] = mt_probs[1];
         hmm.t[node][MD] = mt_probs[2];
 
         let it_counts = [hmm.t[node][IM], hmm.t[node][II]];
-        let it_probs = apply_dirichlet(&it_counts, &trans.ti);
+        let it_probs = apply_dirichlet_f64(&it_counts, &trans.ti);
         hmm.t[node][IM] = it_probs[0];
         hmm.t[node][II] = it_probs[1];
     }
@@ -286,7 +302,7 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
 
     for node in 1..m {
         let dt_counts = [hmm.t[node][DM], hmm.t[node][DD]];
-        let dt_probs = apply_dirichlet(&dt_counts, &trans.td);
+        let dt_probs = apply_dirichlet_f64(&dt_counts, &trans.td);
         hmm.t[node][DM] = dt_probs[0];
         hmm.t[node][DD] = dt_probs[1];
     }
@@ -304,7 +320,7 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
             let alpha: Vec<Vec<f64>> = alpha_arr.iter().map(|row| row.to_vec()).collect();
             apply_mixture_dirichlet_with_components(&match_counts, q, &alpha)
         } else {
-            apply_dirichlet(&match_counts, &vec![1.0_f32; k])
+            apply_dirichlet_f64(&match_counts, &vec![1.0_f64; k])
         };
         hmm.mat[node][..k].copy_from_slice(&match_probs);
     }
@@ -313,16 +329,16 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
         hmm.mat[0][0] = 1.0;
     }
 
-    let ins_alpha: Vec<f32> = if k == 20 {
+    let ins_alpha: Vec<f64> = if k == 20 {
         amino_insert_alpha().to_vec()
     } else if k == 4 {
         nucleic_insert_alpha().to_vec()
     } else {
-        vec![1.0_f32; k]
+        vec![1.0_f64; k]
     };
     for node in 0..=m {
         let ins_counts: Vec<f32> = hmm.ins[node][..k].to_vec();
-        let ins_probs = apply_dirichlet(&ins_counts, &ins_alpha);
+        let ins_probs = apply_dirichlet_f64(&ins_counts, &ins_alpha);
         hmm.ins[node][..k].copy_from_slice(&ins_probs);
     }
 }

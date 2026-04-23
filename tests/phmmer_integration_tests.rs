@@ -359,6 +359,26 @@ fn phmmer_nonull2_zeroes_bias_and_raises_globins_scores() {
 }
 
 #[test]
+fn phmmer_nonull2_globins_tblout_matches_bundled_c_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("out.tbl");
+    let output = run_phmmer(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--nonull2", "--tblout", tblout.to_str().unwrap()],
+    );
+    assert!(String::from_utf8(output.stdout).unwrap().contains("[ok]"));
+    let rust_tbl = std::fs::read_to_string(tblout).unwrap();
+    let c_tbl = run_c_phmmer_tblout(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--nonull2"],
+    );
+
+    assert_eq!(parse_tblout_rows(&rust_tbl), parse_tblout_rows(&c_tbl));
+}
+
+#[test]
 fn phmmer_nobias_is_accepted_on_globins_fixture() {
     let output = run_phmmer(
         &test_path("hmmer/tutorial/HBB_HUMAN"),

@@ -37,6 +37,8 @@ pub struct Trace {
     pub m: usize,
     /// Sequence/alignment coordinate length
     pub l: usize,
+    /// Optional posterior probability annotation, parallel to state path.
+    pub pp: Option<Vec<f32>>,
 }
 
 impl Trace {
@@ -48,6 +50,7 @@ impl Trace {
             n: 0,
             m: 0,
             l: 0,
+            pp: None,
         }
     }
 
@@ -56,11 +59,24 @@ impl Trace {
         self.st.clear();
         self.k.clear();
         self.i.clear();
+        if let Some(pp) = &mut self.pp {
+            pp.clear();
+        }
         self.n = 0;
     }
 
     #[inline(always)]
     pub fn append(&mut self, state: State, k: usize, i: usize) {
+        self.append_internal(state, k, i, None);
+    }
+
+    #[inline(always)]
+    pub fn append_with_pp(&mut self, state: State, k: usize, i: usize, pp: f32) {
+        self.append_internal(state, k, i, Some(pp));
+    }
+
+    #[inline(always)]
+    fn append_internal(&mut self, state: State, k: usize, i: usize, pp: Option<f32>) {
         self.st.push(state);
         match state {
             State::N | State::C | State::J => {
@@ -84,6 +100,14 @@ impl Trace {
                 self.k.push(k);
                 self.i.push(i);
             }
+        }
+        if let Some(pp_value) = pp {
+            if self.pp.is_none() {
+                self.pp = Some(vec![0.0; self.n]);
+            }
+            self.pp.as_mut().unwrap().push(pp_value);
+        } else if let Some(pp_values) = &mut self.pp {
+            pp_values.push(0.0);
         }
         self.n += 1;
     }

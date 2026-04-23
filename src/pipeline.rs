@@ -900,8 +900,7 @@ mod tests {
     #[test]
     fn reconstruction_score_allows_domain_coverage_to_exceed_sequence_length() {
         let score = reconstruction_score_nats(12.0, 100, 140);
-        let expected =
-            12.0_f64 + (100_i64 - 140_i64) as f64 * ((100.0_f64 / 103.0_f64).ln());
+        let expected = 12.0_f64 + (100_i64 - 140_i64) as f64 * ((100.0_f64 / 103.0_f64).ln());
         assert!((score as f64 - expected).abs() < 1.0e-6);
         assert!(score.is_finite());
         assert!(score > 12.0);

@@ -1,6 +1,5 @@
 #![cfg(target_arch = "x86_64")]
 
-use deep_comparator::{compare, Diff, DiffPath};
 use hmmer_pure_rs::{alphabet::Alphabet, bg::Bg, hmmfile, profile, simd};
 use std::path::Path;
 
@@ -29,37 +28,58 @@ fn configured_profile(
 }
 
 fn assert_probmx_equal(label: &str, got: &simd::probmx::ProbMx, expected: &simd::probmx::ProbMx) {
-    let mut diff = Diff::new();
-
-    let mut p = DiffPath::new(&format!("{label}.xmx"));
-    compare::compare_f32_slice(&got.xmx, &expected.xmx, 0.0, 0.0, 16, &mut p, &mut diff);
-
-    let mut p = DiffPath::new(&format!("{label}.scale"));
-    compare::compare_f64_slice(&got.scale, &expected.scale, 0.0, 0.0, 16, &mut p, &mut diff);
-
-    let mut p = DiffPath::new(&format!("{label}.row_scale"));
-    compare::compare_f32_slice(
+    assert_f32_slice_exact(&format!("{label}.xmx"), &got.xmx, &expected.xmx);
+    assert_f64_slice_exact(&format!("{label}.scale"), &got.scale, &expected.scale);
+    assert_f32_slice_exact(
+        &format!("{label}.row_scale"),
         &got.row_scale,
         &expected.row_scale,
-        0.0,
-        0.0,
-        16,
-        &mut p,
-        &mut diff,
     );
-
-    let mut p = DiffPath::new(&format!("{label}.striped_dp"));
-    compare::compare_f32_slice(
+    assert_f32_slice_exact(
+        &format!("{label}.striped_dp"),
         &got.striped_dp,
         &expected.striped_dp,
-        0.0,
-        0.0,
-        16,
-        &mut p,
-        &mut diff,
     );
+}
 
-    assert!(diff.is_empty(), "{}", diff.render());
+fn assert_f32_exact(label: &str, got: f32, expected: f32) {
+    assert!(
+        got.to_bits() == expected.to_bits(),
+        "{label} differed: got {got:?} ({:#010x}), expected {expected:?} ({:#010x})",
+        got.to_bits(),
+        expected.to_bits()
+    );
+}
+
+fn assert_f32_slice_exact(label: &str, got: &[f32], expected: &[f32]) {
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "{label} length differed: got {}, expected {}",
+        got.len(),
+        expected.len()
+    );
+    for (idx, (&g, &e)) in got.iter().zip(expected).enumerate() {
+        assert_f32_exact(&format!("{label}[{idx}]"), g, e);
+    }
+}
+
+fn assert_f64_slice_exact(label: &str, got: &[f64], expected: &[f64]) {
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "{label} length differed: got {}, expected {}",
+        got.len(),
+        expected.len()
+    );
+    for (idx, (&g, &e)) in got.iter().zip(expected).enumerate() {
+        assert!(
+            g.to_bits() == e.to_bits(),
+            "{label}[{idx}] differed: got {g:?} ({:#018x}), expected {e:?} ({:#018x})",
+            g.to_bits(),
+            e.to_bits()
+        );
+    }
 }
 
 #[test]
@@ -98,10 +118,7 @@ fn resized_probmx_overwrites_poisoned_storage() {
         )
     };
 
-    let mut diff = Diff::new();
-    let mut p = DiffPath::new("forward_score");
-    compare::compare_f32(reused_sc, clean_sc, 0.0, 0.0, &mut p, &mut diff);
-    assert!(diff.is_empty(), "{}", diff.render());
+    assert_f32_exact("forward_score", reused_sc, clean_sc);
     assert_probmx_equal("forward", &reused_fwd, &clean_fwd);
 
     let mut clean_bck = simd::probmx::ProbMx::new_full(om.m, seq_len);
@@ -140,9 +157,6 @@ fn resized_probmx_overwrites_poisoned_storage() {
         )
     };
 
-    let mut diff = Diff::new();
-    let mut p = DiffPath::new("backward_score");
-    compare::compare_f32(reused_bck_sc, clean_bck_sc, 0.0, 0.0, &mut p, &mut diff);
-    assert!(diff.is_empty(), "{}", diff.render());
+    assert_f32_exact("backward_score", reused_bck_sc, clean_bck_sc);
     assert_probmx_equal("backward", &reused_bck, &clean_bck);
 }

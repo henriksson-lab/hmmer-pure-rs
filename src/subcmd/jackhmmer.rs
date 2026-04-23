@@ -113,7 +113,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
     writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
-    writeln!(out, "# Freely distributed under the BSD open source license.").unwrap();
+    writeln!(
+        out,
+        "# Freely distributed under the BSD open source license."
+    )
+    .unwrap();
     writeln!(
         out,
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
@@ -219,11 +223,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &format!("{}-i{}", query_sq.name, iteration - 1),
             );
 
-            let Some(msa) = msa else {
+            let Some(mut msa) = msa else {
                 writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
                 break;
             };
-            let hmm = builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true);
+            if !query_sq.desc.is_empty() {
+                msa.desc = Some(query_sq.desc.clone());
+            }
+            msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+            let mut hmm = builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true);
+            if !query_sq.desc.is_empty() {
+                hmm.desc = Some(query_sq.desc.clone());
+                hmm.flags |= hmmer_pure_rs::hmm::P7H_DESC;
+            }
             writeln!(out, "@@").unwrap();
             writeln!(out, "@@ Round:                  {}", iteration).unwrap();
             writeln!(
@@ -405,13 +417,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         prev_hmm = Some(hmm.clone());
 
         if let Some(prefix) = &args.chkali {
-            if let Some(msa) = hmmer_pure_rs::tophits::included_alignment(
+            if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
                 final_hits.as_ref().unwrap(),
                 &abc,
                 hmm.m,
                 Some((&query_sq, &query_tr)),
                 &format!("{}-i{}", query_sq.name, iteration),
             ) {
+                if !query_sq.desc.is_empty() {
+                    msa.desc = Some(query_sq.desc.clone());
+                }
+                msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
                 write_msa_checkpoint(prefix, iteration, &msa);
             }
         }
@@ -427,8 +443,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(
             out,
             "@@ New alignment includes: {} subseqs (was {}), including original query",
-            msa_nseq,
-            prev_msa_nseq
+            msa_nseq, prev_msa_nseq
         )
         .unwrap();
 
@@ -471,15 +486,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
 fn exact_match_query_trace(model_len: usize) -> Trace {
     let mut tr = Trace::new();
-    tr.append(State::S, 0, 0);
-    tr.append(State::N, 0, 0);
     tr.append(State::B, 0, 0);
     for i in 1..=model_len {
         tr.append(State::M, i, i);
     }
     tr.append(State::E, 0, 0);
-    tr.append(State::C, 0, 0);
-    tr.append(State::T, 0, 0);
+    tr.m = model_len;
+    tr.l = model_len;
     tr
 }
 
@@ -498,7 +511,11 @@ fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs:
 fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
     let path = checkpoint_path(prefix, iteration, "sto");
     let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
-        eprintln!("Error creating alignment checkpoint {}: {}", path.display(), e);
+        eprintln!(
+            "Error creating alignment checkpoint {}: {}",
+            path.display(),
+            e
+        );
         std::process::exit(1);
     });
     write_stockholm_msa(&mut file, msa);
@@ -518,20 +535,77 @@ fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
         .max()
         .unwrap_or(0)
         .max("#=GC RF".len())
+        .max("#=GC PP_cons".len())
         .max(12);
+    let gs_name_width = "#=GS ".len() + name_width;
+    let gr_name_width = "#=GR ".len() + name_width + " PP".len();
 
     writeln!(out, "# STOCKHOLM 1.0").unwrap();
-    writeln!(out).unwrap();
     if !msa.name.is_empty() {
         writeln!(out, "#=GF ID {}", msa.name).unwrap();
     }
+    if let Some(desc) = &msa.desc {
+        if !desc.is_empty() {
+            writeln!(out, "#=GF DE {}", desc).unwrap();
+        }
+    }
+    if let Some(author) = &msa.author {
+        if !author.is_empty() {
+            writeln!(out, "#=GF AU {}", author).unwrap();
+        }
+    }
+    writeln!(out).unwrap();
 
-    for (name, row) in msa.sqname.iter().zip(msa.aseq.iter()) {
+    for (name, desc) in msa.sqname.iter().zip(msa.sqdesc.iter()) {
+        if !desc.is_empty() {
+            writeln!(
+                out,
+                "{:<width$} DE {}",
+                format!("#=GS {}", name),
+                desc,
+                width = gs_name_width
+            )
+            .unwrap();
+        }
+    }
+    if !msa.sqdesc.iter().all(|desc| desc.is_empty()) {
+        writeln!(out).unwrap();
+    }
+
+    for ((name, row), pp) in msa.sqname.iter().zip(msa.aseq.iter()).zip(msa.pp.iter()) {
+        let rendered_row: Vec<u8> = row
+            .iter()
+            .map(|&ch| match ch {
+                b'.' => b'-',
+                b'a'..=b'z' => ch.to_ascii_uppercase(),
+                _ => ch,
+            })
+            .collect();
         writeln!(
             out,
             "{:<width$} {}",
             name,
-            String::from_utf8_lossy(row),
+            String::from_utf8_lossy(&rendered_row),
+            width = name_width
+        )
+        .unwrap();
+        if let Some(pp) = pp {
+            writeln!(
+                out,
+                "{:<width$} {}",
+                format!("#=GR {} PP", name),
+                String::from_utf8_lossy(pp),
+                width = gr_name_width
+            )
+            .unwrap();
+        }
+    }
+    if let Some(pp_cons) = &msa.pp_cons {
+        writeln!(
+            out,
+            "{:<width$} {}",
+            "#=GC PP_cons",
+            String::from_utf8_lossy(pp_cons),
             width = name_width
         )
         .unwrap();

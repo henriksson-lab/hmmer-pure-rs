@@ -11,16 +11,26 @@ use std::path::Path;
 pub struct Msa {
     /// Alignment name (from #=GF ID)
     pub name: String,
+    /// Alignment description (from #=GF DE)
+    pub desc: Option<String>,
+    /// Alignment author/provenance (from #=GF AU)
+    pub author: Option<String>,
     /// Sequence names
     pub sqname: Vec<String>,
+    /// Per-sequence descriptions (#=GS <seq> DE)
+    pub sqdesc: Vec<String>,
     /// Aligned sequences (text, with gap characters)
     pub aseq: Vec<Vec<u8>>,
+    /// Per-sequence posterior probability annotation (#=GR <seq> PP)
+    pub pp: Vec<Option<Vec<u8>>>,
     /// Number of sequences
     pub nseq: usize,
     /// Alignment length (columns)
     pub alen: usize,
     /// Reference annotation (#=GC RF)
     pub rf: Option<Vec<u8>>,
+    /// Consensus posterior probability annotation (#=GC PP_cons)
+    pub pp_cons: Option<Vec<u8>>,
 }
 
 impl Msa {
@@ -146,11 +156,16 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<Msa>> {
 
     Ok(Some(Msa {
         name,
+        desc: None,
+        author: None,
         sqname: seq_order,
+        sqdesc: vec![String::new(); nseq],
+        pp: vec![None; nseq],
         aseq,
         nseq,
         alen,
         rf,
+        pp_cons: None,
     }))
 }
 

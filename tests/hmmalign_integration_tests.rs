@@ -49,6 +49,37 @@ fn run_hmmalign_command(hmm: &str, seqfile: &str, extra_args: &[&str]) -> std::p
     output
 }
 
+fn run_c_hmmalign_command(hmm: &str, seqfile: &str, extra_args: &[&str]) -> std::process::Output {
+    let output = Command::new(test_path("hmmer/src/hmmalign"))
+        .args(extra_args)
+        .args([hmm, seqfile])
+        .output()
+        .expect("failed to run bundled C hmmalign");
+
+    assert!(
+        output.status.success(),
+        "bundled C hmmalign failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    output
+}
+
+fn normalized_alignment_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+fn write_mismatched_mapali(src: &str, dst: &std::path::Path) {
+    let original = std::fs::read_to_string(src).unwrap();
+    let modified = original
+        .replacen("ACDEFGHIKLMNPQRSTVWY", "CCDEFGHIKLMNPQRSTVWY", 1)
+        .replacen("MY.", "AY.", 1);
+    assert_ne!(original, modified);
+    std::fs::write(dst, modified).unwrap();
+}
+
 fn parse_fasta_sequences(path: &str) -> HashMap<String, String> {
     let content = std::fs::read_to_string(path).unwrap();
     let mut seqs = HashMap::new();
@@ -161,16 +192,16 @@ fn hmmalign_20aa_matches_exact_stockholm_output() {
     let expected = "\
 # STOCKHOLM 1.0
 
-test1        ....ACDEFGHIKLMN.....PQRSTVWY....
+test1         ....ACDEFGHIKLMN.....PQRSTVWY....
 #=GR test1 PP ....9***********.....********....
-test2        xxxxACDEFGHI--MNx..xxPQRSTVWY....
+test2         xxxxACDEFGHI--MNx..xxPQRSTVWY....
 #=GR test2 PP ****9******9..888..88********....
-test3        ....ACDEFGHI-LMNxxxxxPQRSTVWYxxxx
+test3         ....ACDEFGHI-LMNxxxxxPQRSTVWYxxxx
 #=GR test3 PP ....9*******.********************
-test4        .xxxACDEFGHIKLMN.....PQRSTVWYxxx.
+test4         .xxxACDEFGHIKLMN.....PQRSTVWYxxx.
 #=GR test4 PP .***9***********.....***********.
-#=GC PP_cons ....9*********99.....********....
-#=GC RF      ....xxxxxxxxxxxx.....xxxxxxxx....
+#=GC PP_cons  ....9*********99.....********....
+#=GC RF       ....xxxxxxxxxxxx.....xxxxxxxx....
 //
 ";
 
@@ -187,19 +218,19 @@ fn hmmalign_globins_matches_exact_first_block_prefix() {
     let expected_prefix = "\
 # STOCKHOLM 1.0
 
-MYG_ESCGI    .-VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYKelgfqg
+MYG_ESCGI     .-VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYKelgfqg
 #=GR MYG_ESCGI PP ..69****************************************************************************.99******************************************************************7******
-MYG_HORSE    g--LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYKelgfqg
+MYG_HORSE     g--LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYKelgfqg
 #=GR MYG_HORSE PP 8..89***************************************************************************.99******************************************************************7******
-MYG_PROGU    g--LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
+MYG_PROGU     g--LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
 #=GR MYG_PROGU PP 8..89***************************************************************************.99******************************************************************7******
-MYG_SAISC    g--LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYKelgfqg
+MYG_SAISC     g--LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYKelgfqg
 #=GR MYG_SAISC PP 8..89***************************************************************************.99******************************************************************7******
-MYG_LYCPI    g--LSDGEWQIVLNIWGKVETDLAGHGQEVLIRLFKNHPETLDKFDKFKHLKTEDEMKGSEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPVKYLEFISDAIIQVLQNKHSGDFHADTEAAMKKALELFRNDIAAKYKelgfqg
+MYG_LYCPI     g--LSDGEWQIVLNIWGKVETDLAGHGQEVLIRLFKNHPETLDKFDKFKHLKTEDEMKGSEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPVKYLEFISDAIIQVLQNKHSGDFHADTEAAMKKALELFRNDIAAKYKelgfqg
 #=GR MYG_LYCPI PP 8..89***************************************************************************.99******************************************************************7******
-MYG_MOUSE    g--LSDGEWQLVLNVWGKVEADLAGHGQEVLIGLFKTHPETLDKFDKFKNLKSEEDMKGSEDLKKHGCTVLTALGTILKK-KGQHAAEIQPLAQSHATKHKIPVKYLEFISEIIIEVLKKRHSGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
+MYG_MOUSE     g--LSDGEWQLVLNVWGKVEADLAGHGQEVLIGLFKTHPETLDKFDKFKNLKSEEDMKGSEDLKKHGCTVLTALGTILKK-KGQHAAEIQPLAQSHATKHKIPVKYLEFISEIIIEVLKKRHSGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
 #=GR MYG_MOUSE PP 8..89***************************************************************************.99******************************************************************7******
-MYG_MUSAN    v------DWEKVNSVWSAVESDLTAIGQNILLRLFEQYPESQNHFPKFKNKS-LGELKDTADIKAQADTVLSALGNIVKK-KGSHSQPVKALAATHITTHKIPPHYFTKITTIAVDVLSEMYPSEMNAQVQAAFSGAFKIICSDIEKEYKaanfqg
+MYG_MUSAN     v------DWEKVNSVWSAVESDLTAIGQNILLRLFEQYPESQNHFPKFKNKS-LGELKDTADIKAQADTVLSALGNIVKK-KGSHSQPVKALAATHITTHKIPPHYFTKITTIAVDVLSEMYPSEMNAQVQAAFSGAFKIICSDIEKEYKaanfqg
 #=GR MYG_MUSAN PP 7......89***************************************9877.89*************************.99****************************************************************997******
 ";
 
@@ -217,13 +248,13 @@ fn hmmalign_trim_matches_exact_first_block_prefix() {
     let expected_prefix = "\
 # STOCKHOLM 1.0
 
-MYG_ESCGI    -VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYK
+MYG_ESCGI     -VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYK
 #=GR MYG_ESCGI PP .69****************************************************************************.99******************************************************************7
-MYG_HORSE    --LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYK
+MYG_HORSE     --LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYK
 #=GR MYG_HORSE PP ..89***************************************************************************.99******************************************************************7
-MYG_PROGU    --LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYK
+MYG_PROGU     --LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYK
 #=GR MYG_PROGU PP ..89***************************************************************************.99******************************************************************7
-MYG_SAISC    --LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYK
+MYG_SAISC     --LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYK
 ";
 
     assert!(output.starts_with(expected_prefix));
@@ -303,16 +334,87 @@ KHPGNFGADAQGAMTKALELFRNDIAAKYKelgfqg
 }
 
 #[test]
+fn hmmalign_stockholm_matches_bundled_c_on_20aa_fixture() {
+    let rust = run_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &[],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &[],
+    );
+
+    assert_eq!(
+        normalized_alignment_lines(&String::from_utf8(rust.stdout).unwrap()),
+        normalized_alignment_lines(&String::from_utf8(c.stdout).unwrap())
+    );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
+fn hmmalign_a2m_matches_bundled_c_on_20aa_fixture() {
+    let rust = run_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--outformat", "a2m"],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--outformat", "A2M"],
+    );
+
+    assert_eq!(
+        String::from_utf8(rust.stdout).unwrap(),
+        String::from_utf8(c.stdout).unwrap()
+    );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
+fn hmmalign_trim_matches_bundled_c_on_globins_fixture() {
+    let rust = run_hmmalign_command(
+        &test_path("hmmer/tutorial/globins4.hmm"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--trim"],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("hmmer/tutorial/globins4.hmm"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--trim"],
+    );
+
+    assert_eq!(
+        normalized_alignment_lines(&String::from_utf8(rust.stdout).unwrap()),
+        normalized_alignment_lines(&String::from_utf8(c.stdout).unwrap())
+    );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
 fn hmmalign_mapali_legacy_20aa_rejects_checksum_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let seqfile = dir.path().join("test.fa");
+    let msafile = dir.path().join("20aa-mismatch.sto");
     std::fs::write(&seqfile, b">test\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
+    write_mismatched_mapali(&test_path("hmmer/testsuite/20aa.sto"), &msafile);
 
     let output = Command::new(binary_path("hmmer"))
         .arg("align")
         .args([
             "--mapali",
-            &test_path("hmmer/testsuite/20aa.sto"),
+            msafile.to_str().unwrap(),
             &test_path("hmmer/testsuite/20aa.hmm"),
             seqfile.to_str().unwrap(),
         ])
@@ -331,13 +433,15 @@ fn hmmalign_mapali_legacy_20aa_rejects_checksum_mismatch() {
 fn hmmalign_mapali_legacy_20aa_a2m_rejects_checksum_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let seqfile = dir.path().join("test.fa");
+    let msafile = dir.path().join("20aa-mismatch.sto");
     std::fs::write(&seqfile, b">test\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
+    write_mismatched_mapali(&test_path("hmmer/testsuite/20aa.sto"), &msafile);
 
     let output = Command::new(binary_path("hmmer"))
         .arg("align")
         .args([
             "--mapali",
-            &test_path("hmmer/testsuite/20aa.sto"),
+            msafile.to_str().unwrap(),
             "--outformat",
             "a2m",
             &test_path("hmmer/testsuite/20aa.hmm"),
@@ -390,20 +494,20 @@ fn hmmalign_mapali_custom_built_simple_case_matches_exact_stockholm_output() {
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-seq1         ACDEFGHIKLMNPQRSTVWY
-seq2         ACDEFGHIKLMNPQRSTVWY
-seq3         ACDEFGHIKLMNPQRSTVWY
-seq4         ACDEFGHIKLMNPQRSTVWY
-seq5         ACDEFGHIKLMNPQRSTVWY
-seq6         ACDEFGHIKLMNPQRSTVWY
-seq7         ACDEFGHIKLMNPQRSTVWY
-seq8         ACDEFGHIKLMNPQRSTVWY
-seq9         ACDEFGHIKLMNPQRSTVWY
-seq0         ACDEFGHIKLMNPQRSTVWY
-test         ACDEFGHIKLMNPQRSTVWY
-#=GR test PP 8******************9
-#=GC PP_cons 8******************9
-#=GC RF      xxxxxxxxxxxxxxxxxxxx
+seq1          ACDEFGHIKLMNPQRSTVWY
+seq2          ACDEFGHIKLMNPQRSTVWY
+seq3          ACDEFGHIKLMNPQRSTVWY
+seq4          ACDEFGHIKLMNPQRSTVWY
+seq5          ACDEFGHIKLMNPQRSTVWY
+seq6          ACDEFGHIKLMNPQRSTVWY
+seq7          ACDEFGHIKLMNPQRSTVWY
+seq8          ACDEFGHIKLMNPQRSTVWY
+seq9          ACDEFGHIKLMNPQRSTVWY
+seq0          ACDEFGHIKLMNPQRSTVWY
+test          ACDEFGHIKLMNPQRSTVWY
+#=GR test PP  9*******************
+#=GC PP_cons  9*******************
+#=GC RF       xxxxxxxxxxxxxxxxxxxx
 //
 ";
 
@@ -422,26 +526,26 @@ fn hmmalign_mapali_rebuilt_20aa_matches_exact_stockholm_output() {
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-seq1         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq2         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq3         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq4         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq5         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq6         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq7         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq8         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq9         ....ACDEFGHIK.L....MNPQRSTVWY....
-seq0         ....ACDEFGHIK.L....MNPQRSTVWY....
-test1        ....ACDEFGHIK.L....MNPQRSTVWY....
-#=GR test1 PP ....8********.*....*********9....
-test2        xxxxACDEFGHIMnX....XXPQRSTVWY....
-#=GR test2 PP ****7******9625....78*******9....
-test3        ....ACDEFGHIL.MnxxxXXPQRSTVWYxxxx
-#=GR test3 PP ....7******96.52222569******9****
-test4        .xxxACDEFGHIK.L....MNPQRSTVWYxxx.
-#=GR test4 PP .***7********.*....*********9***.
-#=GC PP_cons ....7*******8.8....89*******9....
-#=GC RF      ....xxxxxxxxx.x....xxxxxxxxxx....
+seq1          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq2          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq3          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq4          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq5          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq6          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq7          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq8          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq9          ....ACDEFGHIKLMN.....PQRSTVWY....
+seq0          ....ACDEFGHIKLMN.....PQRSTVWY....
+test1         ....ACDEFGHIKLMN.....PQRSTVWY....
+#=GR test1 PP ....9***********.....********....
+test2         xxxxACDEFGHI--MNx..xxPQRSTVWY....
+#=GR test2 PP ****9******9..888..88********....
+test3         ....ACDEFGHI-LMNxxxxxPQRSTVWYxxxx
+#=GR test3 PP ....9*******.********************
+test4         .xxxACDEFGHIKLMN.....PQRSTVWYxxx.
+#=GR test4 PP .***9***********.....***********.
+#=GC PP_cons  ....9*********99.....********....
+#=GC RF       ....xxxxxxxxxxxx.....xxxxxxxx....
 //
 ";
 
@@ -486,9 +590,9 @@ ACDEFGHIKLMNPQRSTVWY
 >test1
 ACDEFGHIKLMNPQRSTVWY
 >test2
-xxxxACDEFGHIMnXXXPQRSTVWY
+xxxxACDEFGHI--MNxxxPQRSTVWY
 >test3
-ACDEFGHILMnxxxXXPQRSTVWYxxxx
+ACDEFGHI-LMNxxxxxPQRSTVWYxxxx
 >test4
 xxxACDEFGHIKLMNPQRSTVWYxxx
 ";
@@ -597,18 +701,18 @@ fn hmmalign_mapali_custom_built_fragment_case_matches_exact_output() {
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-s1           ACDEFG.HIK.LMNPQRSTVWY
-s2           ACDEFG.HIK.LMNPQRSTVWY
-s3           ACDEFG.HIK.LMNPQRSTVWY
-s4           ACDEFG.HIK.LMNPQRSTVWY
-s5           ACDEFG.HIK.LMNPQRSTVWY
-s6           -----G.HIK.LM---------
-s7           ACDEF-aHIK.LMNPQRSTVWY
-s8           ACDEFG.HIKa-MNPQRSTVWY
-test         -CDEFG.HIK.LMNPQRSTVW-
-#=GR test PP .9****.***.*********9.
-#=GC PP_cons .9****.***.*********9.
-#=GC RF      xxxxxx.xxx.xxxxxxxxxxx
+s1            ACDEFG.HIK.LMNPQRSTVWY
+s2            ACDEFG.HIK.LMNPQRSTVWY
+s3            ACDEFG.HIK.LMNPQRSTVWY
+s4            ACDEFG.HIK.LMNPQRSTVWY
+s5            ACDEFG.HIK.LMNPQRSTVWY
+s6            -----G.HIK.LM---------
+s7            ACDEF-aHIK.LMNPQRSTVWY
+s8            ACDEFG.HIKa-MNPQRSTVWY
+test          -CDEFG.HIK.LMNPQRSTVW-
+#=GR test PP  .*****.***.**********.
+#=GC PP_cons  .*****.***.**********.
+#=GC RF       xxxxxx.xxx.xxxxxxxxxxx
 //
 ";
 
@@ -620,13 +724,15 @@ test         -CDEFG.HIK.LMNPQRSTVW-
 fn hmmalign_mapali_legacy_caudal_act_rejects_checksum_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let seqfile = dir.path().join("Caudal_act.fa");
+    let msafile = dir.path().join("Caudal_act-mismatch.sto");
     write_dealigned_fasta_from_stockholm(&test_path("hmmer/testsuite/Caudal_act.sto"), &seqfile);
+    write_mismatched_mapali(&test_path("hmmer/testsuite/Caudal_act.sto"), &msafile);
 
     let output = Command::new(binary_path("hmmer"))
         .arg("align")
         .args([
             "--mapali",
-            &test_path("hmmer/testsuite/Caudal_act.sto"),
+            msafile.to_str().unwrap(),
             &test_path("hmmer/testsuite/Caudal_act.hmm"),
             seqfile.to_str().unwrap(),
         ])
@@ -691,12 +797,12 @@ fn hmmalign_mapali_rebuilt_ecori_matches_exact_stockholm_output() {
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-seq1         .GAATTC.
-seq2         .GAATTC.
-ecori_query  g-AATT-c
-#=GR ecori_query PP 5.6776.5
-#=GC PP_cons ..6776..
-#=GC RF      .xxxxxx.
+seq1          GAATTC
+seq2          GAATTC
+ecori_query   GAATTC
+#=GR ecori_query PP 79**97
+#=GC PP_cons  79**97
+#=GC RF       xxxxxx
 //
 ";
 

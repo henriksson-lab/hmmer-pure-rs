@@ -1,6 +1,6 @@
-use std::process::Command;
-use std::path::PathBuf;
 use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn binary_path(name: &str) -> std::path::PathBuf {
     let mut path = std::env::current_exe()
@@ -162,23 +162,75 @@ fn run_jackhmmer_with_chkhmm(
     seqdb: &str,
     extra_args: &[&str],
 ) -> (String, Vec<String>) {
+    let (stdout, hmms, _tblout, _domtblout) = run_jackhmmer_with_chkhmm_and_optional_tables(
+        binary,
+        binary_needs_subcommand,
+        seqfile,
+        seqdb,
+        extra_args,
+        false,
+    );
+    (stdout, hmms)
+}
+
+fn run_jackhmmer_with_chkhmm_and_tables(
+    binary: &std::path::Path,
+    binary_needs_subcommand: bool,
+    seqfile: &str,
+    seqdb: &str,
+    extra_args: &[&str],
+) -> (String, Vec<String>, String, String) {
+    let (stdout, hmms, tblout, domtblout) = run_jackhmmer_with_chkhmm_and_optional_tables(
+        binary,
+        binary_needs_subcommand,
+        seqfile,
+        seqdb,
+        extra_args,
+        true,
+    );
+    (
+        stdout,
+        hmms,
+        tblout.expect("missing tblout"),
+        domtblout.expect("missing domtblout"),
+    )
+}
+
+fn run_jackhmmer_with_chkhmm_and_optional_tables(
+    binary: &std::path::Path,
+    binary_needs_subcommand: bool,
+    seqfile: &str,
+    seqdb: &str,
+    extra_args: &[&str],
+    write_tables: bool,
+) -> (String, Vec<String>, Option<String>, Option<String>) {
     let prefix = unique_prefix("chkhmm", "prefix");
+    let tblout = unique_prefix("chkhmm-tblout", "tblout");
+    let domtblout = unique_prefix("chkhmm-domtblout", "domtblout");
 
     let mut cmd = Command::new(binary);
     if binary_needs_subcommand {
         cmd.arg("jackhmmer");
     }
+    cmd.args(extra_args).arg("--chkhmm").arg(&prefix);
+    if write_tables {
+        cmd.arg("--tblout")
+            .arg(&tblout)
+            .arg("--domtblout")
+            .arg(&domtblout);
+    }
     let output = cmd
-        .args(extra_args)
-        .arg("--chkhmm")
-        .arg(&prefix)
         .args([seqfile, seqdb])
         .output()
         .expect("failed to run jackhmmer --chkhmm");
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "jackhmmer --chkhmm failed: {}", stderr);
+    assert!(
+        output.status.success(),
+        "jackhmmer --chkhmm failed: {}",
+        stderr
+    );
 
     let mut hmms = Vec::new();
     for round in 1..=9 {
@@ -194,7 +246,65 @@ fn run_jackhmmer_with_chkhmm(
     }
 
     assert!(!hmms.is_empty(), "expected at least one HMM checkpoint");
-    (stdout, hmms)
+    let tables = if write_tables {
+        let tbl = std::fs::read_to_string(&tblout).expect("failed to read jackhmmer tblout");
+        let domtbl =
+            std::fs::read_to_string(&domtblout).expect("failed to read jackhmmer domtblout");
+        let _ = std::fs::remove_file(&tblout);
+        let _ = std::fs::remove_file(&domtblout);
+        (Some(tbl), Some(domtbl))
+    } else {
+        let _ = std::fs::remove_file(&tblout);
+        let _ = std::fs::remove_file(&domtblout);
+        (None, None)
+    };
+    (stdout, hmms, tables.0, tables.1)
+}
+
+fn run_jackhmmer_with_chkali(
+    binary: &std::path::Path,
+    binary_needs_subcommand: bool,
+    seqfile: &str,
+    seqdb: &str,
+    extra_args: &[&str],
+) -> (String, Vec<String>) {
+    let prefix = unique_prefix("chkali", "prefix");
+
+    let mut cmd = Command::new(binary);
+    if binary_needs_subcommand {
+        cmd.arg("jackhmmer");
+    }
+    let output = cmd
+        .args(extra_args)
+        .arg("--chkali")
+        .arg(&prefix)
+        .args([seqfile, seqdb])
+        .output()
+        .expect("failed to run jackhmmer --chkali");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "jackhmmer --chkali failed: {}",
+        stderr
+    );
+
+    let mut msas = Vec::new();
+    for round in 1..=9 {
+        let path = format!("{}-{}.sto", prefix.display(), round);
+        match std::fs::read_to_string(&path) {
+            Ok(msa) => {
+                msas.push(msa);
+                let _ = std::fs::remove_file(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => panic!("failed to read MSA checkpoint {}: {}", path, err),
+        }
+    }
+
+    assert!(!msas.is_empty(), "expected at least one MSA checkpoint");
+    (stdout, msas)
 }
 
 fn round_block<'a>(stdout: &'a str, round: usize) -> &'a str {
@@ -272,6 +382,13 @@ fn domtblout_rows(domtblout: &str, n: usize) -> Vec<Vec<String>> {
         .take(n)
         .map(|line| line.split_whitespace().map(|s| s.to_string()).collect())
         .collect()
+}
+
+fn data_row_count(table: &str) -> usize {
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .count()
 }
 
 fn unique_prefix(stem: &str, extless_suffix: &str) -> PathBuf {
@@ -356,6 +473,64 @@ fn assert_hmm_float_field_close(rust_hmm: &str, c_hmm: &str, key: &str, tol: f64
     );
 }
 
+fn assert_round2_checkpoint_and_table_parity(
+    rust_hmms: &[String],
+    c_hmms: &[String],
+    rust_tblout: &str,
+    c_tblout: &str,
+    rust_domtblout: &str,
+    c_domtblout: &str,
+) {
+    assert_eq!(rust_hmms.len(), 2);
+    assert_eq!(c_hmms.len(), 2);
+
+    let rust_round2 = &rust_hmms[1];
+    let c_round2 = &c_hmms[1];
+    for key in [
+        "NAME", "LENG", "ALPH", "RF", "CONS", "CS", "MAP", "NSEQ", "CKSUM",
+    ] {
+        assert_eq!(
+            hmm_header_value(rust_round2, key),
+            hmm_header_value(c_round2, key),
+            "round-2 HMM header field {} drifted",
+            key
+        );
+    }
+    assert_hmm_float_field_close(rust_round2, c_round2, "EFFN", 1.0e-6);
+    assert_eq!(hmm_stats_lines(rust_round2), hmm_stats_lines(c_round2));
+
+    assert_eq!(data_row_count(rust_tblout), data_row_count(c_tblout));
+    assert_eq!(data_row_count(rust_domtblout), data_row_count(c_domtblout));
+    assert_eq!(tblout_rows(rust_tblout, 5), tblout_rows(c_tblout, 5));
+    assert_eq!(
+        domtblout_rows(rust_domtblout, 5)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        domtblout_rows(c_domtblout, 5)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        "top real-world jackhmmer domtblout target order drifted"
+    );
+}
+
+fn normalized_hmm_for_exact_parity(hmm: &str) -> Vec<String> {
+    hmm.lines()
+        .filter(|line| {
+            !line.starts_with("HMMER3/") && !line.starts_with("DATE  ") && !line.trim().is_empty()
+        })
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+fn normalized_stockholm_for_exact_parity(sto: &str) -> Vec<String> {
+    sto.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 #[test]
 fn jackhmmer_round1_20aa_matches_current_single_sequence_baseline() {
     let stdout = run_jackhmmer(
@@ -398,7 +573,9 @@ fn jackhmmer_globins_converges_in_two_rounds_with_expected_round_profiles() {
     let round2 = round_block(&stdout, 2);
 
     assert!(stdout.contains("@@ New targets included:   45"));
-    assert!(stdout.contains("@@ New alignment includes: 46 subseqs (was 1), including original query"));
+    assert!(
+        stdout.contains("@@ New alignment includes: 46 subseqs (was 1), including original query")
+    );
     assert!(stdout.contains("@@ Continuing to next round."));
     assert_eq!(
         top_hit_rows(round1, 5),
@@ -476,10 +653,13 @@ fn jackhmmer_strict_thresholds_stop_after_empty_round_on_20aa() {
 
     assert!(stdout.contains("[No hits detected that satisfy reporting thresholds]"));
     assert!(stdout.contains("@@ New targets included:   0"));
-    assert!(stdout.contains("@@ New alignment includes: 1 subseqs (was 1), including original query"));
+    assert!(
+        stdout.contains("@@ New alignment includes: 1 subseqs (was 1), including original query")
+    );
     assert!(stdout.contains("@@ Continuing to next round."));
     assert!(stdout.contains("@@ Round:                  2"));
-    assert!(stdout.contains("@@ Included in MSA:        1 subsequences (query + 0 subseqs from 0 targets)"));
+    assert!(stdout
+        .contains("@@ Included in MSA:        1 subsequences (query + 0 subseqs from 0 targets)"));
     assert!(stdout.contains("Query:       test1-i1  [M=20]"));
 }
 
@@ -494,7 +674,9 @@ fn jackhmmer_globins_strict_inc_threshold_changes_round2_profile() {
     let round2 = round_block(&stdout, 2);
 
     assert!(stdout.contains("@@ New targets included:   38"));
-    assert!(stdout.contains("@@ New alignment includes: 39 subseqs (was 1), including original query"));
+    assert!(
+        stdout.contains("@@ New alignment includes: 39 subseqs (was 1), including original query")
+    );
     assert_eq!(
         top_hit_rows(round1, 5),
         vec![
@@ -533,7 +715,7 @@ fn jackhmmer_globins_strict_inc_threshold_changes_round2_profile() {
         vec![
             (
                 "2.5e-79".to_string(),
-                "256.0".to_string(),
+                "256.1".to_string(),
                 "HBB_MANSP".to_string()
             ),
             (
@@ -824,19 +1006,76 @@ fn jackhmmer_chkali_writes_per_round_alignment_checkpoints() {
 }
 
 #[test]
+fn jackhmmer_globins_round2_chkali_matches_bundled_c_exactly() {
+    let (rust_stdout, rust_msas) = run_jackhmmer_with_chkali(
+        &binary_path("hmmer"),
+        true,
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["-N", "2", "--cpu", "1"],
+    );
+    let (_c_stdout, c_msas) = run_jackhmmer_with_chkali(
+        std::path::Path::new(&test_path("hmmer/src/jackhmmer")),
+        false,
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["-N", "2", "--cpu", "1"],
+    );
+
+    assert!(rust_stdout.contains("@@ New targets included:   45"));
+    assert_eq!(rust_msas.len(), 2);
+    assert_eq!(c_msas.len(), 2);
+    assert_eq!(
+        normalized_stockholm_for_exact_parity(&rust_msas[1]),
+        normalized_stockholm_for_exact_parity(&c_msas[1])
+    );
+}
+
+#[test]
+fn jackhmmer_globins_round2_chkhmm_matches_bundled_c_exactly() {
+    let (rust_stdout, rust_hmms) = run_jackhmmer_with_chkhmm(
+        &binary_path("hmmer"),
+        true,
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["-N", "2", "--cpu", "1"],
+    );
+    let (_c_stdout, c_hmms) = run_jackhmmer_with_chkhmm(
+        std::path::Path::new(&test_path("hmmer/src/jackhmmer")),
+        false,
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["-N", "2", "--cpu", "1"],
+    );
+
+    assert!(rust_stdout.contains("@@ New targets included:   45"));
+    assert_eq!(rust_hmms.len(), 2);
+    assert_eq!(c_hmms.len(), 2);
+    assert_eq!(
+        normalized_hmm_for_exact_parity(&rust_hmms[1]),
+        normalized_hmm_for_exact_parity(&c_hmms[1])
+    );
+}
+
+#[test]
 fn jackhmmer_medium_realworld_round2_matches_expected_tbl_and_dom_counts() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|O43739|CYH3_HUMAN");
-    let (stdout, tblout, domtblout) = run_jackhmmer_with_tblout_and_domtblout(
-        query.to_str().unwrap(),
-        &db,
-        &["-N", "2"],
-    );
+    let (stdout, tblout, domtblout) =
+        run_jackhmmer_with_tblout_and_domtblout(query.to_str().unwrap(), &db, &["-N", "2"]);
     let _ = std::fs::remove_file(query);
 
     assert!(stdout.contains("@@ New targets included:   55"));
-    assert!(stdout.contains("@@ New alignment includes: 56 subseqs (was 1), including original query"));
-    assert_eq!(tblout.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).count(), 162);
+    assert!(
+        stdout.contains("@@ New alignment includes: 56 subseqs (was 1), including original query")
+    );
+    assert_eq!(
+        tblout
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count(),
+        162
+    );
     assert_eq!(
         domtblout
             .lines()
@@ -856,15 +1095,14 @@ fn jackhmmer_medium_realworld_round2_matches_expected_tbl_and_dom_counts() {
 fn jackhmmer_haptoglobin_realworld_round2_matches_expected_tbl_and_dom_counts() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|P00738|HPT_HUMAN");
-    let (stdout, tblout, domtblout) = run_jackhmmer_with_tblout_and_domtblout(
-        query.to_str().unwrap(),
-        &db,
-        &["-N", "2"],
-    );
+    let (stdout, tblout, domtblout) =
+        run_jackhmmer_with_tblout_and_domtblout(query.to_str().unwrap(), &db, &["-N", "2"]);
     let _ = std::fs::remove_file(query);
 
     assert!(stdout.contains("@@ New targets included:   107"));
-    assert!(stdout.contains("@@ New alignment includes: 108 subseqs (was 1), including original query"));
+    assert!(
+        stdout.contains("@@ New alignment includes: 108 subseqs (was 1), including original query")
+    );
     assert_eq!(
         tblout
             .lines()
@@ -889,18 +1127,19 @@ fn jackhmmer_haptoglobin_realworld_round2_matches_expected_tbl_and_dom_counts() 
 }
 
 #[test]
-fn jackhmmer_medium_realworld_round2_chkhmm_matches_c_header_fields() {
+fn jackhmmer_medium_realworld_round2_checkpoint_and_tables_match_c() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|O43739|CYH3_HUMAN");
 
-    let (rust_stdout, rust_hmms) = run_jackhmmer_with_chkhmm(
-        &binary_path("hmmer"),
-        true,
-        query.to_str().unwrap(),
-        &db,
-        &["-N", "2", "--cpu", "1"],
-    );
-    let (_c_stdout, c_hmms) = run_jackhmmer_with_chkhmm(
+    let (rust_stdout, rust_hmms, rust_tblout, rust_domtblout) =
+        run_jackhmmer_with_chkhmm_and_tables(
+            &binary_path("hmmer"),
+            true,
+            query.to_str().unwrap(),
+            &db,
+            &["-N", "2", "--cpu", "1"],
+        );
+    let (_c_stdout, c_hmms, c_tblout, c_domtblout) = run_jackhmmer_with_chkhmm_and_tables(
         std::path::Path::new(&test_path("hmmer/src/jackhmmer")),
         false,
         query.to_str().unwrap(),
@@ -910,37 +1149,32 @@ fn jackhmmer_medium_realworld_round2_chkhmm_matches_c_header_fields() {
     let _ = std::fs::remove_file(query);
 
     assert!(rust_stdout.contains("@@ New targets included:   55"));
-    assert!(rust_stdout.contains("@@ New alignment includes: 56 subseqs (was 1), including original query"));
-    assert_eq!(rust_hmms.len(), 2);
-    assert_eq!(c_hmms.len(), 2);
-
-    let rust_round2 = &rust_hmms[1];
-    let c_round2 = &c_hmms[1];
-    for key in ["NAME", "LENG", "ALPH", "RF", "CONS", "CS", "MAP", "NSEQ", "CKSUM"] {
-        assert_eq!(
-            hmm_header_value(rust_round2, key),
-            hmm_header_value(c_round2, key),
-            "round-2 HMM header field {} drifted",
-            key
-        );
-    }
-    assert_hmm_float_field_close(rust_round2, c_round2, "EFFN", 1.0e-6);
-    assert_eq!(hmm_stats_lines(rust_round2), hmm_stats_lines(c_round2));
+    assert!(rust_stdout
+        .contains("@@ New alignment includes: 56 subseqs (was 1), including original query"));
+    assert_round2_checkpoint_and_table_parity(
+        &rust_hmms,
+        &c_hmms,
+        &rust_tblout,
+        &c_tblout,
+        &rust_domtblout,
+        &c_domtblout,
+    );
 }
 
 #[test]
-fn jackhmmer_haptoglobin_realworld_round2_chkhmm_matches_c_header_fields() {
+fn jackhmmer_haptoglobin_realworld_round2_checkpoint_and_tables_match_c() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|P00738|HPT_HUMAN");
 
-    let (rust_stdout, rust_hmms) = run_jackhmmer_with_chkhmm(
-        &binary_path("hmmer"),
-        true,
-        query.to_str().unwrap(),
-        &db,
-        &["-N", "2", "--cpu", "1"],
-    );
-    let (_c_stdout, c_hmms) = run_jackhmmer_with_chkhmm(
+    let (rust_stdout, rust_hmms, rust_tblout, rust_domtblout) =
+        run_jackhmmer_with_chkhmm_and_tables(
+            &binary_path("hmmer"),
+            true,
+            query.to_str().unwrap(),
+            &db,
+            &["-N", "2", "--cpu", "1"],
+        );
+    let (_c_stdout, c_hmms, c_tblout, c_domtblout) = run_jackhmmer_with_chkhmm_and_tables(
         std::path::Path::new(&test_path("hmmer/src/jackhmmer")),
         false,
         query.to_str().unwrap(),
@@ -950,20 +1184,14 @@ fn jackhmmer_haptoglobin_realworld_round2_chkhmm_matches_c_header_fields() {
     let _ = std::fs::remove_file(query);
 
     assert!(rust_stdout.contains("@@ New targets included:   107"));
-    assert!(rust_stdout.contains("@@ New alignment includes: 108 subseqs (was 1), including original query"));
-    assert_eq!(rust_hmms.len(), 2);
-    assert_eq!(c_hmms.len(), 2);
-
-    let rust_round2 = &rust_hmms[1];
-    let c_round2 = &c_hmms[1];
-    for key in ["NAME", "LENG", "ALPH", "RF", "CONS", "CS", "MAP", "NSEQ", "CKSUM"] {
-        assert_eq!(
-            hmm_header_value(rust_round2, key),
-            hmm_header_value(c_round2, key),
-            "round-2 HMM header field {} drifted",
-            key
-        );
-    }
-    assert_hmm_float_field_close(rust_round2, c_round2, "EFFN", 1.0e-6);
-    assert_eq!(hmm_stats_lines(rust_round2), hmm_stats_lines(c_round2));
+    assert!(rust_stdout
+        .contains("@@ New alignment includes: 108 subseqs (was 1), including original query"));
+    assert_round2_checkpoint_and_table_parity(
+        &rust_hmms,
+        &c_hmms,
+        &rust_tblout,
+        &c_tblout,
+        &rust_domtblout,
+        &c_domtblout,
+    );
 }

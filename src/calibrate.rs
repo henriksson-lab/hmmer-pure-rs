@@ -285,7 +285,6 @@ mod tests {
 
 #[cfg(test)]
 mod lambda_test {
-    use super::*;
     use crate::alphabet::Alphabet;
     use crate::bg::Bg;
     use std::path::Path;

@@ -90,7 +90,7 @@ fn run_p7_longtarget_timed(
 
     let mut gm = profile::Profile::new(hmm.m, &abc);
     profile::profile_config(hmm, &bg_obj, &mut gm, 200, profile::P7_LOCAL);
-    let mut om = simd::oprofile::OProfile::convert(&gm);
+    let om = simd::oprofile::OProfile::convert(&gm);
     let max_length = (hmm.m * 4) as i32;
 
     let dsq = abc.digitize(seq);
