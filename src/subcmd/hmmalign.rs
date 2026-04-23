@@ -318,7 +318,7 @@ fn build_text_msa_with_mapali(
         eprintln!("HMM has no map. --mapali can't work without it.");
         std::process::exit(1);
     }
-    let checksum = checksum_msa(mapped, abc);
+    let checksum = msa::checksum(mapped, abc);
     if checksum != hmm.checksum {
         eprintln!("--mapali MSA isn't same as the one HMM came from (checksum mismatch)");
         std::process::exit(1);
@@ -405,21 +405,6 @@ fn build_text_msa_with_mapali(
         rfline: String::from_utf8(rfline).unwrap(),
         pp_cons,
     }
-}
-
-fn checksum_msa(msa: &msa::Msa, abc: &Alphabet) -> u32 {
-    let mut val = 0u32;
-    for row in msa.digitize(abc) {
-        for &sym in row.iter().skip(1).take(msa.alen) {
-            val = val.wrapping_add(sym as u32);
-            val = val.wrapping_add(val << 10);
-            val ^= val >> 6;
-        }
-    }
-    val = val.wrapping_add(val << 3);
-    val ^= val >> 11;
-    val = val.wrapping_add(val << 15);
-    val
 }
 
 fn mapped_insert_widths(mapped: &msa::Msa, map: &[i32], m: usize) -> Vec<usize> {

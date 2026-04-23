@@ -666,9 +666,9 @@ Before stopping after any parity change:
 - Skipping the generic PP Gmx allocation for coordinate-only SIMD OA was output-exact but caused a repeatable minor-fault/system-time spike on the reference benchmark; it was reverted.
 - `RUSTFLAGS='-C target-cpu=native'` did not improve the current reused-scratch build on the reference benchmark; do not rely on it as the parity-speed fix.
 
-## Priority 7 - Complexity-Audit Concerns (2026-04-17)
+## Priority 7 - Complexity-Audit Concerns (2026-04-23)
 
-Findings from running `code-complexity-comparator` (`/home/mahogny/github/claude/code-complexity-comparator`) with the mapping file at `ccc_mapping.toml` against the full tree. 139 matched pairs after mapping. Each of these surfaces where Rust carries measurably more static complexity than C in hot code. None are a speed fix by themselves; each is a hypothesis worth checking with `perf stat` (cycles, instructions, branch-misses) on the reference case before/after any attempted change.
+Findings from running `code-complexity-comparator` (`/home/mahogny/github/claude/code-complexity-comparator`) with the mapping file at `ccc_mapping.toml` against the full tree. Current snapshot: 165 matched pairs after mapping. Each of these surfaces where Rust carries measurably more static complexity than C in hot code. None are a speed fix by themselves; each is a hypothesis worth checking with `perf stat` (cycles, instructions, branch-misses) on the reference case before/after any attempted change.
 
 Reproduce with:
 
@@ -679,6 +679,17 @@ cd /home/mahogny/github/claude/code-complexity-comparator
 ./target/release/ccc-rs compare /tmp/ccc_hmmer/rust.json /tmp/ccc_hmmer/c.json \
   --mapping /data/henriksson/github/claude/newhmmer/ccc_mapping.toml --top 40
 ```
+
+Top current outliers from the 2026-04-23 run:
+
+- `write_binary_hmm` vs `p7_h2io_WriteASCII`: `33.58`
+- `trace_score_domain_forward_an…` vs `trace_score_domain_forward_an…`: `32.65`
+- `alidisplay_backconvert` vs `p7_alidisplay_Backconvert`: `23.08`
+- `backward_parser_pmx_offset_ca…` vs `backward_engine`: `20.96`
+- `run` vs `p7_Pipeline`: `20.40`
+- `calc_band_9` vs `calc_band_9`: `20.30`
+- `convert` vs `p7_oprofile_Convert`: `18.47`
+- `write_hmm` vs `p7_hmmfile_WriteASCII`: `18.41`
 
 ### Priority 7 status summary (2026-04-17)
 

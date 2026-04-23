@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::msa;
 
 fn binary_path(name: &str) -> std::path::PathBuf {
@@ -73,11 +74,19 @@ fn normalized_alignment_lines(text: &str) -> Vec<String> {
 
 fn write_mismatched_mapali(src: &str, dst: &std::path::Path) {
     let original = std::fs::read_to_string(src).unwrap();
+    let original_msa = msa::read_stockholm(std::path::Path::new(src)).unwrap();
+    assert_eq!(original_msa.len(), 1);
+    let abc = Alphabet::amino();
+    let original_checksum = msa::checksum(&original_msa[0], &abc);
     let modified = original
         .replacen("ACDEFGHIKLMNPQRSTVWY", "CCDEFGHIKLMNPQRSTVWY", 1)
         .replacen("MY.", "AY.", 1);
     assert_ne!(original, modified);
     std::fs::write(dst, modified).unwrap();
+    let modified_msa = msa::read_stockholm(dst).unwrap();
+    assert_eq!(modified_msa.len(), 1);
+    let modified_checksum = msa::checksum(&modified_msa[0], &abc);
+    assert_ne!(original_checksum, modified_checksum);
 }
 
 fn parse_fasta_sequences(path: &str) -> HashMap<String, String> {

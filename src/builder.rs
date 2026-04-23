@@ -4,23 +4,8 @@
 use crate::alphabet::Alphabet;
 use crate::bg::Bg;
 use crate::hmm::*;
-use crate::msa::Msa;
+use crate::msa::{self, Msa};
 use crate::trace::{State as TraceState, Trace};
-
-fn checksum_msa(msa: &Msa, abc: &Alphabet) -> u32 {
-    let mut val = 0u32;
-    for row in msa.digitize(abc) {
-        for &sym in row.iter().skip(1).take(msa.alen) {
-            val = val.wrapping_add(sym as u32);
-            val = val.wrapping_add(val << 10);
-            val ^= val >> 6;
-        }
-    }
-    val = val.wrapping_add(val << 3);
-    val ^= val >> 11;
-    val = val.wrapping_add(val << 15);
-    val
-}
 
 /// Henikoff position-based sequence weighting.
 /// Returns weights[0..nseq] that sum to nseq.
@@ -236,7 +221,7 @@ pub fn build_hmm_from_msa(
     hmm.flags |= P7H_MAP;
 
     // Store the training alignment checksum for hmmalign --mapali verification.
-    hmm.checksum = checksum_msa(msa, abc);
+    hmm.checksum = msa::checksum(msa, abc);
     hmm.flags |= P7H_CHKSUM;
 
     // Effective sequence number estimation acts on count HMMs, then the

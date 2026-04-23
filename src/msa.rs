@@ -61,6 +61,25 @@ impl Msa {
     }
 }
 
+/// Calculate the Easel-style 32-bit checksum for an alignment.
+///
+/// This matches `esl_msa_Checksum()` on digital alignments and is used by
+/// `hmmbuild`/`hmmalign --mapali` compatibility code.
+pub fn checksum(msa: &Msa, abc: &Alphabet) -> u32 {
+    let mut val = 0u32;
+    for row in msa.digitize(abc) {
+        for &sym in row.iter().skip(1).take(msa.alen) {
+            val = val.wrapping_add(sym as u32);
+            val = val.wrapping_add(val << 10);
+            val ^= val >> 6;
+        }
+    }
+    val = val.wrapping_add(val << 3);
+    val ^= val >> 11;
+    val = val.wrapping_add(val << 15);
+    val
+}
+
 /// Read a Stockholm format MSA from a file.
 pub fn read_stockholm(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
