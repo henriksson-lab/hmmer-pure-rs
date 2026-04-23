@@ -2,6 +2,8 @@
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
+Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
+
 * 2026-04-22: The code has passed current methods of testing and **careful use on real data is possible**. Up to 4x faster in some cases, which is concerning(!), but obvious reasons for why this might be wrong has at least been checked
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
