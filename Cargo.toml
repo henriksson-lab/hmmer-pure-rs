@@ -22,6 +22,8 @@ include = [
     "LICENSE",
     "!test_data/human_swissprot_2k.fasta",
     "!test_data/human_swissprot_2k.fasta.gz",
+    "!test_data/gecco_cluster1_proteins.faa",
+    "!test_data/gecco_full_pfam_selected_hmms.h3m",
     "!hmmer/testsuite/gecco_missed2_hmms.hmm",
     "!hmmer/testsuite/gecco_missed_hmms.hmm",
     "!hmmer/testsuite/gecco_missed3_hmms.hmm",

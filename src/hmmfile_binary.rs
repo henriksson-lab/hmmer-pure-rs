@@ -66,9 +66,10 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
         Err(_) => return Ok(None), // EOF
     };
 
-    let has_maxl = match magic {
-        MAGIC_3A | MAGIC_3B => false,
-        MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F => true,
+    let (has_maxl, has_modern_evparams) = match magic {
+        MAGIC_3A => (false, false),
+        MAGIC_3B => (false, true),
+        MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F => (true, true),
         _ => {
             return Err(HmmerError::Format(format!(
                 "Bad binary HMM magic: {:#x}",
@@ -128,34 +129,19 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
         hmm.desc = read_string_optional(r)?;
     }
     if flags & P7H_RF != 0 {
-        let len = read_i32(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-        hmm.rf = Some(buf);
+        hmm.rf = Some(read_annotation(r, m)?);
     }
     if flags & P7H_MMASK != 0 {
-        let len = read_i32(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-        hmm.mm = Some(buf);
+        hmm.mm = Some(read_annotation(r, m)?);
     }
     if flags & P7H_CONS != 0 {
-        let len = read_i32(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-        hmm.consensus = Some(buf);
+        hmm.consensus = Some(read_annotation(r, m)?);
     }
     if flags & P7H_CS != 0 {
-        let len = read_i32(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-        hmm.cs = Some(buf);
+        hmm.cs = Some(read_annotation(r, m)?);
     }
     if flags & P7H_CA != 0 {
-        let len = read_i32(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-        hmm.ca = Some(buf);
+        hmm.ca = Some(read_annotation(r, m)?);
     }
 
     // Command log
@@ -176,7 +162,7 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     // Map
     if flags & P7H_MAP != 0 {
         let mut map = vec![0i32; m + 1];
-        for node in 1..=m {
+        for node in 0..=m {
             map[node] = read_i32(r)?;
         }
         hmm.map = Some(map);
@@ -185,18 +171,29 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     // Checksum
     hmm.checksum = read_u32(r)?;
 
-    // E-value parameters
-    if flags & P7H_STATS != 0 {
+    // E-value parameters. HMMER 3/b+ stores these unconditionally; the
+    // P7H_STATS flag records that they are valid, not whether bytes exist.
+    if has_modern_evparams {
         for i in 0..NEVPARAM {
             hmm.evparam[i] = read_f32(r)?;
         }
+    } else {
+        // 3/a stored only MLAMBDA, MMU, FTAU and C HMMER expands them.
+        let lambda = read_f32(r)?;
+        let mu = read_f32(r)?;
+        let tau = read_f32(r)?;
+        hmm.evparam[P7_MLAMBDA] = lambda;
+        hmm.evparam[P7_MMU] = mu;
+        hmm.evparam[P7_FTAU] = tau;
+        hmm.evparam[P7_FLAMBDA] = lambda;
+        hmm.evparam[P7_VLAMBDA] = lambda;
+        hmm.evparam[P7_VMU] = mu;
     }
 
-    // Cutoffs
-    if flags & P7H_GA != 0 || flags & P7H_TC != 0 || flags & P7H_NC != 0 {
-        for i in 0..NCUTOFFS {
-            hmm.cutoff[i] = read_f32(r)?;
-        }
+    // Pfam cutoffs are present as a full array in the binary stream even if no
+    // GA/TC/NC flags are set.
+    for i in 0..NCUTOFFS {
+        hmm.cutoff[i] = read_f32(r)?;
     }
 
     // Composition
@@ -207,6 +204,12 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     }
 
     Ok(Some(hmm))
+}
+
+fn read_annotation<R: Read>(r: &mut R, m: usize) -> HmmerResult<Vec<u8>> {
+    let mut buf = vec![0u8; m + 2];
+    r.read_exact(&mut buf).map_err(HmmerError::Io)?;
+    Ok(buf)
 }
 
 /// Read all HMMs from a binary .h3m file.
@@ -286,30 +289,20 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
         write_string(w, hmm.desc.as_deref().unwrap_or(""))?;
     }
 
-    // Annotation strings
-    fn write_annotation<W: std::io::Write>(w: &mut W, data: &Option<Vec<u8>>) -> HmmerResult<()> {
-        if let Some(ref d) = data {
-            w.write_all(&(d.len() as i32).to_ne_bytes())
-                .map_err(HmmerError::Io)?;
-            w.write_all(d).map_err(HmmerError::Io)?;
-        }
-        Ok(())
-    }
-
     if hmm.flags & P7H_RF != 0 {
-        write_annotation(w, &hmm.rf)?;
+        write_annotation(w, &hmm.rf, hmm.m)?;
     }
     if hmm.flags & P7H_MMASK != 0 {
-        write_annotation(w, &hmm.mm)?;
+        write_annotation(w, &hmm.mm, hmm.m)?;
     }
     if hmm.flags & P7H_CONS != 0 {
-        write_annotation(w, &hmm.consensus)?;
+        write_annotation(w, &hmm.consensus, hmm.m)?;
     }
     if hmm.flags & P7H_CS != 0 {
-        write_annotation(w, &hmm.cs)?;
+        write_annotation(w, &hmm.cs, hmm.m)?;
     }
     if hmm.flags & P7H_CA != 0 {
-        write_annotation(w, &hmm.ca)?;
+        write_annotation(w, &hmm.ca, hmm.m)?;
     }
 
     // Command log
@@ -331,9 +324,13 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     // Map
     if hmm.flags & P7H_MAP != 0 {
         if let Some(ref map) = hmm.map {
-            for node in 1..=hmm.m {
-                w.write_all(&map[node].to_ne_bytes())
-                    .map_err(HmmerError::Io)?;
+            for node in 0..=hmm.m {
+                let value = map.get(node).copied().unwrap_or(0);
+                w.write_all(&value.to_ne_bytes()).map_err(HmmerError::Io)?;
+            }
+        } else {
+            for _ in 0..=hmm.m {
+                w.write_all(&0i32.to_ne_bytes()).map_err(HmmerError::Io)?;
             }
         }
     }
@@ -343,19 +340,15 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
         .map_err(HmmerError::Io)?;
 
     // E-value params
-    if hmm.flags & P7H_STATS != 0 {
-        for i in 0..NEVPARAM {
-            w.write_all(&hmm.evparam[i].to_ne_bytes())
-                .map_err(HmmerError::Io)?;
-        }
+    for i in 0..NEVPARAM {
+        w.write_all(&hmm.evparam[i].to_ne_bytes())
+            .map_err(HmmerError::Io)?;
     }
 
     // Cutoffs
-    if hmm.flags & (P7H_GA | P7H_TC | P7H_NC) != 0 {
-        for i in 0..NCUTOFFS {
-            w.write_all(&hmm.cutoff[i].to_ne_bytes())
-                .map_err(HmmerError::Io)?;
-        }
+    for i in 0..NCUTOFFS {
+        w.write_all(&hmm.cutoff[i].to_ne_bytes())
+            .map_err(HmmerError::Io)?;
     }
 
     // Composition
@@ -366,6 +359,29 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
         }
     }
 
+    Ok(())
+}
+
+fn write_annotation<W: std::io::Write>(
+    w: &mut W,
+    data: &Option<Vec<u8>>,
+    m: usize,
+) -> HmmerResult<()> {
+    let len = m + 2;
+    if let Some(d) = data {
+        if d.len() >= len {
+            w.write_all(&d[..len]).map_err(HmmerError::Io)?;
+        } else {
+            w.write_all(d).map_err(HmmerError::Io)?;
+            for _ in d.len()..len {
+                w.write_all(&[0u8]).map_err(HmmerError::Io)?;
+            }
+        }
+    } else {
+        let mut empty = vec![b' '; len];
+        empty[len - 1] = 0;
+        w.write_all(&empty).map_err(HmmerError::Io)?;
+    }
     Ok(())
 }
 
@@ -382,6 +398,28 @@ fn write_string<W: std::io::Write>(w: &mut W, s: &str) -> HmmerResult<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::process::Command;
+
+    fn test_path(relative: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    fn c_binary_hmm_from_text(text_hmm: &Path, dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let output = Command::new(test_path("hmmer/src/hmmconvert"))
+            .arg("-b")
+            .arg(text_hmm)
+            .output()
+            .expect("failed to run C hmmconvert");
+        assert!(
+            output.status.success(),
+            "C hmmconvert failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let path = dir.path().join("converted.h3m");
+        std::fs::write(&path, output.stdout).unwrap();
+        path
+    }
 
     #[test]
     fn test_roundtrip_binary() {
@@ -416,5 +454,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reads_c_hmmer_binary_with_raw_annotation_layout() {
+        let text_path = test_path("test_data/gecco_cluster1_hmms.hmm");
+        let expected = crate::hmmfile::read_hmm_file(&text_path).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let h3m_path = c_binary_hmm_from_text(&text_path, &dir);
+        let actual = read_binary_hmm_file(&h3m_path).unwrap();
+
+        assert_eq!(expected.len(), actual.len());
+        for (expected, actual) in expected.iter().zip(actual.iter()) {
+            assert_eq!(expected.name, actual.name);
+            assert_eq!(expected.acc, actual.acc);
+            assert_eq!(expected.m, actual.m);
+            assert_eq!(expected.abc_type, actual.abc_type);
+            assert_eq!(
+                expected.consensus.as_ref().map(Vec::len),
+                actual.consensus.as_ref().map(Vec::len)
+            );
+            assert_eq!(
+                expected.rf.as_ref().map(Vec::len),
+                actual.rf.as_ref().map(Vec::len)
+            );
+            assert_eq!(
+                expected.map.as_ref().map(Vec::len),
+                actual.map.as_ref().map(Vec::len)
+            );
+
+            for node in 1..=expected.m {
+                for x in 0..expected.abc_k {
+                    assert!(
+                        (expected.mat[node][x] - actual.mat[node][x]).abs() < 1e-6,
+                        "{} mat[{}][{}] mismatch",
+                        expected.name,
+                        node,
+                        x
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GECCO's full Pfam.h3m fixture"]
+    fn reads_gecco_full_pfam_h3m() {
+        let path = Path::new("/data/henriksson/github/claude/gecco-rs/data/Pfam.h3m");
+        let hmms = read_binary_hmm_file(path).unwrap();
+        assert_eq!(hmms.len(), 2766);
+        assert!(hmms.iter().all(|hmm| !hmm.name.is_empty()));
+        assert!(hmms.iter().all(|hmm| hmm.m > 0));
     }
 }

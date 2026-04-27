@@ -8,13 +8,13 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
 use hmmer_pure_rs::sequence::{self, Sequence};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
+use hmmer_pure_rs::{hmmfile, hmmfile_binary};
 
 const TARGET_BATCH_SIZE: usize = 4096;
 
@@ -174,7 +174,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     logsum::p7_flogsuminit();
 
     // Read HMM(s)
-    let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
+    let hmms = read_hmms(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
         std::process::exit(1);
     });
@@ -823,6 +823,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         f.flush().unwrap();
     }
     std::process::ExitCode::SUCCESS
+}
+
+fn read_hmms(
+    path: &std::path::Path,
+) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
+    if path.extension().is_some_and(|ext| ext == "h3m") {
+        hmmfile_binary::read_binary_hmm_file(path)
+    } else {
+        hmmfile::read_hmm_file(path)
+    }
 }
 
 pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {

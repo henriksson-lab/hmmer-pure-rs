@@ -2454,8 +2454,14 @@ fn score_domain_envelope(
         let nullsc = bg_local.null_one(nsc_length) as f64;
         ((bitscore - nullsc) / std::f64::consts::LN_2) as f32
     } else {
-        let length_correction = (l - env_len) as f32 * (l as f32 / (l as f32 + 3.0)).ln();
-        (env_fwd_sc + length_correction - (null_sc + dom_bias)) / std::f32::consts::LN_2
+        // C p7_pipeline.c computes:
+        //   bitscore = envsc + (sq->n-Ld) * log((float)sq->n / (float)(sq->n+3))
+        // The ratio is rounded to float before log(), but log() itself is the
+        // double-precision libc call. Preserve that ordering here.
+        let ratio = (l as f32) / ((l + 3) as f32);
+        let length_correction = (l - env_len) as f64 * (ratio as f64).ln();
+        let bitscore = (env_fwd_sc as f64 + length_correction) as f32;
+        ((bitscore - (null_sc + dom_bias)) as f64 / std::f64::consts::LN_2) as f32
     };
     let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
     let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;

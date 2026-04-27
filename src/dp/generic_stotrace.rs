@@ -207,12 +207,12 @@ fn select_e_pmx(
 ) -> State {
     let q = nqf(om.m);
     let roll = rng.next_f64();
-    let norm = 1.0 / ox.xmx(i, PXE) as f64;
+    let norm = (1.0 / ox.xmx(i, PXE) as f64) as f32;
     let mut sum = 0.0_f64;
     for qi in 0..q {
         for lane in 0..4 {
             let k = lane * q + qi + 1;
-            sum += ox.mmx(i, k) as f64 * norm;
+            sum += (ox.mmx(i, k) * norm) as f64;
             if roll < sum {
                 *ret_k = k;
                 return State::M;
@@ -220,7 +220,7 @@ fn select_e_pmx(
         }
         for lane in 0..4 {
             let k = lane * q + qi + 1;
-            sum += ox.dmx(i, k) as f64 * norm;
+            sum += (ox.dmx(i, k) * norm) as f64;
             if roll < sum {
                 *ret_k = k;
                 return State::D;
@@ -233,19 +233,40 @@ fn select_e_pmx(
 
 #[cfg(target_arch = "x86_64")]
 fn choose_probs(rng: &mut MersenneTwister, probs: &[f32]) -> usize {
-    let total: f64 = probs.iter().map(|&p| p as f64).sum();
-    if total <= 0.0 {
-        return 0;
-    }
+    let mut normed = probs.to_vec();
+    f_norm(&mut normed);
     let roll = rng.next_f64();
     let mut cumsum = 0.0_f64;
-    for (idx, &p) in probs.iter().enumerate() {
+    let total: f64 = normed.iter().map(|&p| p as f64).sum();
+    for (idx, &p) in normed.iter().enumerate() {
         cumsum += p as f64;
         if roll < cumsum / total {
             return idx;
         }
     }
     probs.len() - 1
+}
+
+#[cfg(target_arch = "x86_64")]
+fn f_norm(vec: &mut [f32]) {
+    let mut sum = 0.0_f32;
+    let mut c = 0.0_f32;
+    for &v in vec.iter() {
+        let y = v - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    if sum != 0.0 {
+        for v in vec {
+            *v /= sum;
+        }
+    } else {
+        let p = 1.0 / vec.len() as f32;
+        for v in vec {
+            *v = p;
+        }
+    }
 }
 
 /// Sample a stochastic traceback from a Forward DP matrix.

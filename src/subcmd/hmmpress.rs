@@ -8,9 +8,9 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
 use hmmer_pure_rs::simd::oprofile::OProfile;
+use hmmer_pure_rs::{hmmfile, hmmfile_binary};
 
 #[derive(Parser)]
 #[command(name = "hmmpress", about = "Prepare an HMM database for hmmscan")]
@@ -59,7 +59,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         // Write binary HMM to .h3m
         let h3m_offset = h3m.stream_position().unwrap_or(0);
-        write_binary_hmm(&mut h3m, hmm, &abc);
+        hmmfile_binary::write_binary_hmm(&mut h3m, hmm).unwrap_or_else(|e| {
+            eprintln!("Error writing binary HMM: {}", e);
+            std::process::exit(1);
+        });
 
         // Create profile and optimized profile
         let mut gm = Profile::new(hmm.m, &abc);
@@ -82,35 +85,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     writeln!(err, "  {}", h3p_path).unwrap();
     writeln!(err, "  {}", h3i_path).unwrap();
     std::process::ExitCode::SUCCESS
-}
-
-fn write_binary_hmm<W: Write>(w: &mut W, hmm: &hmmer_pure_rs::Hmm, abc: &Alphabet) {
-    // Simplified binary format: just write key fields
-    let m = hmm.m as u32;
-    let k = abc.k as u32;
-    w.write_all(&m.to_le_bytes()).unwrap();
-    w.write_all(&k.to_le_bytes()).unwrap();
-    w.write_all(hmm.name.as_bytes()).unwrap();
-    w.write_all(&[0u8]).unwrap(); // null terminator
-
-    // Write match emissions
-    for node in 1..=hmm.m {
-        for x in 0..abc.k {
-            w.write_all(&hmm.mat[node][x].to_le_bytes()).unwrap();
-        }
-    }
-
-    // Write transitions
-    for node in 0..=hmm.m {
-        for t in 0..7 {
-            w.write_all(&hmm.t[node][t].to_le_bytes()).unwrap();
-        }
-    }
-
-    // Write evparams
-    for i in 0..6 {
-        w.write_all(&hmm.evparam[i].to_le_bytes()).unwrap();
-    }
 }
 
 fn write_msv_filter<W: Write>(w: &mut W, om: &OProfile) {
