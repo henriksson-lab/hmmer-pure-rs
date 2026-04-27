@@ -4,7 +4,8 @@ A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis u
 
 Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
 
-* 2026-04-22: The code has passed current methods of testing and **careful use on real data is possible**. Up to 4x faster in some cases, which is concerning(!), but obvious reasons for why this might be wrong has at least been checked
+* 2026-04-27: The code has passed current methods of testing and **careful use on real data is possible**. Up to 4x faster in some cases (see benchmarks; sounds too good to be true)
+
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
@@ -36,56 +37,49 @@ These benchmarks are here to document the current translation state, not to
 promise performance on every machine or workload. All runs below were taken in
 the same workspace with `--cpu 1` or `--cpu 4` as shown.
 
-### Medium Fixture
+### Swiss-Prot 2k Fixture
 
 Dataset:
 
-- `external/protein_medium/uniprot_UP000005640_human.fasta(.gz)`
-- medium human proteome fixture
+- `test_data/human_swissprot_2k.fasta`
+- 20,431 human Swiss-Prot sequences, 11,415,371 residues
 
 Queries:
 
 - `hmmsearch`: `test_data/Pkinase_pfam.hmm`
-- `jackhmmer`: `sp|P00738|HPT_HUMAN`
 
 Results:
 
-| Command | Threads | Rust | C | Notes |
-|-------|-------:|-------|-------|-------|
-| `search --noali` | 1 | `1.42s` user / `1.43s` wall / `16.9 MB` RSS | `6.34s` user / `6.13s` wall / `15.9 MB` RSS | `484` `tblout` rows both |
-| `jackhmmer -N 2 --tblout --domtblout` | 1 | `4.61s` user / `5.38s` wall / `18.2 MB` RSS | `8.74s` user / `8.18s` wall / `16.9 MB` RSS | `127` `tblout`, `156` `domtblout` rows both |
+| Command | Threads | Rust | C | Speedup | Notes |
+|-------|-------:|-------|-------|-------:|-------|
+| `search --noali` | 1 | `1.34s` user / `1.36s` wall / `12.4 MB` RSS | `6.31s` user / `6.04s` wall / `15.9 MB` RSS | `4.44x` | `483` non-comment `tblout` rows both |
+| `search --noali` | 4 | `1.70s` user / `0.58s` wall / `32.2 MB` RSS | `6.52s` user / `1.64s` wall / `30.6 MB` RSS | `2.83x` | `483` non-comment `tblout` rows both |
 
-### Large Fixture
+### GECCO Selected Binary HMM Fixture
 
 Dataset:
 
-- `external/protein_large/uniprot_sprot.fasta(.gz)`
-- full Swiss-Prot protein set
+- `test_data/gecco_full_pfam_selected_proteins.faa`
 
 Queries:
 
-- `hmmsearch`: `test_data/Pkinase_pfam.hmm`
-- `jackhmmer`: `sp|P00738|HPT_HUMAN`
+- `hmmsearch`: `test_data/gecco_full_pfam_selected_hmms.h3m`
 
 Results:
 
-| Command | Threads | Rust | C | Notes |
-|-------|-------:|-------|-------|-------|
-| `search --noali` | 1 | `13.73s` user / `13.90s` wall / `18.5 MB` RSS | `72.36s` user / `65.17s` wall / `39.4 MB` RSS | `4543` `tblout` rows both |
-| `search --noali` | 4 | `21.76s` user / `9.10s` wall / `42.0 MB` RSS | `75.78s` user / `17.72s` wall / `62.3 MB` RSS | `4543` `tblout` rows both |
-| `jackhmmer -N 2 --tblout --domtblout` | 1 | `56.16s` user / `57.84s` wall / `29.9 MB` RSS | `97.58s` user / `82.66s` wall / `29.2 MB` RSS | `887` `tblout`, `963` `domtblout` rows both |
+| Command | Threads | Rust | C | Speedup | Notes |
+|-------|-------:|-------|-------|-------:|-------|
+| `search --noali` | 1 | `0.03s` user / `0.07s` wall / `7.6 MB` RSS | `0.14s` user / `0.20s` wall / `7.0 MB` RSS | `2.86x` | `6` non-comment `tblout` rows both |
 
 Interpretation:
 
-- `hmmsearch` is currently faster than bundled C on the measured medium and
-  large fixtures
-- `jackhmmer` is also faster than bundled C on the measured medium and large
-  fixtures
-- the large `hmmsearch` RSS problem that existed earlier is no longer present
-  on the measured `--cpu 1` path, and `--cpu 4` remains well below the earlier
-  whole-database-retention behavior
-- the main remaining performance question is further multi-thread scaling, not
-  large single-thread memory usage
+- `hmmsearch` is faster than bundled C on these measured fixtures
+- the Swiss-Prot 2k single-thread run is `4.44x` faster by wall time, with
+  lower RSS
+- the Swiss-Prot 2k four-thread run is `2.83x` faster by wall time, with
+  similar RSS
+- the selected binary `.h3m` fixture is tiny, so the `2.86x` wall-time ratio is
+  useful mainly as a smoke benchmark for the binary HMM loading path
 
 ## Features
 
