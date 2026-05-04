@@ -1,4 +1,4 @@
-# hmmer-pure-rs 0.7.0
+# hmmer-pure-rs 0.7.1
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 

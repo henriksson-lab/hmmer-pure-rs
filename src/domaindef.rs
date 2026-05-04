@@ -126,12 +126,18 @@ impl DomainSimdScratch {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-pub(crate) struct DomainSimdScratch;
+pub(crate) struct DomainSimdScratch {
+    pp_gmx: Gmx,
+    oa_gmx: Gmx,
+}
 
 #[cfg(not(target_arch = "x86_64"))]
 impl DomainSimdScratch {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            pp_gmx: Gmx::new(0, 0),
+            oa_gmx: Gmx::new(0, 0),
+        }
     }
 }
 
@@ -2016,55 +2022,63 @@ fn score_domain_envelope(
 
     let mut oasc = 0.0_f32;
     let ad = if make_alignment {
+        let mut simd_ad: Option<AliDisplay> = None;
+
         #[cfg(target_arch = "x86_64")]
-        if let Some(tr) = simd_oa_trace.take() {
-            // When make_alignment_display=true: use SIMD trace with env_pp for
-            // PP-line annotations. Matches C p7_alidisplay_Create with SIMD OA.
-            oasc = simd_oasc.unwrap_or(0.0);
-            let env_pp = unsafe { &*env_pp_ptr };
-            let abc = Alphabet::new(hmm.abc_type);
-            crate::trace::alignment_display_with_pp_bg(
-                &tr,
-                &sub_dsq,
-                hmm,
-                &abc,
-                Some(env_pp),
-                pre_trim_local_bg_f.as_deref(),
-            )
-            .map(|mut ad| {
-                ad.sqfrom += ienv - 1;
-                ad.sqto += ienv - 1;
-                AliDisplay {
-                    model: ad.model,
-                    mline: ad.mline,
-                    aseq: ad.aseq,
-                    hmmfrom: ad.hmmfrom,
-                    hmmto: ad.hmmto,
-                    sqfrom: ad.sqfrom,
-                    sqto: ad.sqto,
-                    ppline: ad.ppline,
-                    rfline: ad.rfline,
+        {
+            if let Some(tr) = simd_oa_trace.take() {
+                // When make_alignment_display=true: use SIMD trace with env_pp for
+                // PP-line annotations. Matches C p7_alidisplay_Create with SIMD OA.
+                oasc = simd_oasc.unwrap_or(0.0);
+                let env_pp = unsafe { &*env_pp_ptr };
+                let abc = Alphabet::new(hmm.abc_type);
+                simd_ad = crate::trace::alignment_display_with_pp_bg(
+                    &tr,
+                    &sub_dsq,
+                    hmm,
+                    &abc,
+                    Some(env_pp),
+                    pre_trim_local_bg_f.as_deref(),
+                )
+                .map(|mut ad| {
+                    ad.sqfrom += ienv - 1;
+                    ad.sqto += ienv - 1;
+                    AliDisplay {
+                        model: ad.model,
+                        mline: ad.mline,
+                        aseq: ad.aseq,
+                        hmmfrom: ad.hmmfrom,
+                        hmmto: ad.hmmto,
+                        sqfrom: ad.sqfrom,
+                        sqto: ad.sqto,
+                        ppline: ad.ppline,
+                        rfline: ad.rfline,
+                    }
+                });
+            } else if let Some((hmmfrom, hmmto, mut sqfrom, mut sqto)) = simd_oa_coords.take() {
+                oasc = simd_oasc.unwrap_or(0.0);
+                if sqfrom > 0 {
+                    sqfrom += ienv - 1;
                 }
-            })
-        } else if let Some((hmmfrom, hmmto, mut sqfrom, mut sqto)) = simd_oa_coords.take() {
-            oasc = simd_oasc.unwrap_or(0.0);
-            if sqfrom > 0 {
-                sqfrom += ienv - 1;
+                if sqto > 0 {
+                    sqto += ienv - 1;
+                }
+                simd_ad = Some(AliDisplay {
+                    model: String::new(),
+                    mline: String::new(),
+                    aseq: String::new(),
+                    hmmfrom,
+                    hmmto,
+                    sqfrom,
+                    sqto,
+                    ppline: String::new(),
+                    rfline: String::new(),
+                });
             }
-            if sqto > 0 {
-                sqto += ienv - 1;
-            }
-            Some(AliDisplay {
-                model: String::new(),
-                mline: String::new(),
-                aseq: String::new(),
-                hmmfrom,
-                hmmto,
-                sqfrom,
-                sqto,
-                ppline: String::new(),
-                rfline: String::new(),
-            })
+        }
+
+        if simd_ad.is_some() {
+            simd_ad
         } else {
             let env_pp = unsafe { &*env_pp_ptr };
             if let Some(ref mut scratch) = simd_scratch {
@@ -2570,6 +2584,10 @@ pub(crate) fn define_domains(
     long_target: bool,
 ) -> (Vec<Domain>, f32, f32, f32, DomainDefinitionStats) {
     crate::logsum::p7_flogsuminit();
+    #[cfg(not(target_arch = "x86_64"))]
+    let mut simd_scratch_storage = DomainSimdScratch::new();
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd_scratch = &mut simd_scratch_storage;
 
     // Phase 1: Domain decoding (btot/etot/mocc) — SIMD when available
     let (mut btot, mut etot, mut mocc);

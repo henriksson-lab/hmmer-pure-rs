@@ -1,6 +1,6 @@
 [package]
 name = "hmmer-pure-rs"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Pure Rust port of HMMER 3.4 — biological sequence analysis using profile HMMs"
 license = "BSD-3-Clause"
