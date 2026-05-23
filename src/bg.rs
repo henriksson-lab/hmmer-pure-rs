@@ -47,14 +47,20 @@ pub struct Bg {
     pub fhmm_e0: Vec<f32>,
     /// Filter HMM state 1 emission probabilities [0..K-1] (biased composition)
     pub fhmm_e1: Vec<f32>,
-    /// Filter HMM transitions: t[state][to_state] for 2-state model
+    /// Filter HMM transitions: `t[state][to_state]` for 2-state model
     pub fhmm_t: [[f32; 3]; 2], // [2 states][3: state0, state1, end]
     /// Filter HMM initial state probabilities
     pub fhmm_pi: [f32; 2],
 }
 
 impl Bg {
-    /// Create a new background model for the given alphabet.
+    /// Allocate a P7_BG null model for the given digital alphabet.
+    ///
+    /// For amino acid alphabets, sets iid background frequencies to average
+    /// Swiss-Prot residue composition; for DNA/RNA, sets uniform frequencies.
+    /// The bias-filter HMM is not configured here — call `set_filter()`
+    /// after this and before using the filter score.
+    /// Counterpart to C's `p7_bg_Create()`.
     pub fn new(abc: &Alphabet) -> Self {
         let k = abc.k;
         let mut f = vec![1.0 / k as f32; k]; // uniform default
@@ -86,29 +92,35 @@ impl Bg {
         }
     }
 
-    /// Set the null model's expected sequence length to L.
+    /// Set the geometric null-model length distribution to a mean of `l` residues.
+    /// Counterpart to C's `p7_bg_SetLength()`.
     pub fn set_length(&mut self, l: usize) {
         self.p1 = l as f32 / (l as f32 + 1.0);
         self.fhmm_t[0][0] = self.p1;
         self.fhmm_t[0][1] = 1.0 - self.p1;
     }
 
-    /// Calculate the null1 log-odds score for a sequence of length L.
-    /// This is the length-dependent component of the null model.
+    /// Calculate the null1 log-odds score for a sequence of length `l`.
+    ///
+    /// Because the null1 residue composition matches the background used in
+    /// profile scoring, only the null model transitions contribute:
+    /// `L*log(p1) + log(1-p1)`. Counterpart to C's `p7_bg_NullOne()`.
     pub fn null_one(&self, l: usize) -> f32 {
         (l as f64 * (self.p1 as f64).ln() + (1.0_f64 - self.p1 as f64).ln()) as f32
     }
 
-    /// Configure the bias filter HMM with model composition.
-    /// `compo` is the model's residue composition [0..K-1].
-    /// `m` is the model length.
+    /// Configure the two-state bias-filter HMM from a model's residue composition.
+    ///
+    /// State 0 is the iid background; state 1 emits the biased composition `compo`
+    /// (length K). `m` is the model length, used to set state-1 dwell time
+    /// (`L1 = M/8`). The expected total filter length defaults to ~400; a later
+    /// `set_length()` call adjusts it to the target sequence length.
+    /// Counterpart to C's `p7_bg_SetFilter()`.
     pub fn set_filter(&mut self, m: usize, compo: &[f32]) {
-        let l0 = 400.0_f32; // expected length in background state
-        let l1 = (m as f32 / 8.0).max(1.0); // expected length in biased state
+        let l1 = m as f32 / 8.0; // expected length in biased state
 
-        // State 0: background (iid)
-        self.fhmm_t[0][0] = l0 / (l0 + 1.0);
-        self.fhmm_t[0][1] = 1.0 / (l0 + 1.0);
+        // State 0: background (iid). Preserve the current target-length
+        // configuration; C callers reset this through p7_bg_SetLength().
         self.fhmm_t[0][2] = 1.0;
 
         // State 1: biased composition
@@ -162,9 +174,11 @@ impl Bg {
         self.fhmm_pi = [0.999, 0.001];
     }
 
-    /// Calculate the bias filter score for a digital sequence.
-    /// `dsq` is 1-based digital sequence.
-    /// Returns the filter score (null model log-likelihood in nats).
+    /// Calculate the bias-filter null log-likelihood for a digital sequence.
+    ///
+    /// Scores the two-state filter HMM against `dsq[1..=l]` using rescaled
+    /// forward DP, then adds the geometric length term. Returns log-likelihood
+    /// in nats. Counterpart to C's `p7_bg_FilterScore()`.
     pub fn filter_score(&self, dsq: &[Dsq], l: usize) -> f32 {
         if l == 0 {
             let term = self.fhmm_pi[0] * self.fhmm_t[0][2] + self.fhmm_pi[1] * self.fhmm_t[1][2];
@@ -196,6 +210,7 @@ impl Bg {
         nullsc + l as f32 * self.p1.ln() + (1.0 - self.p1).ln()
     }
 
+    /// Look up state-0 and state-1 filter emission odds for digital code `x`.
     #[inline]
     fn filter_emissions(&self, x: usize) -> (f32, f32) {
         if x < self.fhmm_e0.len() {
@@ -205,6 +220,8 @@ impl Bg {
         }
     }
 
+    /// Set state-1 emission odds for a degenerate code `x` as the
+    /// composition-weighted average over its canonical members.
     fn set_degenerate_filter_emission(&mut self, x: usize, members: &[usize], compo: &[f32]) {
         if x >= self.fhmm_e1.len() {
             return;

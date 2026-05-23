@@ -14,22 +14,27 @@ const OM_M: usize = 0;
 const OM_D: usize = 1;
 const OM_I: usize = 2;
 
+/// Load the 4-lane stripe `(qi, state)` from a striped DP row.
 #[inline(always)]
 unsafe fn load_cell(row: *const f32, qi: usize, state: usize) -> __m128 {
     _mm_load_ps(row.add(qi * DP_CELLS_PER_K * 4 + state * 4))
 }
 
+/// Store the 4-lane stripe `(qi, state)` into a striped DP row.
 #[inline(always)]
 unsafe fn store_cell(row: *mut f32, qi: usize, state: usize, v: __m128) {
     _mm_store_ps(row.add(qi * DP_CELLS_PER_K * 4 + state * 4), v);
 }
 
+/// Striped right-shift by one lane (Easel `esl_sse_rightshift_ps`):
+/// `[a,b,c,d]` becomes `[fill, a, b, c]`.
 #[inline(always)]
 unsafe fn rightshift_ps(v: __m128, fill: __m128) -> __m128 {
     let shifted = _mm_shuffle_ps::<{ crate::simd::shuffle_mask(2, 1, 0, 0) }>(v, v);
     _mm_move_ss(shifted, fill)
 }
 
+/// Horizontal max across the 4 lanes of `v` (Easel `esl_sse_hmax_ps`).
 #[inline(always)]
 unsafe fn hmax_ps(v: __m128) -> f32 {
     let h1 = _mm_max_ps(
@@ -45,8 +50,14 @@ unsafe fn hmax_ps(v: __m128) -> f32 {
     out
 }
 
-/// Convert striped Forward/Backward probability matrices into a striped
-/// posterior matrix equivalent to C's `p7_Decoding()` output.
+/// Posterior decoding of residue assignment from striped Forward/Backward.
+///
+/// Ports C `p7_Decoding()` (SSE) — fills the striped posterior matrix `pp`
+/// from filled Forward `fwd` and Backward `bck` matrices and profile `om`.
+/// D-state posteriors are zeroed (D is not a residue assignment); N/J/C
+/// specials use `fwd[i-1] * bck[i] * loop * scaleproduct`. The C function
+/// returns `eslERANGE` on overflow; here `scaleproduct` saturating to inf is
+/// the analogous failure mode (caller should fall back to the generic path).
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `fwd`, `bck`, and `pp`.
@@ -137,7 +148,14 @@ pub unsafe fn posterior_decoding_pmx(fwd: &ProbMx, bck: &ProbMx, om: &OProfile, 
     }
 }
 
-/// SSE optimal-accuracy DP fill over a striped posterior matrix.
+/// DP fill of an optimal-accuracy alignment over a striped posterior matrix.
+///
+/// Ports C `p7_OptimalAccuracy()` (SSE optacc.c): given the posterior decoding
+/// matrix `pp` and profile `om`, fills `ox` with OA scores and returns the
+/// expected number of correctly decoded positions in the target (i.e.
+/// `ox->xmx[L*NXCELLS + C]`). Skipped transitions (probability 0) are masked
+/// out so they never win in the max-reduction. The DD chain is serialized in
+/// 4 passes to match C's `esl_sse_rightshift_ps` cascade.
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
@@ -292,9 +310,12 @@ pub unsafe fn optimal_accuracy_pmx(om: &OProfile, pp: &ProbMx, ox: &mut ProbMx) 
     *oxx.add(l * NXCELLS + PXC)
 }
 
-/// Trace through a striped optimal-accuracy DP matrix and return only the
-/// coordinate span needed by domtblout. This follows `oa_trace_pmx()` state
-/// selection but avoids materializing and reversing a full Trace.
+/// Optimal-accuracy traceback restricted to the (hmmfrom, hmmto, sqfrom, sqto)
+/// coordinate span needed by domtblout.
+///
+/// Uses the same state-selection rules as `oa_trace_pmx` / C `p7_OATrace`
+/// (Kall '05), but avoids materializing and reversing a full `Trace`. Returns
+/// `None` if no model/sequence coordinates were ever entered.
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
@@ -388,9 +409,13 @@ pub unsafe fn oa_trace_coords_pmx(
     }
 }
 
-/// Trace through a striped optimal-accuracy DP matrix. This returns only state,
-/// model, and sequence coordinates; posterior-probability annotation is not
-/// needed for domtblout coordinate extraction.
+/// Optimal-accuracy decoding: traceback over the striped OA matrix.
+///
+/// Ports C `p7_OATrace()` (Kall '05): walks back from C through the OA matrix
+/// `ox` (filled by `optimal_accuracy_pmx`) and emits a reversed `Trace` of
+/// states + (k, i) coordinates. Posterior-probability per-residue annotation
+/// is not needed for domtblout extraction so it is omitted. Includes a
+/// runaway safety break (`tr.n > L + M + 100`).
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
@@ -452,6 +477,7 @@ pub unsafe fn oa_trace_pmx(om: &OProfile, pp: &ProbMx, ox: &ProbMx) -> Trace {
     tr
 }
 
+/// Read a single lane of the striped OA cell `(i, q, state)`.
 #[inline(always)]
 unsafe fn cell_lane(ox: &ProbMx, i: usize, q: usize, state: usize, lane: usize) -> f32 {
     let row = ox
@@ -463,17 +489,22 @@ unsafe fn cell_lane(ox: &ProbMx, i: usize, q: usize, state: usize, lane: usize) 
     lanes[lane]
 }
 
+/// Read a single lane of transition `tidx` at stripe `q` from `om.tfv`.
 #[inline(always)]
 unsafe fn tfv_lane(om: &OProfile, q: usize, tidx: usize, lane: usize) -> f32 {
     om.tfv[q * 7 + tidx][lane]
 }
 
+/// Read a single lane of the DD transition stripe at stripe `q` (stored after
+/// the 7 standard transitions in `om.tfv`).
 #[inline(always)]
 unsafe fn tdd_lane(om: &OProfile, q: usize, lane: usize) -> f32 {
     let q_count = om.m.div_ceil(4);
     om.tfv[7 * q_count + q][lane]
 }
 
+/// Pick the predecessor state of an M_k at row `i`: one of M, I, D, or B,
+/// whichever scored the OA cell. Mirrors C `select_m` in optacc.c.
 unsafe fn select_m(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     if k == 0 || k > om.m || i == 0 {
         debug_assert!(k >= 1 && k <= om.m && i > 0);
@@ -526,6 +557,7 @@ unsafe fn select_m(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     states[argmax_first(&paths)]
 }
 
+/// Pick the predecessor of a D_k cell: M (M->D) or D (D->D). Mirrors C `select_d`.
 unsafe fn select_d(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     if k == 0 || k > om.m {
         debug_assert!(k >= 1 && k <= om.m);
@@ -560,6 +592,7 @@ unsafe fn select_d(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     }
 }
 
+/// Pick the predecessor of an I_k cell: M (M->I) or I (I->I). Mirrors C `select_i`.
 unsafe fn select_i(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     if k == 0 || k > om.m || i == 0 {
         debug_assert!(k >= 1 && k <= om.m && i > 0);
@@ -587,6 +620,7 @@ unsafe fn select_i(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
     }
 }
 
+/// Pick predecessor of C at row `i`: C (C->C loop) or E (E->C move). Mirrors C `select_c`.
 #[inline]
 fn select_c(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
     let c_loop = if om.xf[P7O_C][P7O_LOOP] == 0.0 {
@@ -606,6 +640,7 @@ fn select_c(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
     }
 }
 
+/// Pick predecessor of J at row `i`: J (J->J loop) or E (E->J loop). Mirrors C `select_j`.
 #[inline]
 fn select_j(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
     let j_loop = if om.xf[P7O_J][P7O_LOOP] == 0.0 {
@@ -625,6 +660,9 @@ fn select_j(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
     }
 }
 
+/// Pick the (k, state) at which E was entered on row `i`: max over all M_k
+/// (M ties beat D via `>=`) then all D_k (D wins only on strict `>`).
+/// Mirrors C `select_e` iteration order exactly so tie-break picks match.
 unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> State {
     // Mirror C hmmer/src/impl_sse/optacc.c:select_e iteration order: for each
     // q, check all 4 M lanes first (M ties beat D via `>=`), then all 4 D
@@ -664,6 +702,7 @@ unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> S
     smax
 }
 
+/// Pick predecessor of B at row `i`: N (N->B move) or J (J->B move). Mirrors C `select_b`.
 #[inline]
 fn select_b(om: &OProfile, ox: &ProbMx, i: usize) -> State {
     let n_move = if om.xf[P7O_N][P7O_MOVE] == 0.0 {
@@ -683,6 +722,8 @@ fn select_b(om: &OProfile, ox: &ProbMx, i: usize) -> State {
     }
 }
 
+/// Index of the maximum value in `values`; ties go to the first occurrence
+/// (the input order encodes the C tie-break priority: M, I, D, B).
 #[inline]
 fn argmax_first(values: &[f32]) -> usize {
     let mut best = 0usize;

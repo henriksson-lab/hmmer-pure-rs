@@ -9,15 +9,21 @@ use crate::simd::oprofile::*;
 
 #[link(name = "m")]
 unsafe extern "C" {
+    /// libm `log(double)`; bound here so totscale accumulation matches the C
+    /// codebase bit-for-bit (Rust's intrinsic `f64::ln` is not guaranteed to).
     #[link_name = "log"]
     fn c_log(x: f64) -> f64;
 }
 
+/// Thin Rust wrapper around libm `log(double)` used to bit-match the C codebase's
+/// totscale accumulation (Rust's `f64::ln` is not guaranteed identical).
 #[inline]
 fn c_log_f64(x: f64) -> f64 {
     unsafe { c_log(x) }
 }
 
+/// Tracehash helper: emits quantized per-state sums (M/D) of the striped DP row
+/// for rows 18/19/20. Mirrors `trace_forward_engine_row_sums_q1e5` in fwdback.c.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_row_sums_q1e5(
     row: usize,
@@ -67,6 +73,8 @@ unsafe fn trace_forward_engine_row_sums_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: quantized M/D/I sums for the row that triggers the 10th
+/// sparse-rescaling event (debug probe used to localize divergences).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_row_q1e5(
     dsq: &[Dsq],
@@ -105,6 +113,8 @@ unsafe fn trace_forward_engine_scale10_row_q1e5(
     emit_sum!("simd_forward_engine_scale10_isum_q1e5", sums[2]);
 }
 
+/// Tracehash helper: emits quantized M/D/I sums for selected rows around the
+/// scale-10 window, tagged with the row index.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_window_row_q1e5(
     row: usize,
@@ -140,6 +150,8 @@ unsafe fn trace_forward_engine_scale10_window_row_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: emits exact-bit FNV-1a hashes of M/D/I cells for
+/// scale-10 window rows (bit-level divergence probe).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_window_row_bits(
     row: usize,
@@ -184,6 +196,8 @@ unsafe fn trace_forward_engine_scale10_window_row_bits(
     emit_state!("simd_forward_engine_scale10_window_i_bits", hashes[2]);
 }
 
+/// Tracehash helper: bit-exact M/D/I hashes captured immediately after each
+/// sparse-rescale event, tagged by event index and row.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale_event_row_bits(
     event: usize,
@@ -225,6 +239,8 @@ unsafe fn trace_forward_engine_scale_event_row_bits(
     th.finish();
 }
 
+/// Tracehash helper: quantized M/D/I sums for the "main" vs. "dd" phase of the
+/// scale-10 row, including per-state main-phase sums.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_phase_q1e5(
     name: &'static str,
@@ -287,6 +303,8 @@ unsafe fn trace_forward_engine_scale10_phase_q1e5(
     }
 }
 
+/// Tracehash helper: bucketed M-state sums (5 q-index buckets) for the
+/// scale-10 main phase, isolating which stripes drive divergence.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
     row: usize,
@@ -331,6 +349,8 @@ unsafe fn trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: per-lane bit-exact hash of the xEv vector at the
+/// scale-10 trigger row.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_scale10_xev_bits(
     dsq: &[Dsq],
@@ -351,6 +371,7 @@ unsafe fn trace_forward_engine_scale10_xev_bits(
     th.finish();
 }
 
+/// Tracehash helper: bit-exact value of the scalar xE at the scale-10 row.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_scale10_xe_bits(
     dsq: &[Dsq],
@@ -367,6 +388,9 @@ fn trace_forward_engine_scale10_xe_bits(
     th.finish();
 }
 
+/// Tracehash helper: per-row "special step" probe — emits xEv lanes (pre
+/// horizontal-sum), xE, and the row scale to pinpoint per-row divergences.
+/// Mirrors the C helper used inside forward_engine.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_step_bits(
     dsq: &[Dsq],
@@ -393,6 +417,8 @@ unsafe fn trace_forward_engine_step_bits(
     th.finish();
 }
 
+/// Tracehash helper: bit-exact dump of (xN, xJ, xB, xC) at the start of the
+/// scale-10 trigger row, plus individual per-special probes.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_scale10_row_start_bits(
     dsq: &[Dsq],
@@ -433,6 +459,8 @@ fn trace_forward_engine_scale10_row_start_bits(
     emit_special!("simd_forward_engine_scale10_row_start_xc_bits", xc);
 }
 
+/// Tracehash helper: per-lane bit-exact hash of xEv at row 19 (canonical
+/// divergence-localization row).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_forward_engine_row19_xev_bits(
     dsq: &[Dsq],
@@ -453,6 +481,7 @@ unsafe fn trace_forward_engine_row19_xev_bits(
     th.finish();
 }
 
+/// Tracehash helper: bit-exact value of the scalar xE at row 19.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_row19_xe_bits(dsq: &[Dsq], dsq_offset: usize, l: usize, m: usize, xe: f32) {
     let mut th = tracehash::th_call!("simd_forward_engine_row19_xe_bits");
@@ -463,6 +492,9 @@ fn trace_forward_engine_row19_xe_bits(dsq: &[Dsq], dsq_offset: usize, l: usize, 
     th.finish();
 }
 
+/// Tracehash helper: emits row, pre-scale xE bits, and quantized specials
+/// (xN/xJ/xB/xC) for the very first sparse-rescaling event. Mirrors the
+/// same-named C helper in fwdback.c.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_first_scale_q1e5(
     do_full: bool,
@@ -518,6 +550,8 @@ fn trace_forward_engine_first_scale_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: detailed per-event probe — emits the event index, row,
+/// bit-exact pre-scale xE, and quantized post-scale specials.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_scale_event_detail_q1e5(
     event: usize,
@@ -566,6 +600,8 @@ fn trace_forward_engine_scale_event_detail_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: per-event trace dispatch — calls `first_scale` for event
+/// 1 and emits per-event row/xE/specials probes for events 2..=5+.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_forward_engine_scale_event_q1e5(
     event: usize,
@@ -643,16 +679,35 @@ fn trace_forward_engine_scale_event_q1e5(
     }
 }
 
-/// SSE Forward parser. Returns Forward score in nats.
+/// SSE Forward algorithm in linear (parser) memory. Returns score in nats.
+///
+/// Port of `p7_Forward` / `p7_ForwardParser` (impl_sse/fwdback.c) restricted to
+/// parser mode (no full DP matrix kept). Computes the Forward score over the
+/// digital sequence `dsq[1..=l]` against optimized profile `om` using the
+/// sparse-rescaling scheme to stay inside f32 dynamic range. Convenience
+/// wrapper around `forward_parser_offset` with `dsq_offset = 0`.
+///
+/// Profile must be in local alignment mode (sparse rescaling is unsafe for
+/// glocal/global).
 ///
 /// # Safety
-/// Requires SSE2 support.
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     forward_parser_offset(dsq, 0, l, om)
 }
 
+/// Forward parser score over `dsq[dsq_offset+1..=dsq_offset+l]`.
+///
+/// Variant of `p7_Forward` (impl_sse/fwdback.c) that accepts an explicit
+/// `dsq_offset` so callers can score a window without copying the digital
+/// sequence. Otherwise identical to [`forward_parser`]: striped SIMD MDI
+/// recurrence, scalar BENCJ specials, sparse rescaling, and a final
+/// `totscale + ln(xC * tCT)` return in nats.
+///
+/// # Safety
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser_offset(
@@ -844,11 +899,16 @@ pub unsafe fn forward_parser_offset(
     totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
 }
 
-/// Forward parser that stores specials and cumulative f64 scale into a ProbMx.
-/// Uses f64 totscale (matching old codebase) for correct domain decoding normalization.
+/// Forward parser writing specials (xE/N/J/B/C), cumulative f64 scale and
+/// per-row scale factors into a `ProbMx`. Returns Forward score in nats.
+///
+/// Maps to C `p7_ForwardParser` (impl_sse/fwdback.c). Like the C engine, this
+/// keeps the running totscale in f64 (then narrows on store) so that posterior
+/// decoding normalization stays bit-equivalent to the original codebase. If
+/// `pmx.has_dp` is set the full striped DP matrix is also written.
 ///
 /// # Safety
-/// Requires SSE2 support.
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser_pmx(
@@ -860,6 +920,14 @@ pub unsafe fn forward_parser_pmx(
     forward_parser_pmx_offset(dsq, 0, l, om, pmx)
 }
 
+/// `p7_ForwardParser` variant that scores a window starting at `dsq_offset`.
+///
+/// Allocates a fresh per-call SIMD scratch buffer; for hot loops prefer
+/// [`forward_parser_pmx_offset_with_scratch`] which lets callers amortize the
+/// allocation. Otherwise semantically identical to [`forward_parser_pmx`].
+///
+/// # Safety
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser_pmx_offset(
@@ -873,6 +941,20 @@ pub unsafe fn forward_parser_pmx_offset(
     forward_parser_pmx_offset_with_scratch(dsq, dsq_offset, l, om, pmx, &mut dp)
 }
 
+/// Core Forward engine in parser mode with a caller-supplied SIMD scratch
+/// buffer. Returns the Forward score in nats.
+///
+/// Variant of C `forward_engine` (static in impl_sse/fwdback.c) — the fused
+/// engine that backs both `p7_Forward` (full matrix) and `p7_ForwardParser`
+/// (linear memory). Implements the striped MDI recurrence, D->D wing
+/// unrolling (with serial vs. parallel-with-early-termination branches), xE
+/// horizontal sum, scalar BENCJ specials, sparse rescaling triggered by
+/// `xE > 1e4`, and accumulation of `totscale` in f64. Writes specials and
+/// row scales to `pmx`; if `pmx.has_dp` is set and the sequence is canonical
+/// (no degenerate residues) it dispatches to the direct full-DP variant.
+///
+/// # Safety
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser_pmx_offset_with_scratch(
@@ -1223,6 +1305,13 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     score
 }
 
+/// Canonical-sequence fast path: enters the direct full-DP variant of
+/// `forward_engine` unconditionally (caller guarantees no degenerate residues
+/// and `pmx.has_dp`). Variant of `forward_engine` that skips the dispatch
+/// check inside [`forward_parser_pmx_offset_with_scratch`].
+///
+/// # Safety
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn forward_parser_pmx_offset_canonical(
@@ -1236,6 +1325,14 @@ pub unsafe fn forward_parser_pmx_offset_canonical(
     forward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx)
 }
 
+/// Direct full-DP forward engine: writes each row straight into the striped
+/// posterior matrix in `pmx`, reading the previous row from the same buffer
+/// (no per-call scratch). Variant of `p7_Forward` / `forward_engine` for the
+/// canonical, full-matrix case used by posterior decoding and null2.
+///
+/// # Safety
+/// Requires SSE2; caller guarantees `pmx.has_dp` and that `dsq[1..=l]`
+/// contains no degenerate residues.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn forward_parser_pmx_offset_direct(
@@ -1269,16 +1366,19 @@ unsafe fn forward_parser_pmx_offset_direct(
     #[cfg(feature = "tracehash")]
     let mut trace_last_scale_event = None;
 
+    /// Loads one striped MDI cell (`s` in 0=M, 1=D, 2=I) from a row pointer.
     #[inline(always)]
     unsafe fn load_cell(row: *const f32, q: usize, s: usize) -> __m128 {
         _mm_load_ps(row.add(q * 12 + s * 4))
     }
 
+    /// Stores one striped MDI cell into the row pointer.
     #[inline(always)]
     unsafe fn store_cell(row: *mut f32, q: usize, s: usize, v: __m128) {
         _mm_store_ps(row.add(q * 12 + s * 4), v);
     }
 
+    /// Writes the five special-state values (E/N/J/B/C) for row `i` into `xmx`.
     #[inline(always)]
     unsafe fn store_xmx(xmx: *mut f32, i: usize, xe: f32, xn: f32, xj: f32, xb: f32, xc: f32) {
         let row = xmx.add(i * 5);
@@ -1502,6 +1602,9 @@ unsafe fn forward_parser_pmx_offset_direct(
     }
 }
 
+/// Returns true if `dsq[dsq_offset+1..=dsq_offset+l]` contains only canonical
+/// residue codes (`< abc_kp`); used to gate entry to the direct full-DP
+/// engine, which assumes no degenerate residues.
 #[inline(always)]
 fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> bool {
     if l == 0 {
@@ -1543,6 +1646,8 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Smoke test: build OProfile from the 20aa test HMM and run the SSE
+    /// Forward parser on a short residue mix, asserting a finite score.
     #[test]
     fn test_forward_parser_basic() {
         if !is_x86_feature_detected!("sse2") {

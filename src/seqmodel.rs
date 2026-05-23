@@ -69,8 +69,13 @@ const BLOSUM62_20: [[i32; 20]; 20] = [
     ], // Y
 ];
 
-/// Convert a BLOSUM62 score matrix to conditional probability matrix P(b|a).
-/// Returns a 20x20 matrix where row a gives P(target=b | query=a).
+/// Reverse-engineer BLOSUM62 into a conditional probability matrix `P(b|a)`
+/// given background frequencies `bg_f`.
+///
+/// Solves for the matrix's natural scale `λ` (so that the implied joint
+/// distribution sums to 1), forms `P(a,b) = f(a) f(b) exp(λ · s(a,b))`,
+/// then normalises each row to get `P(target=b | query=a)`. Used to seed
+/// HMMER's single-sequence query model (`p7_Seqmodel`).
 fn score_to_conditional(bg_f: &[f32]) -> Vec<Vec<f32>> {
     let k = 20;
     let lambda = solve_lambda(bg_f);
@@ -97,6 +102,9 @@ fn score_to_conditional(bg_f: &[f32]) -> Vec<Vec<f32>> {
     cond
 }
 
+/// Residual of the lambda-fixing equation:
+/// `sum_{a,b} f(a) f(b) exp(λ s_{ab}) - 1`.
+/// Zero when `λ` is the natural scale of the BLOSUM62 score matrix.
 fn lambda_f(bg_f: &[f32], lambda: f64) -> f64 {
     let mut fx = -1.0_f64;
     for a in 0..20 {
@@ -107,6 +115,8 @@ fn lambda_f(bg_f: &[f32], lambda: f64) -> f64 {
     fx
 }
 
+/// Bisect the root of [`lambda_f`] to find the BLOSUM62 natural scale `λ`
+/// given the background `bg_f`. Returns the `f64` lambda value.
 fn solve_lambda(bg_f: &[f32]) -> f64 {
     let max_score = BLOSUM62_20
         .iter()
@@ -130,6 +140,9 @@ fn solve_lambda(bg_f: &[f32]) -> f64 {
     (lo + hi) * 0.5
 }
 
+/// Compute both match-state and insert-state occupancies for `hmm`
+/// (the local extension of `p7_hmm_CalculateOccupancy` used by
+/// `p7_hmm_SetComposition` in C).
 fn calculate_occupancy(hmm: &Hmm) -> (Vec<f32>, Vec<f32>) {
     let mut mocc = vec![0.0_f32; hmm.m + 1];
     let mut iocc = vec![0.0_f32; hmm.m + 1];
@@ -149,6 +162,11 @@ fn calculate_occupancy(hmm: &Hmm) -> (Vec<f32>, Vec<f32>) {
     (mocc, iocc)
 }
 
+/// Set `hmm.compo[]` to the model's expected residue composition
+/// (port of `p7_hmm_SetComposition`).
+///
+/// Weights each match emission by its occupancy and each insert emission by
+/// its insert-state occupancy, then normalises the result. Raises `P7H_COMPO`.
 fn set_composition(hmm: &mut Hmm) {
     let (mocc, iocc) = calculate_occupancy(hmm);
     for x in 0..hmm.abc_k.min(MAXABET) {
@@ -169,7 +187,14 @@ fn set_composition(hmm: &mut Hmm) {
     hmm.flags |= P7H_COMPO;
 }
 
-/// Build an HMM from a single sequence using BLOSUM62 scoring.
+/// Build a profile HMM from one query sequence (port of `p7_Seqmodel`).
+///
+/// Probabilistic Smith/Waterman-style query model: match emissions are the
+/// BLOSUM62-derived conditional distribution `P(b | dsq[k])`, insert
+/// emissions are the background, and transitions use `popen` for gap-open
+/// (`t_MI`, `t_MD`) and `pextend` for gap-extend (`t_II`, `t_DD`). Node M
+/// gets the usual termination tweaks. Sets composition (via
+/// `set_composition`) and calibrates E-value statistics by simulation.
 pub fn build_single_seq_hmm(
     name: &str,
     dsq: &[Dsq],

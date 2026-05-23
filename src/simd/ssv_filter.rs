@@ -9,12 +9,21 @@ use crate::simd::oprofile::{nqb, OProfile};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+/// Result of the SSV filter.
 pub enum SsvResult {
+    /// SSV score in nats (after C->T and NN/CC/JJ approximation).
     Ok(f32),
+    /// Score saturated 8-bit unsigned range; caller should fall through to MSV.
     Overflow,
+    /// SSV cannot give a reliable answer (e.g. J state might have been used,
+    /// or bias parameters violate the assumption tjb+tbm+tec+bias < 127).
+    /// Mirrors C `eslENORESULT`.
     NoResult,
 }
 
+/// Single-cell SSV step: load 16 emission bytes for one stripe lane, subtract
+/// from `sv` with unsigned saturation, fold into the running max `xev`, then
+/// advance the score pointer (mirrors C's `STEP_SINGLE` macro).
 #[cfg(target_arch = "x86_64")]
 macro_rules! step_lane {
     ($sv:ident, $rsc:ident, $xev:ident) => {{
@@ -25,6 +34,9 @@ macro_rules! step_lane {
     }};
 }
 
+/// Stripe boundary handling: shift one lane left by one byte and OR in the
+/// `beginv` (-128) initial value so the score doesn't leak across stripes.
+/// Mirrors C's `CONVERT_STEP` macro.
 #[cfg(target_arch = "x86_64")]
 macro_rules! convert_lane {
     ($sv:ident, $beginv:ident) => {{
@@ -33,6 +45,21 @@ macro_rules! convert_lane {
     }};
 }
 
+/// Narrow SSE2 SSV filter specialised to the Q=17 stripe shape.
+///
+/// Port of `p7_SSVFilter` (hmmer/src/impl_sse/ssvfilter.c:876) for the case
+/// where `nqb(M)==17` (e.g. the Pkinase reference profile). The full C
+/// implementation auto-dispatches over `MAX_BANDS` of widths 1..18; this
+/// Rust variant only handles the Q=17 split (band-8 + band-9) and returns
+/// `NoResult` for other shapes. The MSV filter removes the J state entirely
+/// for speed (~1% of comparisons fall back to MSVFilter via `NoResult`).
+///
+/// Returns `Overflow` on saturating high-scoring sequences (caller treats as
+/// a hit) and `NoResult` when the J state might have been used so the score
+/// is unreliable (caller re-runs the full MSVFilter).
+///
+/// # Safety
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn ssv_filter_q17(dsq: &[Dsq], l: usize, om: &OProfile) -> SsvResult {
@@ -77,6 +104,11 @@ pub unsafe fn ssv_filter_q17(dsq: &[Dsq], l: usize, om: &OProfile) -> SsvResult 
     SsvResult::Ok(sc)
 }
 
+/// SSV inner loop for an 8-wide stripe band, processing 8 score lanes per
+/// residue. Port of C's `calc_band_8` (ssvfilter.c:759). The body is fully
+/// unrolled to keep the eight `sv` registers live in SSE2 XMMs; the three
+/// loop phases (prologue, steady-state stripe rotation, epilogue) walk the
+/// stripe layout so that stripe boundaries trigger a single `convert_lane!`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[allow(unused_assignments, unused_comparisons)]
@@ -495,6 +527,10 @@ unsafe fn calc_band_8(
     xev
 }
 
+/// SSV inner loop for a 9-wide stripe band (9 score lanes per residue). Port
+/// of C's `calc_band_9` (ssvfilter.c:765). Same unrolled structure as
+/// `calc_band_8` with one additional lane; used together with `calc_band_8`
+/// to cover Q=17 striped DP (8 + 9 = 17).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[allow(unused_assignments, unused_comparisons)]
@@ -986,6 +1022,8 @@ unsafe fn calc_band_9(
     xev
 }
 
+/// Horizontal max of 16 unsigned bytes in an SSE2 vector (4-step reduction).
+/// Easel `esl_sse_hmax_epu8` equivalent.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn hmax_epu8(mut v: __m128i) -> u8 {

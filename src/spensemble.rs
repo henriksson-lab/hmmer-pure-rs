@@ -31,6 +31,8 @@ pub struct ClusterParams {
 }
 
 impl Default for ClusterParams {
+    /// HMMER 3 default clustering parameters: 80% overlap, 25% posterior cutoff,
+    /// 2% endpoint probability, max 4 diagonals difference, denominator = smaller segment.
     fn default() -> Self {
         ClusterParams {
             min_overlap: 0.8,
@@ -42,10 +44,14 @@ impl Default for ClusterParams {
     }
 }
 
-/// Cluster segment pairs into domain envelopes.
-/// `segments` contains all segment pairs from N stochastic traces.
-/// `ntraces` is the total number of traces sampled.
-/// Returns significant domain envelopes.
+/// Cluster a segment-pair ensemble and define domain envelopes.
+/// Port of `p7_spensemble_Cluster()`: single-linkage cluster segment pairs by
+/// sequence/HMM overlap and diagonal proximity, keep clusters with posterior
+/// >= `min_posterior`, then pick consensus i,j,k,m endpoints whose count meets
+/// the `min_endpointp` threshold. `ntraces` is the total number of stochastic
+/// traces the ensemble came from. Also drops envelopes dominated (>=80% covered
+/// in sequence coords) by a higher-posterior neighbor, matching the post-cluster
+/// pruning in `region_trace_ensemble()`.
 pub fn cluster(
     segments: &[SegmentPair],
     ntraces: usize,
@@ -180,6 +186,9 @@ pub fn cluster(
         .collect()
 }
 
+/// Single-linkage clustering driver: assign each segment to a cluster id by
+/// flood-filling along `segments_overlap` edges. Mirrors Easel's
+/// `esl_cluster_SingleLinkage()` as called from `p7_spensemble_Cluster`.
 fn single_linkage_assignments(
     segments: &[SegmentPair],
     params: &ClusterParams,
@@ -213,6 +222,7 @@ fn single_linkage_assignments(
     (assignments, nclusters)
 }
 
+/// Tracehash hook: dump one accepted cluster candidate (extents and consensus endpoints).
 #[cfg(feature = "tracehash")]
 #[allow(clippy::too_many_arguments)]
 fn trace_cluster_candidate(
@@ -264,7 +274,9 @@ fn trace_cluster_candidate(
     th.finish();
 }
 
-/// Check if two segments overlap sufficiently.
+/// Single-linkage edge predicate: sufficient overlap in both seq and HMM coords,
+/// and either start or end diagonals within `max_diagdiff`. Mirrors C's
+/// `link_spsamples()` in `p7_spensemble.c`.
 fn segments_overlap(a: &SegmentPair, b: &SegmentPair, params: &ClusterParams) -> bool {
     // Sequence overlap
     let seq_ovl = overlap_fraction(a.i, a.j, b.i, b.j, true, params.of_smaller);
@@ -290,7 +302,8 @@ fn segments_overlap(a: &SegmentPair, b: &SegmentPair, params: &ClusterParams) ->
     start_diff <= params.max_diagdiff || end_diff <= params.max_diagdiff
 }
 
-/// Compute overlap fraction between two intervals.
+/// Overlap fraction of two closed intervals, normalized by either the smaller
+/// or larger length (set by `of_smaller`). Returns 0.0 if they don't overlap.
 fn overlap_fraction(
     a_start: usize,
     a_end: usize,
@@ -314,6 +327,8 @@ fn overlap_fraction(
     overlap_len as f32 / denom as f32
 }
 
+/// Pick the leftmost coordinate whose member count meets `threshold` (consensus
+/// start endpoint). Falls back to the most-frequent coord if none qualifies.
 fn left_endpoint<F>(
     members: &[usize],
     segments: &[SegmentPair],
@@ -337,6 +352,8 @@ where
     min_coord + argmax_first(&counts)
 }
 
+/// Pick the rightmost coordinate whose member count meets `threshold` (consensus
+/// end endpoint). Falls back to the most-frequent coord if none qualifies.
 fn right_endpoint<F>(
     members: &[usize],
     segments: &[SegmentPair],
@@ -360,6 +377,7 @@ where
     min_coord + argmax_first(&counts)
 }
 
+/// Index of the maximum element in `values`, breaking ties toward the lowest index.
 fn argmax_first(values: &[usize]) -> usize {
     let mut best = 0usize;
     let mut best_val = values[0];
@@ -376,6 +394,7 @@ fn argmax_first(values: &[usize]) -> usize {
 mod tests {
     use super::*;
 
+    /// Three near-identical segments should cluster into one envelope.
     #[test]
     fn test_single_domain() {
         let segments = vec![
@@ -408,6 +427,7 @@ mod tests {
         assert!(envs[0].posterior >= 0.25);
     }
 
+    /// Two widely separated segment groups should yield two distinct envelopes.
     #[test]
     fn test_two_domains() {
         let segments = vec![

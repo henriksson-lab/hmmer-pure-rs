@@ -1,7 +1,10 @@
 //! Exponential distribution functions.
 //! Direct port of Easel's esl_exponential.c.
 
-/// Survivor function P(X > x).
+/// Survivor function P(X > x), i.e. 1 - CDF, the right-tail probability mass.
+///
+/// Given offset `mu` and decay parameter `lambda`. Returns 1.0 for x < mu;
+/// otherwise exp(-lambda*(x-mu)). Port of Easel `esl_exp_surv`.
 pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 1.0;
@@ -9,7 +12,9 @@ pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     (-lambda * (x - mu)).exp()
 }
 
-/// Log survivor function log P(X > x).
+/// Log survivor function log P(X > x), i.e. log(1 - CDF).
+///
+/// Returns 0.0 for x < mu; otherwise -lambda*(x-mu). Port of `esl_exp_logsurv`.
 pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 0.0;
@@ -17,7 +22,10 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     -lambda * (x - mu)
 }
 
-/// Probability density function P(X = x).
+/// Probability density function P(X = x) for the exponential.
+///
+/// Returns 0.0 for x < mu; otherwise lambda * exp(-lambda*(x-mu)).
+/// Port of Easel `esl_exp_pdf`.
 pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 0.0;
@@ -25,7 +33,10 @@ pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     lambda * (-lambda * (x - mu)).exp()
 }
 
-/// Cumulative distribution function P(X <= x).
+/// Cumulative distribution function P(X <= x) for the exponential.
+///
+/// Returns 0.0 for x < mu. Uses the small-y approximation 1 - exp(-y) ~ y
+/// when y = lambda*(x-mu) is tiny. Port of Easel `esl_exp_cdf`.
 pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 0.0;
@@ -39,7 +50,9 @@ pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
 }
 
 /// Maximum likelihood fit of exponential parameters to complete data.
-/// Returns `(mu, lambda)`.
+///
+/// ML mu is the smallest sample; ML lambda is the reciprocal of the mean
+/// of (x_i - mu). Returns `(mu, lambda)`. Port of `esl_exp_FitComplete`.
 pub fn fit_complete(x: &[f64]) -> (f64, f64) {
     let n = x.len() as f64;
     let mu = x.iter().copied().fold(f64::INFINITY, f64::min);

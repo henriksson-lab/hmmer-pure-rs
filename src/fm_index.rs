@@ -16,7 +16,10 @@ pub struct FmIndex {
 }
 
 impl FmIndex {
-    /// Build an FM-index from a DNA sequence (text mode, uppercase ACGT).
+    /// Build an FM-index over `text` (typically uppercase ACGT, plus appended
+    /// sentinel). Constructs the suffix array via divsufsort, derives the BWT
+    /// from it, and tabulates the cumulative C[] array used for backward
+    /// search. Counterpart to C's `fm_FM_read()` / makehmmerdb construction.
     pub fn build(text: &[u8]) -> Self {
         // Append sentinel
         let mut text_s = text.to_vec();
@@ -55,10 +58,11 @@ impl FmIndex {
         }
     }
 
-    /// Count occurrences of a pattern in the indexed text.
-    /// Returns the number of matches.
+    /// Count exact occurrences of `pattern` in the indexed text by BWT
+    /// backward search. Returns 0 when the pattern does not occur.
+    /// Analog of C's `getSARangeReverse()` interval-shrinking loop.
     pub fn count(&self, pattern: &[u8]) -> usize {
-        if pattern.is_empty() || self.n == 0 {
+        if pattern.is_empty() || self.n == 0 || pattern.contains(&0) {
             return 0;
         }
 
@@ -83,10 +87,12 @@ impl FmIndex {
         hi - lo
     }
 
-    /// Find positions of a pattern in the indexed text.
-    /// Returns a vector of starting positions (0-based).
+    /// Locate all 0-based starting positions of `pattern` in the indexed text.
+    /// Same backward search as `count()`, then maps the resulting suffix-array
+    /// interval back to text positions. Analog of C's `fm_getOriginalPosition()`
+    /// applied across the matching SA range.
     pub fn locate(&self, pattern: &[u8]) -> Vec<usize> {
-        if pattern.is_empty() || self.n == 0 {
+        if pattern.is_empty() || self.n == 0 || pattern.contains(&0) {
             return Vec::new();
         }
 
@@ -104,10 +110,15 @@ impl FmIndex {
             }
         }
 
-        (lo..hi).map(|i| self.sa[i] as usize).collect()
+        (lo..hi)
+            .map(|i| self.sa[i] as usize)
+            .filter(|&pos| pos < self.n)
+            .collect()
     }
 
-    /// Count occurrences of character `ch` in bwt[0..pos].
+    /// Linear-scan implementation of the Occ(ch, pos) function: counts `ch`
+    /// in `bwt[0..pos]`. A real FM-index uses sampled rank tables; this
+    /// minimal port is O(pos) per call.
     fn occ(&self, ch: u8, pos: usize) -> usize {
         self.bwt[..pos].iter().filter(|&&b| b == ch).count()
     }
@@ -139,5 +150,13 @@ mod tests {
         let mut positions = fm.locate(b"AACGT");
         positions.sort();
         assert_eq!(positions, vec![0, 5]);
+    }
+
+    #[test]
+    fn fm_index_does_not_expose_internal_sentinel() {
+        let fm = FmIndex::build(b"ACGT");
+
+        assert_eq!(fm.count(&[0]), 0);
+        assert!(fm.locate(&[0]).is_empty());
     }
 }

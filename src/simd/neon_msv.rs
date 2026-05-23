@@ -7,14 +7,19 @@ use std::arch::aarch64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::OProfile;
 
-/// Result of NEON MSV filter.
+/// Result of the NEON MSV filter: either a finite score or a saturating overflow.
 pub enum NeonMsvResult {
     Ok(f32),
     Overflow,
 }
 
-/// NEON MSV filter using 16x uint8 vectors (same width as SSE2).
-/// Uses the same OProfile byte data as SSE2.
+/// NEON variant of the MSV filter (C: `p7_MSVFilter`), using 16x uint8 vectors.
+///
+/// Calculates an approximation of the MSV score in nats for digital sequence `dsq` of
+/// length `l` using optimized profile `om`. Score may overflow on very high-scoring
+/// sequences but will not underflow. The MSV filter inherently assumes a multihit
+/// local mode and uses its own special state transition scores; the model emission
+/// scores are reused from the SSE2 byte profile (same striped layout, 16-byte width).
 ///
 /// # Safety
 /// Requires NEON support (always available on aarch64).
@@ -84,7 +89,7 @@ pub unsafe fn neon_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonMsvRe
     NeonMsvResult::Ok(sc)
 }
 
-// On non-aarch64 targets, provide a stub
+/// Non-aarch64 stub for [`neon_msv_filter`]; always returns `Ok(-inf)`.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn neon_msv_filter(_dsq: &[Dsq], _l: usize, _om: &OProfile) -> NeonMsvResult {
     NeonMsvResult::Ok(f32::NEG_INFINITY) // NEON not available

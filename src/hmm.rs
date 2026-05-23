@@ -69,13 +69,13 @@ pub struct Hmm {
     /// Alphabet size (K)
     pub abc_k: usize,
 
-    /// Transition probabilities: t[0..M][0..6]
-    /// t[0] = begin transitions, t[1..M] = node transitions
+    /// Transition probabilities: `t[0..M][0..6]`
+    /// `t[0]` = begin transitions, `t[1..M]` = node transitions
     pub t: Vec<[f32; NTRANSITIONS]>,
-    /// Match emission probabilities: mat[0..M][0..K-1]
-    /// mat[0] is unused (begins at 1)
+    /// Match emission probabilities: `mat[0..M][0..K-1]`
+    /// `mat[0]` is unused (begins at 1)
     pub mat: Vec<Vec<f32>>,
-    /// Insert emission probabilities: ins[0..M][0..K-1]
+    /// Insert emission probabilities: `ins[0..M][0..K-1]`
     pub ins: Vec<Vec<f32>>,
 
     // Annotation
@@ -107,7 +107,11 @@ pub struct Hmm {
 }
 
 impl Hmm {
-    /// Create a new HMM with the given model length and alphabet size.
+    /// Allocate a new P7_HMM with `m` nodes for an alphabet of size `abc_k`.
+    ///
+    /// All transition and emission tables are zeroed; metadata fields are set
+    /// to their "unset" sentinels. Combines the C shell+body allocation:
+    /// counterpart to `p7_hmm_Create()` / `p7_hmm_CreateBody()`.
     pub fn new(m: usize, abc_type: AlphabetType, abc_k: usize) -> Self {
         let t = vec![[0.0f32; NTRANSITIONS]; m + 1];
         let mat = vec![vec![0.0f32; abc_k]; m + 1];

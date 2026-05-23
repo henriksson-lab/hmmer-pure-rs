@@ -5,9 +5,13 @@ use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::*;
 
-/// Generic Viterbi algorithm.
-/// Returns the Viterbi score in nats.
-/// `dsq` is a 1-based digital sequence (dsq[1..=L]).
+/// The Viterbi algorithm: maximum-scoring single-path alignment.
+///
+/// Standard Viterbi DP. Given digital sequence `dsq` (1-based, `dsq[1..=L]`),
+/// profile `gm`, and DP matrix `gx`, returns the Viterbi lod score in nats and
+/// leaves the filled Viterbi matrix in `gx` (so the caller may then recover the
+/// path via `g_trace`). Caller subtracts a null model lod score and converts to
+/// bits. Counterpart of `p7_GViterbi`.
 pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
     let esc: f32 = if gm.is_local() {

@@ -13,6 +13,9 @@ pub const PXC: usize = 4;
 const NXCELLS: usize = 5;
 const DP_CELLS_PER_K: usize = 3; // M, I, D
 
+/// Return the in-slice offset (in `f32` elements) needed to reach the next
+/// 16-byte aligned boundary inside `v`. Used to align striped DP storage for
+/// `_mm_load_ps` / `_mm_store_ps`.
 fn aligned_f32_offset(v: &[f32]) -> usize {
     let misalignment = (v.as_ptr() as usize) & 15;
     if misalignment == 0 {
@@ -22,6 +25,8 @@ fn aligned_f32_offset(v: &[f32]) -> usize {
     }
 }
 
+/// Allocate a `Vec<f32>` of at least `len` usable elements plus 4 cells of
+/// slack so the returned offset gives a 16-byte aligned interior pointer.
 fn aligned_striped_storage(len: usize) -> (Vec<f32>, usize) {
     if len == 0 {
         return (Vec::new(), 0);
@@ -41,7 +46,7 @@ pub struct ProbMx {
     pub xmx: Vec<f32>,
     /// Cumulative log-scale per position (f64 for precision)
     pub scale: Vec<f64>,
-    /// Per-row scale factor, matching P7_OMX xmx[p7X_SCALE].
+    /// Per-row scale factor, matching `P7_OMX xmx[p7X_SCALE]`.
     pub row_scale: Vec<f32>,
     /// Full DP rows (optional): dp[(l+1) * (m+1) * 3]
     /// dp[i * row_width + k * 3 + s] for M(0)/I(1)/D(2) at position i, node k.
@@ -58,7 +63,9 @@ pub struct ProbMx {
 }
 
 impl ProbMx {
-    /// Create parser-mode ProbMx (specials + scale only, no DP rows).
+    /// Allocate a parser-mode `ProbMx` (specials + per-row scale only, no DP rows).
+    /// Counterpart of `p7_omx_Create(allocM, 0, L)` in C — used by `*Parser()`
+    /// kernels that only keep special-state scores.
     pub fn new(l: usize) -> Self {
         ProbMx {
             m: 0,
@@ -77,7 +84,9 @@ impl ProbMx {
         }
     }
 
-    /// Create full-matrix ProbMx (specials + scale + DP rows).
+    /// Allocate a full-matrix `ProbMx` (specials + scale + striped DP rows).
+    /// Counterpart of `p7_omx_Create(M, L, L)` — sized for posterior decoding,
+    /// optimal accuracy, or null2 work.
     pub fn new_full(m: usize, l: usize) -> Self {
         let row_width = (m + 1) * DP_CELLS_PER_K;
         let q = m.div_ceil(4);
@@ -101,6 +110,7 @@ impl ProbMx {
     }
 
     /// Reuse this matrix as parser-only storage (specials + scales, no DP rows).
+    /// Analogue of `p7_omx_Reuse` + a parser-shape `p7_omx_GrowTo` in C.
     pub fn resize_parser(&mut self, l: usize) {
         self.m = 0;
         self.l = l;
@@ -118,7 +128,10 @@ impl ProbMx {
         self.striped_dp_offset = 0;
     }
 
-    /// Reuse this matrix as a full parser DP matrix.
+    /// Reuse this matrix as a full DP matrix sized for `(m, l)`.
+    /// Analogue of `p7_omx_Reuse` + `p7_omx_GrowTo(M, L, L)`. Hot Forward/
+    /// Backward paths overwrite every active DP row; the same-size reuse
+    /// fast-path avoids a full memset but always zeros the row-0 invariant.
     pub fn resize_full(&mut self, m: usize, l: usize) {
         let row_width = (m + 1) * DP_CELLS_PER_K;
         let q = m.div_ceil(4);
@@ -150,11 +163,13 @@ impl ProbMx {
         }
     }
 
+    /// Read special-state value `s` at row `i` (E/N/J/B/C).
     #[inline]
     pub fn xmx(&self, i: usize, s: usize) -> f32 {
         self.xmx[i * NXCELLS + s]
     }
 
+    /// Write special-state value `s` at row `i`.
     #[inline]
     pub fn set_xmx(&mut self, i: usize, s: usize, val: f32) {
         self.xmx[i * NXCELLS + s] = val;
@@ -240,8 +255,12 @@ impl ProbMx {
         }
     }
 
-    /// Write a SIMD DP row (de-striped from __m128 vectors) into position i.
-    /// `dp_simd` is a slice of q*3 __m128 vectors (M/D/I interleaved per stripe).
+    /// Write a SIMD DP row (`q*3` `__m128` vectors, M/D/I interleaved per
+    /// stripe) into row `i` of the striped storage.
+    ///
+    /// # Safety
+    /// `dp_simd` must hold exactly `q * 3` aligned vectors, and row `i` must
+    /// be allocated.
     #[cfg(target_arch = "x86_64")]
     pub unsafe fn write_simd_row(
         &mut self,
@@ -263,6 +282,7 @@ impl ProbMx {
         }
     }
 
+    /// Zero out the entire striped DP row `i`.
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn zero_simd_row(&mut self, i: usize) {
@@ -271,6 +291,10 @@ impl ProbMx {
         self.striped_dp[row_base..row_end].fill(0.0);
     }
 
+    /// Aligned `*mut f32` to the start of striped DP row `i`.
+    ///
+    /// # Safety
+    /// Row `i` must be allocated.
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub unsafe fn striped_row_ptr(&mut self, i: usize) -> *mut f32 {
@@ -279,18 +303,22 @@ impl ProbMx {
             .add(self.striped_dp_offset + i * self.striped_row_width)
     }
 
+    /// Number of `f32` cells per striped DP row (== `q * 3 * 4`).
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn striped_row_width(&self) -> usize {
         self.striped_row_width
     }
 
+    /// Number of striped stripes `q = ceil(M/4)`.
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn q_count(&self) -> usize {
         self.q
     }
 
+    /// Sum the lanes of `state` at row `i` over only the `k <= M` cells.
+    /// Tracehash-only helper used to diff striped rows against the C output.
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_sum(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
@@ -307,6 +335,8 @@ impl ProbMx {
         sum
     }
 
+    /// Sum every lane (including padding past `M`) of `state` at row `i`.
+    /// Tracehash-only.
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_sum_all_lanes(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
@@ -320,6 +350,8 @@ impl ProbMx {
         sum
     }
 
+    /// Return the 4-lane stripe `(qi, state)` at row `i` as a plain array.
+    /// Tracehash-only.
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_vector(&self, i: usize, state: usize, qi: usize) -> [f32; 4] {
         let off = self.striped_dp_offset
@@ -334,6 +366,8 @@ impl ProbMx {
         ]
     }
 
+    /// Sum `state` lanes over a stripe range `[q_start, q_end)` at row `i`,
+    /// keeping only `k <= M` cells. Tracehash-only.
     #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
     pub fn striped_row_state_q_range_sum(
         &self,
@@ -358,10 +392,13 @@ impl ProbMx {
     }
 }
 
-/// Domain decoding from probability-space Forward/Backward matrices.
-/// Port of p_domain_decoding() — computes btot, etot, mocc using the
-/// per-position specials and cumulative scales from parser-mode SIMD.
+/// Posterior decoding of domain location from parser-mode Fwd/Bck.
 ///
+/// Ports C `p7_DomainDecoding()` (SSE decoding.c): given parser-mode SIMD
+/// Forward `fwd` and Backward `bck`, returns the running `btot`, `etot`, and
+/// per-position match-occupancy `mocc[i] = 1 - njcp` arrays. Uses per-row
+/// scale factors from `fwd.row_scale` and the `[n_loop, j_loop, c_loop]`
+/// transition floats supplied in `njc_loop`.
 pub fn p_domain_decoding(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -376,6 +413,9 @@ pub fn p_domain_decoding(
     (btot, etot, mocc)
 }
 
+/// In-place variant of `p_domain_decoding` that reuses caller-allocated
+/// `btot`, `etot`, `mocc` buffers — same algorithm and outputs as
+/// `p7_DomainDecoding()`.
 pub fn p_domain_decoding_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -472,12 +512,15 @@ pub fn p_domain_decoding_reuse(
     }
 }
 
-/// Posterior decoding from full-matrix probability-space Forward+Backward.
-/// Computes normalized per-state posteriors, then null2 correction.
-/// The per-row normalization corrects for any absolute magnitude differences
-/// between the SIMD Backward and the true values.
+/// Compute the null2 log-correction for a domain envelope from full-matrix
+/// probability-space Forward+Backward.
 ///
-/// Port of p_decoding() + null2_correction() from old codebase.
+/// Wrapper around `p_null2_odds_from_pmx` that converts to odds, exponentiates
+/// the residue log-odds, and returns `sum_{i=ienv..=jenv} ln(null2[dsq[i]])`.
+/// The per-row normalization handles absolute-magnitude differences between
+/// the SIMD Backward and the true values. Conceptually ports
+/// `p7_Null2_ByExpectation()` + the trailing correction integration done in
+/// `p7_domaindef`.
 pub fn p_null2_from_pmx(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -501,6 +544,9 @@ pub fn p_null2_from_pmx(
     correction
 }
 
+/// Convert a profile's `rsc[x][node*P7P_NR + P7P_MSC]` log-odds emissions to
+/// linear odds, packed into a flat `K * (M+1)` array indexed as
+/// `odds[x * (M+1) + node]`. Helper for the null2 SSE path.
 pub fn match_odds_from_rsc(rsc: &[Vec<f32>], k: usize, m: usize) -> Vec<f32> {
     let p7p_nr = 2usize;
     let width = m + 1;
@@ -519,10 +565,14 @@ pub fn match_odds_from_rsc(rsc: &[Vec<f32>], k: usize, m: usize) -> Vec<f32> {
     odds
 }
 
-/// Posterior decoding from full-matrix probability-space Forward+Backward into
-/// a generic matrix. This mirrors the SSE `p7_Decoding()` path, not generic
-/// `p7_GDecoding()`: rows are not renormalized, and a Backward matrix that was
-/// scaled with Forward row scales uses a constant scale product.
+/// Posterior decoding (residue assignment) into a generic `Gmx` from
+/// probability-space SIMD Forward + Backward.
+///
+/// Ports the SSE `p7_Decoding()` (not the generic `p7_GDecoding()`): rows
+/// are not renormalized; a Backward matrix that was scaled with Forward row
+/// scales reuses `scaleproduct` unchanged. D-state posteriors are zeroed
+/// (D is not a residue assignment). Dispatches to a striped fast path when
+/// both input matrices have striped DP storage.
 pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3], pp: &mut Gmx) {
     if !fwd.striped_dp.is_empty() && !bck.striped_dp.is_empty() {
         p_decoding_to_gmx_striped(fwd, bck, m, njc_loop, pp);
@@ -584,6 +634,8 @@ pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3
     }
 }
 
+/// Striped-input fast path for `p_decoding_to_gmx`: scatters striped lanes
+/// `(qi, lane) -> k = 1 + qi + lane * q` directly into the dense Gmx storage.
 fn p_decoding_to_gmx_striped(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -681,7 +733,13 @@ fn p_decoding_to_gmx_striped(
     }
 }
 
-/// Compute null2 odds ratios from full-matrix probability-space Forward+Backward.
+/// Compute null2 odds ratios from full-matrix probability-space Fwd/Bck.
+///
+/// Ports `p7_Null2_ByExpectation()` (SSE null2.c): accumulates per-state
+/// expected usage across the domain envelope `[1..L]`, normalizes by length,
+/// and produces null2 odds `null2[x] = (sum_k exp_m[k] * match_odds[x,k]) +
+/// insert_total + xfactor` for each canonical residue `x`. Dispatches to a
+/// striped-DP fast path when available.
 pub fn p_null2_odds_from_pmx(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -779,6 +837,9 @@ pub fn p_null2_odds_from_pmx(
     null2
 }
 
+/// In-place variant of `p_null2_odds_from_pmx` that reuses caller-allocated
+/// `null2`, `exp_m`, `exp_i` scratch buffers. Dispatches to the striped fast
+/// path when both inputs have striped DP storage.
 pub fn p_null2_odds_from_pmx_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -800,6 +861,12 @@ pub fn p_null2_odds_from_pmx_reuse(
     *null2 = p_null2_odds_from_pmx(fwd, bck, m, k, match_odds, njc_loop);
 }
 
+/// Compute null2 odds directly from a striped posterior matrix `pp`.
+///
+/// Closer to C `p7_Null2_ByExpectation`: uses the (already-decoded) posterior
+/// matrix to accumulate `exp_m`/`exp_i` over rows 1..L (special handling for
+/// row 1 to mirror the C memcpy seeding), normalizes by `1/L`, and forms
+/// `null2[x] = sum_q (exp_m[qi] * rfv[x][qi] + exp_i[qi]) + xfactor`.
 #[cfg(target_arch = "x86_64")]
 pub fn p_null2_odds_from_posteriors_reuse(
     pp: &ProbMx,
@@ -897,6 +964,13 @@ pub fn p_null2_odds_from_posteriors_reuse(
     }
 }
 
+/// Fused decode + null2-by-expectation directly from striped Fwd/Bck without
+/// materializing a full posterior matrix.
+///
+/// Equivalent end-state to `p7_Decoding()` followed by `p7_Null2_ByExpectation`,
+/// but accumulates `exp_m`/`exp_i` and special-state expectations row-by-row
+/// in-place. Has SSE and scalar-fallback bodies. Uses `scaleproduct` rather
+/// than `exp(scale)`, matching the SSE convention used elsewhere here.
 pub fn p_null2_odds_from_omx_expectation_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -1086,6 +1160,8 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
     }
 }
 
+/// Compute null2 odds from an already-built generic posterior matrix `pp`.
+/// Convenience wrapper around `p_null2_odds_from_gmx_reuse`.
 pub fn p_null2_odds_from_gmx(pp: &Gmx, m: usize, k: usize, match_odds: &[f32]) -> Vec<f32> {
     let mut null2 = Vec::new();
     let mut exp_m = Vec::new();
@@ -1094,6 +1170,12 @@ pub fn p_null2_odds_from_gmx(pp: &Gmx, m: usize, k: usize, match_odds: &[f32]) -
     null2
 }
 
+/// Compute null2 odds from a generic posterior matrix `pp` into caller-owned
+/// `null2`/`exp_m`/`exp_i` buffers.
+///
+/// Accumulates the M and I posteriors with striped indexing (so the result
+/// is bit-identical to the striped paths), then forms the same final
+/// `null2[x] = sum_k exp_m[k] * match_odds[x, k] + insert_total + xfactor`.
 pub fn p_null2_odds_from_gmx_reuse(
     pp: &Gmx,
     m: usize,
@@ -1178,6 +1260,9 @@ pub fn p_null2_odds_from_gmx_reuse(
     }
 }
 
+/// Striped fast path for `p_null2_odds_from_pmx`: walks the striped Fwd/Bck
+/// DP rows directly, performing per-row denominator normalization before
+/// accumulating into `exp_m`, `exp_i`, and the special-state expectations.
 fn p_null2_odds_from_striped_pmx(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -1307,6 +1392,8 @@ fn p_null2_odds_from_striped_pmx(
     }
 }
 
+/// Reuse-buffer variant of `p_null2_odds_from_striped_pmx`. Outputs are
+/// identical; only differs in that `null2`, `exp_m`, `exp_i` are passed in.
 fn p_null2_odds_from_striped_pmx_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -1440,7 +1527,8 @@ fn p_null2_odds_from_striped_pmx_reuse(
     }
 }
 
-/// Old p_null2_correction without per-row normalization (incorrect).
+/// Historical (incorrect) null2 correction that omits the per-row
+/// normalization. Retained for reference; not called by current pipeline.
 #[allow(dead_code)]
 fn p_null2_correction(
     fwd: &ProbMx,

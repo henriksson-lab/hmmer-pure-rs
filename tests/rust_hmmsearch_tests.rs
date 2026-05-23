@@ -455,6 +455,18 @@ fn test_fn3_multi_domain() {
 }
 
 #[test]
+fn hmmsearch_prints_query_accession_and_description() {
+    let (stdout, _tbl) = run_hmmsearch(
+        &test_path("hmmer/tutorial/fn3.hmm"),
+        &test_path("hmmer/tutorial/7LESS_DROME"),
+        &[],
+    );
+
+    assert!(stdout.contains("Accession:   PF00041.13"));
+    assert!(stdout.contains("Description: Fibronectin type III domain"));
+}
+
+#[test]
 fn test_fn3_multi_domain_nonull2_zeroes_sequence_bias_but_keeps_domain_structure() {
     let (stdout_default, _tbl_default, domtbl_default) = run_hmmsearch_dom(
         &test_path("hmmer/tutorial/fn3.hmm"),

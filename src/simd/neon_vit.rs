@@ -6,12 +6,22 @@ use std::arch::aarch64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
+/// Result of the NEON Viterbi filter: either a finite score or a saturating overflow.
 pub enum NeonVitResult {
     Ok(f32),
     Overflow,
 }
 
-/// NEON Viterbi filter — same algorithm as SSE2 but with ARM intrinsics.
+/// NEON variant of the Viterbi filter (C: `p7_ViterbiFilter`), using 8x int16 vectors.
+///
+/// Calculates an approximation of the Viterbi score in nats for digital sequence `dsq`
+/// of length `l` using optimized profile `om`. Score may overflow on extremely
+/// high-scoring sequences but will not underflow. The model must be in a local
+/// alignment mode (the only mode that guarantees the limited dynamic range needed for
+/// reduced-precision signed-word arithmetic).
+///
+/// Striped SIMD Viterbi after Farrar (2007), in 16-bit signed-word precision, with the
+/// same algorithm as the SSE2 reference but expressed in ARM NEON intrinsics.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonVitResult {
@@ -134,6 +144,7 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
     }
 }
 
+/// Non-aarch64 stub for [`neon_viterbi_filter`]; always returns `Ok(-inf)`.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn neon_viterbi_filter(_dsq: &[Dsq], _l: usize, _om: &OProfile) -> NeonVitResult {
     NeonVitResult::Ok(f32::NEG_INFINITY)

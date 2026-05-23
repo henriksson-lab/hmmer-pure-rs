@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn c_logf(x: f32) -> f32;
 }
 
+/// Bit-exact wrapper around libm `logf` for parity with the C reference.
 #[inline]
 fn c_logf_to_f32(x: f32) -> f32 {
     unsafe { c_logf(x) }
@@ -33,6 +34,8 @@ const RT2: f32 = 0.10; // mocc threshold to end a domain region
 const RT3: f32 = 0.20; // threshold for multi-domain region detection
 const NSAMPLES: usize = 200; // stochastic tracebacks for clustering
 
+/// True if every residue in `dsq[dsq_offset+1 ..= dsq_offset+l]` is a canonical
+/// alphabet code (`< abc_kp`), enabling the fast no-degeneracy SIMD paths.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> bool {
@@ -53,6 +56,8 @@ fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) 
     true
 }
 
+/// Plain serial summation matching the C `for`-loop accumulation order;
+/// used where bit-exact parity with the original is required.
 #[inline(always)]
 fn c_fsum(values: &[f32]) -> f32 {
     let mut sum = 0.0_f32;
@@ -62,6 +67,8 @@ fn c_fsum(values: &[f32]) -> f32 {
     sum
 }
 
+/// Kahan-compensated summation matching Easel's `esl_vec_FSum`, used for the
+/// numerically-stable per-sequence bias accumulation.
 #[inline(always)]
 fn esl_vec_fsum(values: &[f32]) -> f32 {
     let mut sum = 0.0_f32;
@@ -104,6 +111,8 @@ pub(crate) struct DomainSimdScratch {
 
 #[cfg(target_arch = "x86_64")]
 impl DomainSimdScratch {
+    /// Allocate an empty SIMD scratch bundle (matrices/buffers grow on first use).
+    /// Reused across sequences to amortize allocations.
     pub(crate) fn new() -> Self {
         Self {
             fwd_dp: Vec::new(),
@@ -133,6 +142,7 @@ pub(crate) struct DomainSimdScratch {
 
 #[cfg(not(target_arch = "x86_64"))]
 impl DomainSimdScratch {
+    /// Allocate a minimal scratch bundle for the non-x86 (generic) path.
     pub(crate) fn new() -> Self {
         Self {
             pp_gmx: Gmx::new(0, 0),
@@ -141,8 +151,11 @@ impl DomainSimdScratch {
     }
 }
 
-/// Region detection state machine matching C's p7_domaindef_ByPosteriorHeuristics().
-/// Uses btot/etot/mocc arrays to find domain regions.
+/// Region detection state machine extracted from `p7_domaindef_ByPosteriorHeuristics`.
+///
+/// Walks the per-position B/E totals and match-occupancy posteriors, using
+/// thresholds `RT1`/`RT2` to trigger and close domain regions. Returns the
+/// inclusive `(i,j)` sequence-coordinate pairs of each detected region.
 fn find_domain_regions(btot: &[f32], etot: &[f32], mocc: &[f32], l: usize) -> Vec<(usize, usize)> {
     let mut regions = Vec::new();
     let mut i: i64 = -1;
@@ -175,8 +188,13 @@ fn find_domain_regions(btot: &[f32], etot: &[f32], mocc: &[f32], l: usize) -> Ve
     regions
 }
 
-/// Check if a region contains multiple domains.
-/// Matches C's is_multidomain_region().
+/// Trigger for handing a region off to deeper stochastic-traceback analysis.
+///
+/// Mirrors C `is_multidomain_region()`: returns true iff
+/// `max_z [ min(E(z), B(z)) ] >= RT3`, where `E(z)` and `B(z)` are expected
+/// counts of E states before, and B states after, position `z` in `i..=j`.
+/// A high value means the region likely contains an E→B transition and so
+/// encompasses two or more domains.
 fn is_multidomain_region(btot: &[f32], etot: &[f32], i: usize, j: usize) -> bool {
     let mut max = -1.0_f32;
     for z in i..=j {
@@ -197,6 +215,7 @@ fn is_multidomain_region(btot: &[f32], etot: &[f32], i: usize, j: usize) -> bool
     max >= RT3
 }
 
+/// tracehash: record one detected domain region and its multidomain flag.
 #[cfg(feature = "tracehash")]
 fn trace_domain_region(l: usize, m: usize, ordinal: usize, i: usize, j: usize, is_multi: bool) {
     let mut th = tracehash::th_call!("domain_region");
@@ -209,6 +228,7 @@ fn trace_domain_region(l: usize, m: usize, ordinal: usize, i: usize, j: usize, i
     th.finish();
 }
 
+/// tracehash: summary of a stochastic-traceback clustering pass for one region.
 #[cfg(feature = "tracehash")]
 fn trace_domain_cluster_summary(
     l: usize,
@@ -228,6 +248,7 @@ fn trace_domain_cluster_summary(
     th.finish();
 }
 
+/// tracehash: record one envelope candidate (clustered or single-domain region).
 #[cfg(feature = "tracehash")]
 fn trace_domain_envelope_candidate(
     l: usize,
@@ -251,6 +272,15 @@ fn trace_domain_envelope_candidate(
     th.finish();
 }
 
+/// SIMD-optimized null2 odds ratios for a trace segment. Port of C
+/// `p7_GNull2_ByTrace`, operating on a striped `OProfile` instead of a
+/// generic profile/Gmx.
+///
+/// Counts state usages over `tr[zstart..=zend]` (residue-emitting positions
+/// only), normalizes to expected per-residue usage, and produces the
+/// length-`om.abc_k` odds vector f'(x)/f(x) used to bias-correct the domain
+/// envelope. The model configuration is irrelevant; only emission odds are
+/// used. Returns an all-ones vector if the segment emits no residues.
 #[cfg(all(target_arch = "x86_64"))]
 fn null2_by_trace_optimized(
     om: &crate::simd::oprofile::OProfile,
@@ -315,6 +345,7 @@ fn null2_by_trace_optimized(
     null2
 }
 
+/// tracehash: record one stochastic-trace null2 segment within a region.
 #[cfg(feature = "tracehash")]
 fn trace_region_null2_segment(
     model_len: usize,
@@ -346,6 +377,7 @@ fn trace_region_null2_segment(
     th.finish();
 }
 
+/// tracehash: emit per-position btot/etot/mocc arrays after domain decoding.
 #[cfg(feature = "tracehash")]
 fn trace_domain_decoding_summary(
     dsq: &[Dsq],
@@ -369,6 +401,7 @@ fn trace_domain_decoding_summary(
     th.finish();
 }
 
+/// tracehash: emit a row-sampled summary of the multihit Forward matrix for one region.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_region_forward_summary(
     dsq: &[Dsq],
@@ -422,6 +455,7 @@ fn trace_region_forward_summary(
     th.finish();
 }
 
+/// tracehash: dump per-row specials (E/N/J/B/C) and row scales from a Forward ProbMx.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_specials_summary(
     dsq: &[Dsq],
@@ -444,6 +478,7 @@ fn trace_pmx_forward_specials_summary(
     th.finish();
 }
 
+/// tracehash: dump unscaled per-row specials from a Forward ProbMx (no row scales).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_states_summary(
     dsq: &[Dsq],
@@ -465,6 +500,8 @@ fn trace_pmx_forward_states_summary(
     th.finish();
 }
 
+/// tracehash: dump the per-row scale factors from a Forward ProbMx, with extra
+/// bit-level detail at known divergence-prone lengths.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_scales_summary(
     dsq: &[Dsq],
@@ -494,6 +531,7 @@ fn trace_pmx_forward_scales_summary(
     }
 }
 
+/// tracehash: per-row forward specials quantized to 1e-5 for fuzzy parity checks.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_states_q1e5_summary(
     dsq: &[Dsq],
@@ -515,6 +553,7 @@ fn trace_pmx_forward_states_q1e5_summary(
     th.finish();
 }
 
+/// tracehash: emit quantized forward specials at one anchor row, tagged by name.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_anchor_q1e5(
     name: &'static str,
@@ -555,6 +594,9 @@ fn trace_pmx_forward_anchor_q1e5(
     th.finish();
 }
 
+/// tracehash: emit quantized forward specials at one anchor row during
+/// per-envelope rescoring (carries envelope context to disambiguate from
+/// the whole-sequence forward dumps).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_score_domain_forward_anchor_q1e5(
     name: &'static str,
@@ -603,6 +645,10 @@ fn trace_score_domain_forward_anchor_q1e5(
     th.finish();
 }
 
+/// tracehash: emit the full battery of envelope-forward anchor/lane/recurrence
+/// traces. Covers fixed anchor rows (0,1,2,4,8..64), per-row part dumps
+/// (E/N/J/B/C/scale at rows 14..17), per-lane row-17 lane sums, and a
+/// detailed recurrence trace at (row=15, k=15) for divergence triangulation.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_score_domain_forward_anchors_q1e5(
     seq_len: usize,
@@ -1243,6 +1289,8 @@ fn trace_score_domain_forward_anchors_q1e5(
     }
 }
 
+/// tracehash: emit each forward special (E/N/J/B/C) and scale separately for
+/// rows 17 and 19, producing one keyed record per component for finer diffs.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_row_parts_q1e5(
     row: usize,
@@ -1306,11 +1354,15 @@ fn trace_pmx_forward_row_parts_q1e5(
     th.finish();
 }
 
+/// tracehash helper: index of the first row whose scale factor exceeds 1.0
+/// (i.e. the first row that was renormalized during forward).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn first_forward_scale_row(l: usize, pmx: &crate::simd::probmx::ProbMx) -> Option<usize> {
     (0..=l).find(|&pos| pmx.row_scale[pos] > 1.0)
 }
 
+/// tracehash: summary statistics over the forward scaling events
+/// (count, first row, last row, summed log-scale).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_forward_scale_events_summary(
     dsq: &[Dsq],
@@ -1343,6 +1395,7 @@ fn trace_pmx_forward_scale_events_summary(
     th.finish();
 }
 
+/// tracehash: dump per-row specials and row scales from a Backward ProbMx.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_specials_summary(
     dsq: &[Dsq],
@@ -1365,6 +1418,7 @@ fn trace_pmx_backward_specials_summary(
     th.finish();
 }
 
+/// tracehash: dump unscaled per-row backward specials (no row scales).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_states_summary(
     dsq: &[Dsq],
@@ -1386,6 +1440,7 @@ fn trace_pmx_backward_states_summary(
     th.finish();
 }
 
+/// tracehash: dump the per-row scale factors from a Backward ProbMx.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_scales_summary(
     dsq: &[Dsq],
@@ -1403,6 +1458,7 @@ fn trace_pmx_backward_scales_summary(
     th.finish();
 }
 
+/// tracehash: per-row backward specials quantized to 1e-5 for fuzzy parity checks.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_states_q1e5_summary(
     dsq: &[Dsq],
@@ -1424,6 +1480,7 @@ fn trace_pmx_backward_states_q1e5_summary(
     th.finish();
 }
 
+/// tracehash: emit quantized backward specials at one anchor row, tagged by name.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_anchor_q1e5(
     name: &'static str,
@@ -1458,6 +1515,8 @@ fn trace_pmx_backward_anchor_q1e5(
     th.finish();
 }
 
+/// tracehash: emit each backward special (E/N/J/B/C) and scale separately
+/// for rows 0 and 1, producing one keyed record per component.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_pmx_backward_row_parts_q1e5(
     row: usize,
@@ -1521,6 +1580,10 @@ fn trace_pmx_backward_row_parts_q1e5(
     th.finish();
 }
 
+/// Apply null2 odds ratios across an envelope. For each position in `ienv..=jenv`,
+/// look up `log f'(x)/f(x)` for the residue (with degeneracy handling) and
+/// accumulate into `n2sc[pos]` and the per-domain `dom_correction` total.
+/// Equivalent to the inner null2 score loop inside C `rescore_isolated_domain`.
 fn add_null2_correction(
     null2_arr: &[f32],
     abc: &Alphabet,
@@ -1544,6 +1607,10 @@ fn add_null2_correction(
     }
 }
 
+/// Per-residue `log f'(x)/f(x)` lookup with degenerate-code handling.
+/// Returns the pre-log odds from `log_null2` for canonical codes, 0 for
+/// gaps/missing/nonresidue, and the log of the averaged odds across the
+/// resolved canonical residues for ambiguity codes.
 fn null2_odds_for_code(null2_arr: &[f32], log_null2: &[f32; 256], abc: &Alphabet, x: usize) -> f32 {
     if x < null2_arr.len() {
         return log_null2[x];
@@ -1564,6 +1631,9 @@ fn null2_odds_for_code(null2_arr: &[f32], log_null2: &[f32; 256], abc: &Alphabet
     c_logf_to_f32(odds / n as f32)
 }
 
+/// Per-residue null2 odds ratio (linear, not log) with degenerate-code
+/// handling. Used in the multidomain region path where ratios are
+/// accumulated across many stochastic traces before being log-summarized.
 fn null2_ratio_for_code(null2_arr: &[f32], abc: &Alphabet, x: usize) -> f32 {
     if x < null2_arr.len() {
         return null2_arr[x];
@@ -1584,10 +1654,24 @@ fn null2_ratio_for_code(null2_arr: &[f32], abc: &Alphabet, x: usize) -> f32 {
     odds / n as f32
 }
 
-/// Score a domain envelope: Forward for score, Viterbi for traceback,
-/// posterior decoding for PP annotation and null2 bias.
-/// `seq_len` is the full sequence length (for null model and length correction).
-/// `bg_f` is the background frequencies for the alphabet.
+/// Score and align a single isolated domain envelope. Port of C
+/// `rescore_isolated_domain` from `p7_domaindef.c`.
+///
+/// Given the envelope coordinates `ienv..=jenv` of `dsq` and a unilocal
+/// model, computes:
+///   - Forward score over the envelope (per-domain bit score base);
+///   - Backward and posterior decoding for PP annotation and null2 odds;
+///   - Optimal-accuracy traceback for the alignment;
+///   - Null2 bias correction (skipped when `null2_is_done`).
+///
+/// SIMD path (when available) reuses scratch buffers from `simd_scratch`;
+/// the generic fallback uses Gmx matrices. When `long_target` is set, the
+/// nhmmer-specific reparameterization (envelope-local background, rest
+/// length set to envelope length) is applied to the optimized profile,
+/// mirroring C `reparameterize_model()`.
+///
+/// `seq_len` is the full sequence length (drives the null-model length
+/// correction); `null_sc` is the per-sequence null log score from `p7_bg`.
 fn score_domain_envelope(
     dsq: &[Dsq],
     seq_len: usize,
@@ -2542,6 +2626,8 @@ fn score_domain_envelope(
     domain
 }
 
+/// tracehash: top-level summary of one `define_domains` call (counts and
+/// expected-domain / bias values).
 #[cfg(feature = "tracehash")]
 fn trace_define_domains_summary(
     l: usize,
@@ -2564,9 +2650,30 @@ fn trace_define_domains_summary(
     th.finish();
 }
 
-/// Run domain definition on a sequence that passed Forward filter.
-/// Port of p7_domaindef_ByPosteriorHeuristics().
-/// Returns (domains, nexpected, simple_seq_bias_nats, pipeline_seq_bias_nats, stats).
+/// Define domains in a sequence using posterior probability heuristics.
+/// Port of C `p7_domaindef_ByPosteriorHeuristics()` in `p7_domaindef.c`.
+///
+/// Pipeline:
+///   1. Domain decoding produces per-position btot/etot/mocc arrays
+///      (SIMD `p_domain_decoding_reuse` when available; generic
+///      `domain_decoding` otherwise).
+///   2. Region detection via `find_domain_regions` with `RT1`/`RT2`.
+///   3. For each region, `is_multidomain_region` (threshold `RT3`)
+///      decides between a direct single-envelope rescore and a
+///      stochastic-traceback clustering pass (`NSAMPLES` samples,
+///      `spensemble::cluster`).
+///   4. Each envelope is scored and aligned via `score_domain_envelope`.
+///
+/// Caller may supply a pre-computed Forward parser matrix and score in
+/// `fwd_pmx_input`/`fwd_sc_input`; otherwise they are recomputed. The
+/// `long_target` flag enables the nhmmer-specific code paths inside
+/// envelope rescoring. `seed` initializes the stochastic-trace RNG for
+/// reproducibility.
+///
+/// Returns `(domains, nexpected, seq_bias_simple_nats,
+/// seq_bias_pipeline_nats, stats)`; the two seq-bias values use the
+/// C-equivalent sequential sum and Easel's Kahan-compensated sum
+/// respectively.
 pub(crate) fn define_domains(
     dsq: &[Dsq],
     l: usize,

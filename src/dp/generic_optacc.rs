@@ -5,6 +5,11 @@ use crate::dp::gmx::*;
 use crate::profile::*;
 use crate::trace::{State, Trace};
 
+/// Precomputed transition "delta" factors for optimal-accuracy DP.
+///
+/// Each `tdelta` is 1.0 for a finite transition and a tiny positive (`MIN_POSITIVE`)
+/// for `-INFINITY`, used to multiplicatively suppress impossible paths while
+/// keeping the recursion in probability space.
 pub struct OptAccTDelta {
     td: Vec<[f32; P7P_NTRANS]>,
     x_n_loop: f32,
@@ -18,6 +23,7 @@ pub struct OptAccTDelta {
 }
 
 impl OptAccTDelta {
+    /// Precompute the per-transition delta factors from a profile.
     pub fn from_profile(gm: &Profile) -> Self {
         let mut td = vec![[0.0_f32; P7P_NTRANS]; gm.m + 1];
         for (k, row) in td.iter_mut().enumerate().take(gm.m + 1) {
@@ -40,13 +46,18 @@ impl OptAccTDelta {
     }
 }
 
-/// Run optimal accuracy DP using the posterior probability matrix.
-/// Returns the OA score (expected number of correctly aligned residues).
+/// Optimal accuracy decoding: fill step.
+///
+/// Fills DP matrix `ox` for the OA algorithm of Kall et al. (2005), using a
+/// previously computed posterior decoding matrix `pp` for profile `gm`.
+/// Returns the OA score: the expected number of correctly decoded positions
+/// in the target sequence (≤ L). Counterpart of `p7_GOptimalAccuracy`.
 pub fn g_optimal_accuracy(gm: &Profile, pp: &Gmx, ox: &mut Gmx) -> f32 {
     let deltas = OptAccTDelta::from_profile(gm);
     g_optimal_accuracy_with_deltas(gm, pp, ox, &deltas)
 }
 
+/// OA fill with caller-provided precomputed transition deltas (avoids reallocation).
 pub fn g_optimal_accuracy_with_deltas(
     gm: &Profile,
     pp: &Gmx,
@@ -191,8 +202,11 @@ pub fn g_optimal_accuracy_with_deltas(
     }
 }
 
-/// Trace back an optimal-accuracy alignment from an OA DP matrix.
-/// Port of generic_optacc.c p7_GOATrace().
+/// Optimal accuracy decoding: traceback.
+///
+/// Recovers the OA alignment from a filled OA matrix `ox` and the posterior
+/// matrix `pp`, returning a `Trace` annotated for posterior-probability
+/// labelling. Counterpart of `p7_GOATrace`.
 pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
     let mut tr = Trace::new();
     let mut i = ox.l;
@@ -246,6 +260,8 @@ pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
     tr
 }
 
+/// Map a log-space transition score to its OA multiplicative delta:
+/// finite -> 1.0, `-INFINITY` -> tiny positive (suppresses impossible path).
 #[inline]
 fn tdelta(tsc: f32) -> f32 {
     if tsc == f32::NEG_INFINITY {
@@ -255,6 +271,7 @@ fn tdelta(tsc: f32) -> f32 {
     }
 }
 
+/// Branchless max for `f32` (no NaN handling); used in hot OA inner loop.
 #[inline]
 fn cmax(a: f32, b: f32) -> f32 {
     if a > b {
@@ -264,6 +281,7 @@ fn cmax(a: f32, b: f32) -> f32 {
     }
 }
 
+/// OA traceback: predecessor selector for an `M_k` cell at position `i`.
 #[inline]
 fn select_m(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     let paths = [
@@ -276,6 +294,7 @@ fn select_m(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     states[argmax_first(&paths)]
 }
 
+/// OA traceback: predecessor selector for a `D_k` cell.
 #[inline]
 fn select_d(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     let md = tdelta(gm.tsc(k - 1, P7P_MD)) * ox.mmx(i, k - 1);
@@ -287,6 +306,7 @@ fn select_d(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     }
 }
 
+/// OA traceback: predecessor selector for an `I_k` cell at position `i`.
 #[inline]
 fn select_i(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     let mi = tdelta(gm.tsc(k, P7P_MI)) * ox.mmx(i - 1, k);
@@ -298,6 +318,7 @@ fn select_i(gm: &Profile, ox: &Gmx, i: usize, k: usize) -> State {
     }
 }
 
+/// OA traceback: N-state predecessor (S at the start, otherwise N).
 #[inline]
 fn select_n(i: usize) -> State {
     if i == 0 {
@@ -307,6 +328,7 @@ fn select_n(i: usize) -> State {
     }
 }
 
+/// OA traceback: C-state predecessor (C loop vs E move).
 #[inline]
 fn select_c(gm: &Profile, pp: &Gmx, ox: &Gmx, i: usize) -> State {
     let c_loop = tdelta(gm.xsc[P7P_C][P7P_LOOP]) * (ox.xmx(i - 1, P7G_C) + pp.xmx(i, P7G_C));
@@ -318,6 +340,7 @@ fn select_c(gm: &Profile, pp: &Gmx, ox: &Gmx, i: usize) -> State {
     }
 }
 
+/// OA traceback: J-state predecessor (J loop vs E loop).
 #[inline]
 fn select_j(gm: &Profile, pp: &Gmx, ox: &Gmx, i: usize) -> State {
     let j_loop = tdelta(gm.xsc[P7P_J][P7P_LOOP]) * (ox.xmx(i - 1, P7G_J) + pp.xmx(i, P7G_J));
@@ -329,6 +352,9 @@ fn select_j(gm: &Profile, pp: &Gmx, ox: &Gmx, i: usize) -> State {
     }
 }
 
+/// OA traceback: E-state predecessor. For glocal returns `M_M` or `D_M`; for
+/// local scans all `k` to find the max-scoring `M_k`/`D_k`. Writes the chosen
+/// `k` into `ret_k`.
 #[inline]
 fn select_e(gm: &Profile, ox: &Gmx, i: usize, ret_k: &mut usize) -> State {
     if !gm.is_local() {
@@ -359,6 +385,7 @@ fn select_e(gm: &Profile, ox: &Gmx, i: usize, ret_k: &mut usize) -> State {
     smax
 }
 
+/// OA traceback: B-state predecessor (N move vs J move).
 #[inline]
 fn select_b(gm: &Profile, ox: &Gmx, i: usize) -> State {
     let n_move = tdelta(gm.xsc[P7P_N][P7P_MOVE]) * ox.xmx(i, P7G_N);
@@ -370,6 +397,7 @@ fn select_b(gm: &Profile, ox: &Gmx, i: usize) -> State {
     }
 }
 
+/// Return the index of the strict maximum, ties broken to the first occurrence.
 #[inline]
 fn argmax_first(values: &[f32]) -> usize {
     let mut best = 0usize;
@@ -383,7 +411,10 @@ fn argmax_first(values: &[f32]) -> usize {
     best
 }
 
-/// Get posterior probability for a position in the trace.
+/// Look up the posterior probability for a trace position.
+///
+/// Returns the cell of `pp` corresponding to the given state code (M/I emit
+/// from the core matrix; N/C/J from special states; D and anything else 0.0).
 /// Used to annotate each alignment position with its confidence.
 pub fn get_postprob(pp: &Gmx, state: u8, i: usize, k: usize) -> f32 {
     match state {
@@ -398,7 +429,7 @@ pub fn get_postprob(pp: &Gmx, state: u8, i: usize, k: usize) -> f32 {
 }
 
 /// Convert a posterior probability to a display character, matching Easel's
-/// rule: <0 → '.', ≥0.95 → '*', else round-to-nearest digit 0..9.
+/// rule: `<0` -> `.`, `>=0.95` -> `*`, else the nearest digit `0..9`.
 pub fn pp_to_char(pp: f32) -> char {
     if pp < 0.0 {
         '.'

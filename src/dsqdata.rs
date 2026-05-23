@@ -12,7 +12,11 @@ use crate::sequence::Sequence;
 
 const DSQDATA_MAGIC: u32 = 0xD5AD474A;
 
-/// Write a sequence database in binary format.
+/// Write a digital sequence database in this crate's simplified binary format.
+///
+/// Format: magic u32, nseq u64, then per record (name_len u32, name bytes,
+/// n u64, n digital residues). Loosely analogous to Easel's `esl_dsqdata_Write()`,
+/// but uses a single self-contained file rather than the `.dsqi/.dsqm/.dsqs` trio.
 pub fn write_dsqdata(path: &Path, sequences: &[Sequence]) -> HmmerResult<()> {
     let file = std::fs::File::create(path).map_err(HmmerError::Io)?;
     let mut w = BufWriter::new(file);
@@ -25,6 +29,19 @@ pub fn write_dsqdata(path: &Path, sequences: &[Sequence]) -> HmmerResult<()> {
 
     // Write each sequence
     for sq in sequences {
+        if sq.dsq.len() < sq.n + 2 {
+            return Err(HmmerError::Format(format!(
+                "Sequence {} digital data is shorter than declared length {}",
+                sq.name, sq.n
+            )));
+        }
+        if sq.dsq.first() != Some(&DSQ_SENTINEL) || sq.dsq.get(sq.n + 1) != Some(&DSQ_SENTINEL) {
+            return Err(HmmerError::Format(format!(
+                "Sequence {} is missing digital sentinels",
+                sq.name
+            )));
+        }
+
         // Name length + name
         let name_bytes = sq.name.as_bytes();
         w.write_all(&(name_bytes.len() as u32).to_le_bytes())
@@ -40,7 +57,11 @@ pub fn write_dsqdata(path: &Path, sequences: &[Sequence]) -> HmmerResult<()> {
     Ok(())
 }
 
-/// Read sequences from a binary dsqdata file.
+/// Read all sequences from a binary dsqdata file written by `write_dsqdata()`.
+///
+/// Re-adds the leading/trailing DSQ_SENTINEL bytes that are omitted on disk.
+/// Loosely analogous to Easel's `esl_dsqdata_Open()` + `esl_dsqdata_Read()`,
+/// but in a single eager read rather than the threaded chunked reader.
 pub fn read_dsqdata(path: &Path) -> HmmerResult<Vec<Sequence>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut r = BufReader::new(file);
@@ -86,6 +107,13 @@ pub fn read_dsqdata(path: &Path) -> HmmerResult<Vec<Sequence>> {
         });
     }
 
+    let mut trailing = [0u8; 1];
+    if r.read(&mut trailing).map_err(HmmerError::Io)? != 0 {
+        return Err(HmmerError::Format(
+            "Trailing data after dsqdata records".to_string(),
+        ));
+    }
+
     Ok(sequences)
 }
 
@@ -116,5 +144,41 @@ mod tests {
         assert_eq!(read_seqs[0].dsq, seqs[0].dsq);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_dsqdata_rejects_malformed_digital_sequence() {
+        let seqs = vec![Sequence {
+            name: "bad".to_string(),
+            acc: String::new(),
+            desc: String::new(),
+            dsq: vec![DSQ_SENTINEL, 0],
+            n: 3,
+            l: 3,
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.dsqdata");
+        let err = write_dsqdata(&path, &seqs).unwrap_err();
+        assert!(err.to_string().contains("shorter than declared length"));
+    }
+
+    #[test]
+    fn read_dsqdata_rejects_trailing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.dsqdata");
+        std::fs::write(
+            &path,
+            [
+                DSQDATA_MAGIC.to_le_bytes().as_slice(),
+                0u64.to_le_bytes().as_slice(),
+                &[0xff],
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        let err = read_dsqdata(&path).unwrap_err();
+        assert!(err.to_string().contains("Trailing data"));
     }
 }

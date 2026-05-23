@@ -4,9 +4,14 @@
 use crate::dp::gmx::*;
 use crate::profile::*;
 
-/// Compute posterior probabilities from Forward and Backward matrices.
-/// Writes posterior probabilities into `pp`.
-/// Returns the overall Forward score used for normalization.
+/// Posterior decoding of residue assignments from filled Forward/Backward matrices.
+///
+/// For each residue `i = 1..=L` and state, computes the posterior probability that
+/// the state emitted that residue (the sum over `M_{1..M}`, `I_{1..M-1}`, and the
+/// N/C/J loop emissions equals 1.0 for every `i`). Writes results into `pp`;
+/// row `i=0` is unused (left zero). Each row is renormalized to absorb log-sum
+/// table approximation error. Returns the overall Forward score used for
+/// normalization. Counterpart of `p7_GDecoding`.
 pub fn g_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx, pp: &mut Gmx) -> f32 {
     let l = fwd.l;
     let m = gm.m;
@@ -89,8 +94,11 @@ pub fn g_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx, pp: &mut Gmx) -> f32 {
     overall_sc
 }
 
-/// Compute domain occupancy from posterior probability matrix.
-/// Returns a vector `mocc[0..=L]` where `mocc[i]` = P(residue i is in a domain).
+/// Compute per-residue domain occupancy from a posterior probability matrix.
+///
+/// Returns `mocc[0..=L]` where `mocc[i]` = P(residue `i` is emitted by the
+/// core model) = sum of `MMX(i,k) + IMX(i,k)` over all `k`. Helper used by
+/// downstream domain decoding/parsing.
 pub fn domain_occupancy(pp: &Gmx) -> Vec<f32> {
     let l = pp.l;
     let m = pp.m;
@@ -107,13 +115,15 @@ pub fn domain_occupancy(pp: &Gmx) -> Vec<f32> {
     mocc
 }
 
-/// Domain decoding: compute btot, etot, mocc arrays from generic Forward/Backward.
-/// Port of p7_DomainDecoding() adapted for generic (log-space) DP matrices.
+/// Posterior decoding of domain location.
 ///
-/// Returns (btot, etot, mocc) arrays, each of length L+1 (0-indexed).
-/// - `btot[i]` = cumulative expected B-state usage at or before position i
-/// - `etot[i]` = cumulative expected E-state usage at or before position i
-/// - `mocc[i]` = P(residue i is emitted by the core model) = 1 - P(N,J,C loops)
+/// Computes the cumulative expected B- and E-state usage and the per-residue
+/// core-model occupancy from filled Forward/Backward matrices. Returns
+/// `(btot, etot, mocc)`, each of length `L+1` (0-indexed):
+/// - `btot[i]` = expected number of domains started at or before position `i`
+/// - `etot[i]` = expected number of domains ended at or before position `i`
+/// - `mocc[i]` = P(residue `i` is in a domain) = `1 - P(N|J|C loop)`
+/// Adapted for generic (log-space) DP matrices. Counterpart of `p7_GDomainDecoding`.
 pub fn domain_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let l = fwd.l;
     let overall_sc = fwd.xmx(l, P7G_C) + gm.xsc[P7P_C][P7P_MOVE];

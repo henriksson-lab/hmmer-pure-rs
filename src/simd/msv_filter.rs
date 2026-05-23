@@ -7,7 +7,7 @@ use crate::simd::oprofile::{nqb, OProfile};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-/// Result of MSV filter.
+/// Result of the MSV filter: either a finite score or a saturating overflow.
 pub enum MsvResult {
     /// Sequence passed filter, score is returned
     Ok(f32),
@@ -15,8 +15,15 @@ pub enum MsvResult {
     Overflow,
 }
 
-/// SSE2-optimized MSV filter.
-/// Returns the MSV score in nats, or Overflow if the score saturated.
+/// Calculates the MSV score, vewy vewy fast, in limited precision (C: `p7_MSVFilter`).
+///
+/// Computes an approximation of the MSV score for digital sequence `dsq` of length `l`
+/// using optimized profile `om`. Returns the estimated MSV score in nats, or `Overflow`
+/// for very high-scoring sequences (the score may overflow but will not underflow).
+///
+/// The model may be in any mode because only its match emission scores are used; the
+/// MSV filter inherently assumes a multihit local mode and uses its own special state
+/// transition scores rather than the scores in the profile.
 ///
 /// # Safety
 /// Requires SSE2 support. Caller must verify CPU support.
@@ -29,10 +36,11 @@ pub unsafe fn msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
     msv_filter_with_scratch(dsq, l, om, &mut dp)
 }
 
-/// SSE2 MSV filter variant that reuses caller-owned row storage.
+/// SSE2 MSV filter variant that reuses a caller-owned single DP row (C: `p7_MSVFilter`).
 ///
-/// Keep tracehash builds on `msv_filter()` unless a trace proves this allocation
-/// change is harmless for exact instrumentation-sensitive comparisons.
+/// Identical math to [`msv_filter`] but skips the per-call allocation by reusing the
+/// caller's `dp` vector. Keep tracehash builds on `msv_filter()` unless a trace proves
+/// this allocation change is harmless for exact instrumentation-sensitive comparisons.
 #[target_feature(enable = "sse2")]
 pub unsafe fn msv_filter_with_scratch(
     dsq: &[Dsq],
@@ -135,6 +143,7 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Smoke test: MSV filter returns a finite score (or overflow) on a tiny model.
     #[test]
     fn test_msv_filter_basic() {
         if !is_x86_feature_detected!("sse2") {

@@ -9,8 +9,13 @@ use crate::dp::gmx::*;
 use crate::profile::Profile;
 use crate::trace::{State, Trace};
 
-/// Compute null2 odds ratios from posterior probabilities.
-/// Returns null2[0..K-1] where null2[x] = f'(x) / f(x).
+/// Calculate the null2 model from posterior probabilities (expectation method).
+///
+/// Applied to envelopes in well-resolved, single-envelope regions. Computes the
+/// null2 odds emission ratios `f'(x)/f(x)` for residues `0..K-1` from the
+/// state-usage frequencies of the posterior matrix `pp` over envelope
+/// `ienv..=jenv`. Returns the odds-ratio vector (caller can convert to a score
+/// correction via `null2_score`). Counterpart of `p7_GNull2_ByExpectation`.
 pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) -> Vec<f32> {
     let m = gm.m;
     let k = gm.abc_k;
@@ -64,8 +69,10 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
     null2
 }
 
-/// Calculate total null2 correction score for a domain envelope.
-/// Returns the correction in nats (to be subtracted from domain score).
+/// Sum the per-residue null2 log-odds over an envelope to obtain a bias correction.
+///
+/// Returns the total correction in nats: `sum_{i=ienv..=jenv} ln(null2[dsq[i]])`.
+/// The caller subtracts this from the raw domain score.
 pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
     let mut score = 0.0_f32;
     for i in ienv..=jenv {
@@ -77,8 +84,13 @@ pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
     score
 }
 
-/// Compute null2 odds ratios from a stochastic traceback segment.
-/// This is the generic counterpart of C HMMER's p7_GNull2_ByTrace().
+/// Assign null2 odds ratios to an envelope by the trace-sampling method.
+///
+/// Given a stochastic traceback `tr`, computes null2 odds ratios `f'(x)/f(x)`
+/// as state-usage-weighted emission probabilities, with usages tallied from
+/// trace positions `zstart..=zend`. Target sequence is irrelevant; profile
+/// configuration is irrelevant (only emission odds are used).
+/// Counterpart of `p7_GNull2_ByTrace`.
 pub fn null2_by_trace(gm: &Profile, tr: &Trace, zstart: usize, zend: usize) -> Vec<f32> {
     let m = gm.m;
     let k = gm.abc_k;

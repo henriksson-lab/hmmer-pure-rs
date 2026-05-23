@@ -1,10 +1,10 @@
 //! hmmalign — align sequences to a profile HMM.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
@@ -43,10 +43,27 @@ struct Args {
     /// Output alignment format
     #[arg(long = "outformat", default_value = "Stockholm")]
     outformat: String,
+
+    /// Assert input sequence file format
+    #[arg(long = "informat")]
+    informat: Option<String>,
+
+    /// Assert protein alphabet
+    #[arg(long, action = ArgAction::SetTrue)]
+    amino: bool,
+
+    /// Assert DNA alphabet
+    #[arg(long, action = ArgAction::SetTrue)]
+    dna: bool,
+
+    /// Assert RNA alphabet
+    #[arg(long, action = ArgAction::SetTrue)]
+    rna: bool,
 }
 
 struct AlignmentRow {
     name: String,
+    desc: Option<String>,
     aseq: String,
     ppline: Option<String>,
 }
@@ -57,8 +74,35 @@ struct TextMsa {
     pp_cons: String,
 }
 
+/// Entry point for `hmmalign`: align sequences to a profile HMM.
+///
+/// Reads an HMM and a sequence file, runs Forward/Backward + posterior decoding +
+/// optimal-accuracy traceback per sequence, then assembles a multiple alignment
+/// (Stockholm or A2M). Optionally merges a `--mapali` source alignment via the
+/// HMM's map and checksum. Corresponds to `main()` in hmmer/src/hmmalign.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
+    if args.hmmfile == PathBuf::from("-") && args.seqfile == PathBuf::from("-") {
+        eprintln!(
+            "ERROR: Either <hmmfile> or <seqfile> may be '-' (to read from stdin), but not both."
+        );
+        std::process::exit(1);
+    }
+    if [args.amino, args.dna, args.rna]
+        .into_iter()
+        .filter(|v| *v)
+        .count()
+        > 1
+    {
+        eprintln!("Error: options --amino, --dna, and --rna are mutually exclusive");
+        std::process::exit(1);
+    }
+    if let Some(ref informat) = args.informat {
+        if !informat.eq_ignore_ascii_case("fasta") {
+            eprintln!("{informat} is not a recognized input sequence file format");
+            std::process::exit(1);
+        }
+    }
 
     enum OutFormat {
         Stockholm,
@@ -78,22 +122,44 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     logsum::p7_flogsuminit();
 
-    let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
+    let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
         std::process::exit(1);
     });
+    if hmms.is_empty() {
+        eprintln!("Error: no HMMs found in {}", args.hmmfile.display());
+        std::process::exit(1);
+    }
+    if hmms.len() != 1 {
+        eprintln!(
+            "Error: HMM file {} does not contain just one HMM",
+            args.hmmfile.display()
+        );
+        std::process::exit(1);
+    }
 
     let hmm = &hmms[0];
-    let abc = Alphabet::new(hmm.abc_type);
+    let abc = if args.amino {
+        Alphabet::amino()
+    } else if args.dna {
+        Alphabet::dna()
+    } else if args.rna {
+        Alphabet::rna()
+    } else {
+        Alphabet::new(hmm.abc_type)
+    };
     let bg = Bg::new(&abc);
 
     let mut sequences = Vec::new();
-    let mut sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
+    let mut sqf = open_seq_file_maybe_stdin(&args.seqfile, &abc).unwrap_or_else(|e| {
         eprintln!("Error opening sequence file: {}", e);
         std::process::exit(1);
     });
     let mut sq = Sequence::new();
-    while sqf.read(&mut sq).unwrap() {
+    while sqf.read(&mut sq).unwrap_or_else(|e| {
+        eprintln!("Error reading sequence file: {}", e);
+        std::process::exit(1);
+    }) {
         sequences.push(sq.clone());
         sq.reuse();
     }
@@ -142,6 +208,33 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+fn read_hmms_maybe_stdin(
+    path: &std::path::Path,
+) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
+    if path == std::path::Path::new("-") {
+        let stdin = std::io::stdin();
+        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+    } else {
+        hmmfile::read_hmm_file(path)
+    }
+}
+
+fn open_seq_file_maybe_stdin(
+    path: &std::path::Path,
+    abc: &Alphabet,
+) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn Read>>> {
+    if path == std::path::Path::new("-") {
+        Ok(sequence::SeqFile::new(
+            Box::new(std::io::stdin()) as Box<dyn Read>,
+            abc.clone(),
+        ))
+    } else {
+        sequence::open_seq_file(path, abc)
+    }
+}
+
+/// Emit a Stockholm 1.0 representation of the assembled alignment, including
+/// per-row PP annotation and `#=GC PP_cons` / `#=GC RF` consensus lines.
 fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
     let name_width = msa
         .rows
@@ -155,6 +248,24 @@ fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
 
     writeln!(out, "# STOCKHOLM 1.0").unwrap();
     writeln!(out).unwrap();
+
+    for row in &msa.rows {
+        if let Some(desc) = &row.desc {
+            if !desc.is_empty() {
+                writeln!(
+                    out,
+                    "#=GS {:<width$} DE {}",
+                    row.name,
+                    desc,
+                    width = name_width - 5
+                )
+                .unwrap();
+            }
+        }
+    }
+    if msa.rows.iter().any(|row| row.desc.is_some()) {
+        writeln!(out).unwrap();
+    }
 
     for row in &msa.rows {
         writeln!(out, "{:<width$} {}", row.name, row.aseq, width = name_width).unwrap();
@@ -189,6 +300,9 @@ fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
     writeln!(out, "//").unwrap();
 }
 
+/// Emit the alignment in A2M format: consensus columns uppercase / `-`,
+/// insert columns lowercase (insert gaps suppressed); `O`/`o` mapped to `X`/`x`
+/// for amino alphabets.
 fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     for row in &msa.rows {
         writeln!(out, ">{}", row.name).unwrap();
@@ -224,6 +338,10 @@ fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     }
 }
 
+/// Align every input sequence to `hmm` (Forward/Backward + posterior decoding +
+/// optimal accuracy traceback) and stitch the per-sequence traces into a single
+/// text MSA, computing per-column PP_cons. Counterpart to the alignment block of
+/// `main()` in hmmalign.c when no `--mapali` is supplied.
 fn build_text_msa(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,
@@ -268,6 +386,7 @@ fn build_text_msa(
         }
         rows.push(AlignmentRow {
             name: sq.name.clone(),
+            desc: None,
             aseq,
             ppline: Some(ppline),
         });
@@ -302,6 +421,10 @@ fn build_text_msa(
     }
 }
 
+/// Variant of `build_text_msa` that also folds in a previously built `--mapali`
+/// MSA. Verifies the HMM checksum/map, computes per-column insert widths spanning
+/// both the source MSA and the new traces, then emits a merged alignment. Mirrors
+/// the `map_alignment()` + main-loop path in hmmalign.c.
 fn build_text_msa_with_mapali(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,
@@ -363,8 +486,11 @@ fn build_text_msa_with_mapali(
     for (idx, name) in mapped.sqname.iter().enumerate() {
         rows.push(AlignmentRow {
             name: name.clone(),
+            desc: (!mapped.sqdesc[idx].is_empty()).then(|| mapped.sqdesc[idx].clone()),
             aseq: expand_mapped_row(&mapped.aseq[idx], map, &matmap, &inscount, hmm.m, trim),
-            ppline: None,
+            ppline: mapped.pp[idx]
+                .as_ref()
+                .map(|pp| expand_mapped_annotation(pp, map, &matmap, &inscount, hmm.m, trim)),
         });
     }
 
@@ -382,6 +508,7 @@ fn build_text_msa_with_mapali(
         }
         rows.push(AlignmentRow {
             name: sq.name.clone(),
+            desc: None,
             aseq,
             ppline: Some(ppline),
         });
@@ -391,14 +518,18 @@ fn build_text_msa_with_mapali(
     for k in 1..=hmm.m {
         rfline[matmap[k] - 1] = b'x';
     }
-    let mut pp_cons = String::with_capacity(alen);
-    for apos in 0..alen {
+    let pp_cons = mapped
+        .pp_cons
+        .as_ref()
+        .map(|pp| expand_mapped_annotation(pp, map, &matmap, &inscount, hmm.m, trim))
+        .unwrap_or_else(|| ".".repeat(alen));
+    let mut pp_cons_bytes = pp_cons.into_bytes();
+    for (apos, ch) in pp_cons_bytes.iter_mut().enumerate() {
         if pp_cons_n[apos] > 0 {
-            pp_cons.push(pp_to_char(pp_cons_sum[apos] / pp_cons_n[apos] as f32));
-        } else {
-            pp_cons.push('.');
+            *ch = pp_to_char(pp_cons_sum[apos] / pp_cons_n[apos] as f32) as u8;
         }
     }
+    let pp_cons = String::from_utf8(pp_cons_bytes).unwrap();
 
     TextMsa {
         rows,
@@ -407,6 +538,9 @@ fn build_text_msa_with_mapali(
     }
 }
 
+/// Compute the per-node insert width vector (length M+1) implied by the source
+/// MSA's column-to-model `map`. Used as the initial insert budget when merging a
+/// `--mapali` alignment with newly aligned sequences.
 fn mapped_insert_widths(mapped: &msa::Msa, map: &[i32], m: usize) -> Vec<usize> {
     let mut ins = vec![0usize; m + 1];
     ins[0] = (map[1] - 1).max(0) as usize;
@@ -417,6 +551,8 @@ fn mapped_insert_widths(mapped: &msa::Msa, map: &[i32], m: usize) -> Vec<usize> 
     ins
 }
 
+/// Walk a trace, count I/N/C insertions per model node, and update the global
+/// per-node insert-width vector to the maximum across all traces.
 fn update_insert_widths_from_trace(
     inscount: &mut [usize],
     tr: &hmmer_pure_rs::trace::Trace,
@@ -436,6 +572,9 @@ fn update_insert_widths_from_trace(
     }
 }
 
+/// Build `matmap[1..=M]`: the alignment column (1-based) assigned to each
+/// consensus model node, accounting for retained insert widths and per-node
+/// `matuse` flags.
 fn compute_matmap(inscount: &[usize], matuse: &[bool], m: usize) -> Vec<usize> {
     let mut matmap = vec![0usize; m + 1];
     let mut alen = inscount[0];
@@ -451,6 +590,8 @@ fn compute_matmap(inscount: &[usize], matuse: &[bool], m: usize) -> Vec<usize> {
     matmap
 }
 
+/// Total alignment length implied by per-node insert widths plus retained
+/// consensus columns (`matuse`).
 fn alignment_len_from_map(inscount: &[usize], matuse: &[bool], m: usize) -> usize {
     let mut alen = inscount[0];
     for k in 1..=m {
@@ -459,6 +600,9 @@ fn alignment_len_from_map(inscount: &[usize], matuse: &[bool], m: usize) -> usiz
     alen
 }
 
+/// Expand a single mapped-MSA row into the merged alignment's coordinate system:
+/// place consensus residues at `matmap[k]` columns and copy the original insert
+/// stretches into the wider insert buckets.
 fn expand_mapped_row(
     row: &[u8],
     map: &[i32],
@@ -496,6 +640,42 @@ fn expand_mapped_row(
     String::from_utf8(out).unwrap()
 }
 
+fn expand_mapped_annotation(
+    row: &[u8],
+    map: &[i32],
+    matmap: &[usize],
+    inscount: &[usize],
+    m: usize,
+    trim: bool,
+) -> String {
+    let all_match = vec![true; m + 1];
+    let mut out = vec![b'.'; alignment_len_from_map(inscount, &all_match, m)];
+    if !(trim && m == 0) {
+        copy_insert_slice(
+            &mut out,
+            0,
+            &row[0..(map[1] - 1).max(0) as usize],
+            matmap,
+            m,
+            trim,
+        );
+    }
+    for k in 1..=m {
+        let src_cons = (map[k] - 1) as usize;
+        out[matmap[k] - 1] = row[src_cons];
+        let next = if k == m {
+            row.len()
+        } else {
+            (map[k + 1] - 1) as usize
+        };
+        copy_insert_slice(&mut out, k, &row[src_cons + 1..next], matmap, m, trim);
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Copy an insert-bucket slice from a source row into the destination alignment
+/// starting at `matmap[bucket]` (or column 0 for bucket 0). Skips the N/C
+/// terminal buckets when `trim` is set.
 fn copy_insert_slice(
     out: &mut [u8],
     bucket: usize,
@@ -513,6 +693,7 @@ fn copy_insert_slice(
     }
 }
 
+/// Replace insert-style gaps (`.`, `_`) with the consensus-column gap (`-`).
 fn normalize_mapped_consensus_char(ch: u8) -> u8 {
     match ch {
         b'.' | b'_' => b'-',
@@ -520,6 +701,9 @@ fn normalize_mapped_consensus_char(ch: u8) -> u8 {
     }
 }
 
+/// Build the merged-MSA coordinate system (insert widths, matuse flags, matmap,
+/// total `alen`) from a set of traces. Mirrors Easel's `esl_msa_MapNew` /
+/// HMMER's `p7_tracealign_Seqs()` map-construction step.
 fn map_new_msa(
     m: usize,
     traces: &[(Profile, Gmx, hmmer_pure_rs::trace::Trace)],
@@ -567,6 +751,9 @@ fn map_new_msa(
     (inscount, matuse, matmap, alen)
 }
 
+/// Render one sequence's trace as text-aligned residues plus the matching PP
+/// (posterior-probability) annotation row, using `matmap` to place match-state
+/// residues and contiguous insert positions for I/N/C states.
 fn make_text_row(
     abc: &Alphabet,
     sq: &Sequence,
@@ -630,6 +817,8 @@ fn make_text_row(
     )
 }
 
+/// Map an N/C special state to the matching column index in the special-states
+/// (XMX) portion of the posterior decoding matrix.
 fn state_pp_index(st: State) -> usize {
     match st {
         State::N => hmmer_pure_rs::dp::gmx::P7G_N,
@@ -638,6 +827,9 @@ fn state_pp_index(st: State) -> usize {
     }
 }
 
+/// Right-justify the second half of each insert region in `aseq`/`ppline` so
+/// inserts pack toward the flanking match columns. Replicates HMMER's
+/// `rejustify_inserts_text` behavior.
 fn rejustify_insertions_text(
     aseq: &mut String,
     ppline: &mut String,
@@ -693,6 +885,8 @@ fn rejustify_insertions_text(
     *ppline = String::from_utf8(pp_bytes).unwrap();
 }
 
+/// Convert a posterior probability in [0,1] to its single-character bin
+/// (`0`-`9`, `*`, or `.`) used in Stockholm PP annotation lines.
 fn pp_to_char(pp: f32) -> char {
     let p = pp.clamp(0.0, 1.0);
     if p >= 0.95 {

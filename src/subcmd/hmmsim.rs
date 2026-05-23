@@ -14,7 +14,7 @@ use hmmer_pure_rs::dp::generic_msv::g_msv;
 use hmmer_pure_rs::dp::generic_viterbi::g_viterbi;
 use hmmer_pure_rs::dp::gmx::Gmx;
 use hmmer_pure_rs::hmmfile;
-use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
+use hmmer_pure_rs::profile::{self, Profile, P7_GLOCAL, P7_LOCAL, P7_UNIGLOCAL, P7_UNILOCAL};
 use hmmer_pure_rs::util::random::MersenneTwister;
 
 #[derive(Parser)]
@@ -25,21 +25,79 @@ struct Args {
     #[arg(short = 'N', default_value = "1000")]
     n: usize,
 
-    #[arg(short = 'L', default_value = "400")]
+    #[arg(short = 'L', default_value = "100")]
     l: usize,
 
-    #[arg(long = "seed", default_value = "42")]
+    #[arg(long = "seed", default_value = "0")]
     seed: u32,
 
-    #[arg(long = "viterbi")]
+    #[arg(short = 'o')]
+    outfile: Option<PathBuf>,
+
+    #[arg(long = "vit", alias = "viterbi")]
     viterbi: bool,
 
-    #[arg(long = "forward")]
+    #[arg(long = "fwd", alias = "forward")]
     forward: bool,
+
+    #[arg(long = "hyb")]
+    hybrid: bool,
+
+    #[arg(long = "msv")]
+    msv: bool,
+
+    #[arg(long = "fs")]
+    fs: bool,
+
+    #[arg(long = "sw")]
+    sw: bool,
+
+    #[arg(long = "ls")]
+    ls: bool,
+
+    #[arg(long = "s")]
+    s: bool,
 }
 
+/// Entry point for `hmmsim`: generate `N` iid random sequences of length `L`
+/// (sampled from the background distribution) and score each one against the
+/// first HMM in the input file, emitting bit scores to stdout.
+///
+/// Scoring kernel is selectable: default `--vit`, `--fwd`, or `--msv`.
+/// Used to calibrate E-value parameters and to benchmark DP engines.
+/// Corresponds to `process_workunit()`/`main()` in hmmer/src/hmmsim.c, much
+/// abbreviated (no MPI master/worker, no multi-HMM batch).
 pub fn run(args: Vec<String>) -> ExitCode {
     let args = Args::parse_from(&args);
+
+    if args.n == 0 {
+        eprintln!("Invalid number of samples: -N must be > 0");
+        return ExitCode::FAILURE;
+    }
+    if args.l == 0 {
+        eprintln!("Invalid sequence length: -L must be > 0");
+        return ExitCode::FAILURE;
+    }
+    let score_modes = [args.viterbi, args.forward, args.hybrid, args.msv]
+        .iter()
+        .filter(|&&enabled| enabled)
+        .count();
+    if score_modes > 1 {
+        eprintln!("hmmsim scoring options --vit, --fwd, --hyb, and --msv are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
+    if args.hybrid {
+        eprintln!("hmmsim --hyb is not implemented");
+        return ExitCode::FAILURE;
+    }
+    let alignment_modes = [args.fs, args.sw, args.ls, args.s]
+        .iter()
+        .filter(|&&enabled| enabled)
+        .count();
+    if alignment_modes > 1 {
+        eprintln!("hmmsim alignment options --fs, --sw, --ls, and --s are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
 
     hmmer_pure_rs::logsum::p7_flogsuminit();
 
@@ -47,17 +105,35 @@ pub fn run(args: Vec<String>) -> ExitCode {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
+    if hmms.is_empty() {
+        eprintln!("Error: no HMMs found in {}", args.hmmfile.display());
+        return ExitCode::FAILURE;
+    }
 
     let hmm = &hmms[0];
     let abc = Alphabet::new(hmm.abc_type);
     let bg = Bg::new(&abc);
     let mut gm = Profile::new(hmm.m, &abc);
-    profile::profile_config(hmm, &bg, &mut gm, args.l as i32, P7_LOCAL);
+    let mode = if args.sw {
+        P7_UNILOCAL
+    } else if args.ls {
+        P7_GLOCAL
+    } else if args.s {
+        P7_UNIGLOCAL
+    } else {
+        P7_LOCAL
+    };
+    profile::profile_config(hmm, &bg, &mut gm, args.l as i32, mode);
 
     let mut rng = MersenneTwister::new(args.seed);
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    let mut out: Box<dyn Write> = match args.outfile {
+        Some(ref path) => Box::new(std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("Error creating output {}: {}", path.display(), e);
+            std::process::exit(1);
+        })),
+        None => Box::new(std::io::stdout()),
+    };
 
     writeln!(
         out,
@@ -77,16 +153,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
         let null_sc = bg.null_one(args.l);
         let mut gx = Gmx::new(gm.m, args.l);
 
-        if args.viterbi {
-            let sc = g_viterbi(&dsq, args.l, &gm, &mut gx);
-            let bits = (sc - null_sc) / std::f32::consts::LN_2;
-            writeln!(out, "{:.4}", bits).unwrap();
-        } else if args.forward {
+        if args.forward {
             let sc = g_forward(&dsq, args.l, &gm, &mut gx);
             let bits = (sc - null_sc) / std::f32::consts::LN_2;
             writeln!(out, "{:.4}", bits).unwrap();
-        } else {
+        } else if args.msv {
             let sc = g_msv(&dsq, args.l, &gm, &mut gx, 2.0);
+            let bits = (sc - null_sc) / std::f32::consts::LN_2;
+            writeln!(out, "{:.4}", bits).unwrap();
+        } else {
+            let sc = g_viterbi(&dsq, args.l, &gm, &mut gx);
             let bits = (sc - null_sc) / std::f32::consts::LN_2;
             writeln!(out, "{:.4}", bits).unwrap();
         }

@@ -14,7 +14,8 @@ use crate::stats;
 
 use crate::util::random::MersenneTwister;
 
-/// Generate a random digital sequence of given length using MT RNG.
+/// Sample an iid digital sequence of length `l` from background frequencies `bg_f`.
+/// Sentinels are added at positions 0 and l+1 so the result is 1-based.
 fn random_seq(rng: &mut MersenneTwister, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
     let mut dsq = Vec::with_capacity(l + 2);
     dsq.push(DSQ_SENTINEL);
@@ -25,8 +26,24 @@ fn random_seq(rng: &mut MersenneTwister, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
     dsq
 }
 
-/// Compute the lambda parameter for the model.
-/// This is the expected entropy per match position.
+fn simulated_bitscore(sc: f32, null_sc: f32) -> f64 {
+    (sc as f64 - null_sc as f64) / std::f64::consts::LN_2
+}
+
+fn msv_overflow_maxsc(base_b: u8, scale_b: f32) -> f32 {
+    (255.0 - base_b as f32) / scale_b
+}
+
+fn viterbi_overflow_maxsc(base_w: i16, scale_w: f32) -> f32 {
+    (32767.0 - base_w as f32) / scale_w
+}
+
+/// Determine the length-corrected local lambda for an HMM.
+///
+/// The true lambda is `log(2)`; this returns the edge-corrected estimate
+/// `log(2) + 1.44 / (M * H)`, where H is the mean match-state relative
+/// entropy in bits. Used for both Viterbi Gumbel and Forward exponential
+/// tails. Counterpart to C's `p7_Lambda()`.
 pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
     let k = hmm.abc_k;
     // Use f64 precision for entropy computation in bits (log2), matching C's double
@@ -47,11 +64,15 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
 
     // lambda with edge-correction: log(2) + 1.44 / (M * H)
     let log2 = std::f64::consts::LN_2;
-    (log2 + 1.44 / (hmm.m as f64 * h.max(0.01))) as f32
+    (log2 + 1.44 / (hmm.m as f64 * h)) as f32
 }
 
-/// Calibrate E-value parameters for an HMM.
-/// Simulates random sequences and fits Gumbel/exponential distributions.
+/// Calibrate E-value parameters for an HMM by simulation.
+///
+/// Computes lambda analytically, then runs short Monte Carlo simulations to
+/// fit MSV Gumbel mu, Viterbi Gumbel mu, and Forward exponential-tail tau.
+/// Stores results in `hmm.evparam[]` and sets P7H_STATS.
+/// Counterpart to C's `p7_Calibrate()`.
 pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
     crate::logsum::p7_flogsuminit();
 
@@ -76,6 +97,9 @@ pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
     hmm.flags |= P7H_STATS;
 }
 
+/// Estimate the MSV Gumbel location parameter mu by simulating random
+/// sequences and ML-fitting their MSV bit scores at fixed `lambda`.
+/// Counterpart to C's `p7_MSVMu()`.
 fn calibrate_msv(
     hmm: &Hmm,
     abc: &crate::alphabet::Alphabet,
@@ -91,6 +115,7 @@ fn calibrate_msv(
     let mut gm = Profile::new(hmm.m, abc);
     profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
     let om = OProfile::convert(&gm);
+    let maxsc = msv_overflow_maxsc(om.base_b, om.scale_b);
 
     let mut scores = Vec::with_capacity(n);
 
@@ -102,7 +127,7 @@ fn calibrate_msv(
             if is_x86_feature_detected!("sse2") {
                 sc = match unsafe { crate::simd::msv_filter::msv_filter(&dsq, l, &om) } {
                     crate::simd::msv_filter::MsvResult::Ok(s) => s,
-                    crate::simd::msv_filter::MsvResult::Overflow => f32::INFINITY,
+                    crate::simd::msv_filter::MsvResult::Overflow => maxsc,
                 };
             } else {
                 let mut gx = Gmx::new(hmm.m, l);
@@ -115,7 +140,7 @@ fn calibrate_msv(
             sc = g_msv(&dsq, l, &gm, &mut gx, 2.0);
         }
         let null_sc = bg.null_one(l);
-        let bits = ((sc - null_sc) / std::f32::consts::LN_2) as f64;
+        let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
 
@@ -129,6 +154,8 @@ fn calibrate_msv(
     mu as f32
 }
 
+/// Estimate the Viterbi Gumbel location parameter mu by simulation and ML
+/// fitting at fixed `lambda`. Counterpart to C's `p7_ViterbiMu()`.
 fn calibrate_viterbi(
     hmm: &Hmm,
     abc: &crate::alphabet::Alphabet,
@@ -144,6 +171,7 @@ fn calibrate_viterbi(
     let mut gm = Profile::new(hmm.m, abc);
     profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
     let om = OProfile::convert(&gm);
+    let maxsc = viterbi_overflow_maxsc(om.base_w, om.scale_w);
 
     let mut scores = Vec::with_capacity(n);
 
@@ -155,7 +183,7 @@ fn calibrate_viterbi(
             if is_x86_feature_detected!("sse2") {
                 sc = match unsafe { crate::simd::vit_filter::viterbi_filter(&dsq, l, &om) } {
                     crate::simd::vit_filter::VitResult::Ok(s) => s,
-                    crate::simd::vit_filter::VitResult::Overflow => f32::INFINITY,
+                    crate::simd::vit_filter::VitResult::Overflow => maxsc,
                 };
             } else {
                 let mut gx = Gmx::new(hmm.m, l);
@@ -168,7 +196,7 @@ fn calibrate_viterbi(
             sc = g_viterbi(&dsq, l, &gm, &mut gx);
         }
         let null_sc = bg.null_one(l);
-        let bits = ((sc - null_sc) / std::f32::consts::LN_2) as f64;
+        let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
 
@@ -181,6 +209,10 @@ fn calibrate_viterbi(
     mu as f32
 }
 
+/// Estimate the Forward exponential-tail location `tau` by simulation:
+/// fit a Gumbel to the simulated Forward scores, then back the origin off by
+/// `log(tailp)/lambda` so the right tail of mass `tailp` has origin 1.0.
+/// Returns `(tau, lambda)`. Counterpart to C's `p7_Tau()`.
 fn calibrate_forward(
     hmm: &Hmm,
     abc: &crate::alphabet::Alphabet,
@@ -219,7 +251,7 @@ fn calibrate_forward(
             sc = g_forward(&dsq, l, &gm, &mut gx);
         }
         let null_sc = bg.null_one(l);
-        let bits = ((sc - null_sc) / std::f32::consts::LN_2) as f64;
+        let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
 
@@ -246,6 +278,30 @@ fn calibrate_forward(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn simulated_bitscore_uses_double_log2() {
+        let sc = 12.75_f32;
+        let null_sc = -3.125_f32;
+        let expected = (sc as f64 - null_sc as f64) / std::f64::consts::LN_2;
+
+        assert_eq!(
+            simulated_bitscore(sc, null_sc).to_bits(),
+            expected.to_bits()
+        );
+    }
+
+    #[test]
+    fn simd_overflow_max_scores_match_c_calibration_limits() {
+        assert_eq!(
+            msv_overflow_maxsc(190, 3.0_f32 / std::f32::consts::LN_2).to_bits(),
+            ((255.0_f32 - 190.0_f32) / (3.0_f32 / std::f32::consts::LN_2)).to_bits()
+        );
+        assert_eq!(
+            viterbi_overflow_maxsc(12000, 500.0_f32 / std::f32::consts::LN_2).to_bits(),
+            ((32767.0_f32 - 12000.0_f32) / (500.0_f32 / std::f32::consts::LN_2)).to_bits()
+        );
+    }
 
     #[test]
     fn test_calibrate() {

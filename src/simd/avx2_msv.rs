@@ -7,14 +7,14 @@ use std::arch::x86_64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::OProfile;
 
-/// Number of AVX2 vectors for MSV: ceil(M/32), min 2.
+/// Number of AVX2 byte vectors needed to stripe a model of length M: ceil(M/32), min 2.
 pub fn nqb_avx2(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 32) + 1)
 }
 
 /// AVX2 OProfile extension for MSV byte scores.
 pub struct OProfileAvx2 {
-    /// MSV byte scores: rbv[residue][q][32 bytes]
+    /// MSV byte scores: `rbv[residue][q][32 bytes]`
     pub rbv: Vec<Vec<[u8; 32]>>,
     pub tbm_b: u8,
     pub tec_b: u8,
@@ -27,7 +27,8 @@ pub struct OProfileAvx2 {
 }
 
 impl OProfileAvx2 {
-    /// Build AVX2 MSV profile from the SSE2 OProfile.
+    /// Build an AVX2 MSV profile by restriping the SSE2 `OProfile` byte scores into
+    /// 32-way striped vectors.
     pub fn from_oprofile(om: &OProfile) -> Self {
         let m = om.m;
         let nq = nqb_avx2(m);
@@ -71,13 +72,18 @@ impl OProfileAvx2 {
     }
 }
 
-/// Result of AVX2 MSV filter.
+/// Result of the AVX2 MSV filter: either a finite score or a saturating overflow.
 pub enum Avx2MsvResult {
     Ok(f32),
     Overflow,
 }
 
-/// AVX2-optimized MSV filter using 32x uint8 vectors.
+/// AVX2 variant of the MSV filter (C: `p7_MSVFilter`), using 32x uint8 vectors.
+///
+/// Calculates an approximation of the MSV score for digital sequence `dsq` of length
+/// `l` using AVX2-striped profile `om`. Score may overflow on extremely high-scoring
+/// sequences but will not underflow. The MSV filter assumes multihit local mode and
+/// uses its own special state transition scores rather than the scores in the profile.
 ///
 /// # Safety
 /// Requires AVX2 support.
@@ -180,6 +186,7 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Smoke test: AVX2 MSV filter returns a finite score (or overflow) on a small model.
     #[test]
     fn test_avx2_msv_basic() {
         if !is_x86_feature_detected!("avx2") {

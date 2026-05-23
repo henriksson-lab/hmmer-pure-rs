@@ -25,7 +25,7 @@ struct Args {
     #[arg(long = "hmmdb")]
     hmmdb: PathBuf,
 
-    /// Sequence database file
+    /// Sequence database file (not implemented in this simplified daemon)
     #[arg(long = "seqdb")]
     seqdb: Option<PathBuf>,
 
@@ -34,8 +34,24 @@ struct Args {
     port: u16,
 }
 
+/// Entry point for `hmmpgmd`: minimal HMMER search daemon.
+///
+/// Pre-loads an HMM database, configures generic + optimized profiles, then
+/// accepts TCP connections on `--port`. Each client sends a single sequence
+/// line; the daemon scores it against every loaded HMM with the standard
+/// pipeline and replies with a sorted hit list followed by `//`. Drastically
+/// simplified vs. the C implementation (hmmer/src/hmmpgmd.c), which uses a
+/// master/worker shard architecture, JSON wire protocol, and MPI/threads.
 pub fn run(args: Vec<String>) -> ExitCode {
     let args = Args::parse_from(&args);
+
+    if let Some(ref seqdb) = args.seqdb {
+        eprintln!(
+            "hmmpgmd --seqdb={} is not implemented in the simplified daemon",
+            seqdb.display()
+        );
+        std::process::exit(1);
+    }
 
     logsum::p7_flogsuminit();
 

@@ -6,11 +6,13 @@ use crate::dp::gmx::*;
 use crate::logsum::p7_flogsum;
 use crate::profile::*;
 
-/// Generic Backward algorithm.
-/// Returns the Backward log-likelihood score in nats.
-/// `dsq` is a 1-based digital sequence (dsq[1..=L]).
-/// NOTE: Backward calculates the probability we can get *out* of cell (i,k),
-/// exclusive of emitting residue x_i.
+/// The Backward algorithm: log-likelihood summed over all completions.
+///
+/// Standard Backward DP. Given digital sequence `dsq` (1-based, `dsq[1..=L]`),
+/// profile `gm`, and DP matrix `gx`, fills `gx` and returns the Backward lod
+/// score in nats. Cell `(i,k)` stores the probability of getting *out* of that
+/// cell, exclusive of emitting residue `x_i`. Forward and Backward overall
+/// scores agree within numerical tolerance. Counterpart of `p7_GBackward`.
 pub fn g_backward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
     let esc: f32 = if gm.is_local() {

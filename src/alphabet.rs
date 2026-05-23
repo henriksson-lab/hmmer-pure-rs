@@ -5,18 +5,22 @@
 pub type Dsq = u8;
 
 /// Sentinel value marking sequence boundaries in digital sequences.
-/// Digital sequences are 1-based: dsq[0] = SENTINEL, dsq[1..L] = sequence, dsq[L+1] = SENTINEL.
+/// Digital sequences are 1-based: `dsq[0]` = SENTINEL, `dsq[1..L]` = sequence, `dsq[L+1]` = SENTINEL.
 pub const DSQ_SENTINEL: Dsq = 255;
 pub const DSQ_ILLEGAL: Dsq = 254;
 pub const DSQ_IGNORED: Dsq = 253;
 
-/// Alphabet type codes
+/// Alphabet type codes (mirrors Easel's eslUNKNOWN/eslRNA/eslDNA/eslAMINO).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum AlphabetType {
+    /// Unknown/uninitialized alphabet.
     Unknown = 0,
+    /// RNA alphabet: A,C,G,U + degeneracies.
     Rna = 1,
+    /// DNA alphabet: A,C,G,T + degeneracies.
     Dna = 2,
+    /// Amino acid alphabet: 20 canonical residues + degeneracies.
     Amino = 3,
 }
 
@@ -33,20 +37,21 @@ pub struct Alphabet {
     pub k: usize,
     /// Total alphabet size including gap, degeneracies, special symbols
     pub kp: usize,
-    /// Symbol string: sym[i] is the character for digital code i
+    /// Symbol string: `sym[i]` is the character for digital code i
     pub sym: Vec<u8>,
     /// Input map: ASCII char -> digital code (128 entries)
     pub inmap: [Dsq; 128],
-    /// Degeneracy matrix: degen[code][canonical] = true if canonical is part of code
+    /// Degeneracy matrix: `degen[code][canonical]` = true if canonical is part of code
     pub degen: Vec<Vec<bool>>,
     /// Number of canonical residues per code
     pub ndegen: Vec<usize>,
-    /// Complement map (DNA/RNA only): complement[code] = complementary code
+    /// Complement map (DNA/RNA only): `complement[code]` = complementary code
     pub complement: Option<Vec<Dsq>>,
 }
 
 impl Alphabet {
-    /// Create a standard alphabet (DNA, RNA, or Amino).
+    /// Create one of the standard bio alphabets (DNA, RNA, or Amino).
+    /// Counterpart to Easel's `esl_alphabet_Create()`.
     pub fn new(abc_type: AlphabetType) -> Self {
         match abc_type {
             AlphabetType::Dna => Self::create_dna(),
@@ -56,18 +61,22 @@ impl Alphabet {
         }
     }
 
+    /// Convenience constructor for the standard DNA alphabet.
     pub fn dna() -> Self {
         Self::new(AlphabetType::Dna)
     }
 
+    /// Convenience constructor for the standard RNA alphabet.
     pub fn rna() -> Self {
         Self::new(AlphabetType::Rna)
     }
 
+    /// Convenience constructor for the standard amino acid alphabet.
     pub fn amino() -> Self {
         Self::new(AlphabetType::Amino)
     }
 
+    /// Build the standard DNA alphabet (4 canonical + IUPAC degeneracies + complement).
     fn create_dna() -> Self {
         let sym = DNA_SYMS.as_bytes().to_vec();
         let k = 4;
@@ -85,6 +94,7 @@ impl Alphabet {
         abc
     }
 
+    /// Build the standard RNA alphabet (A,C,G,U + degeneracies + complement).
     fn create_rna() -> Self {
         let sym = RNA_SYMS.as_bytes().to_vec();
         let k = 4;
@@ -101,6 +111,7 @@ impl Alphabet {
         abc
     }
 
+    /// Build the standard amino acid alphabet (20 canonical + B, J, Z, O, U, X).
     fn create_amino() -> Self {
         let sym = AMINO_SYMS.as_bytes().to_vec();
         let k = 20;
@@ -113,8 +124,14 @@ impl Alphabet {
         abc
     }
 
+    /// Initialize alphabet fields shared by all standard alphabets:
+    /// inmap, identity degeneracy for canonical residues, and the all-degenerate "any" symbol.
     fn init(abc_type: AlphabetType, k: usize, kp: usize, sym: Vec<u8>) -> Self {
         let mut inmap = [DSQ_ILLEGAL; 128];
+
+        for &ch in b" \t\r\n" {
+            inmap[ch as usize] = DSQ_IGNORED;
+        }
 
         // Map each symbol character to its digital code
         for (i, &ch) in sym.iter().enumerate() {
@@ -149,12 +166,15 @@ impl Alphabet {
         }
     }
 
-    /// Set an equivalence: input character `sym` maps to the same code as `equiv`.
+    /// Define an equivalent symbol: input `sym` digitizes to the same code as `equiv`.
+    /// Counterpart to Easel's `esl_alphabet_SetEquiv()` (e.g. T->U for RNA input).
     fn set_equiv(&mut self, sym: u8, equiv: u8) {
         let code = self.inmap[equiv as usize];
         self.inmap[sym as usize] = code;
     }
 
+    /// Make the input map case-insensitive by mirroring upper/lower case entries.
+    /// Counterpart to Easel's `esl_alphabet_SetCaseInsensitive()`.
     fn set_case_insensitive(&mut self) {
         for lc in b'a'..=b'z' {
             let uc = lc.to_ascii_uppercase();
@@ -171,6 +191,8 @@ impl Alphabet {
         }
     }
 
+    /// Define degenerate character `code` as meaning any of `members`.
+    /// Counterpart to Easel's `esl_alphabet_SetDegeneracy()`.
     fn set_degeneracy(&mut self, code: u8, members: &[u8]) {
         let code_idx = self.inmap[code as usize] as usize;
         for &m in members {
@@ -180,6 +202,7 @@ impl Alphabet {
         self.ndegen[code_idx] = members.len();
     }
 
+    /// Install the standard IUPAC nucleotide degeneracy table for DNA.
     fn set_dna_degeneracies(&mut self) {
         self.set_degeneracy(b'R', &[b'A', b'G']);
         self.set_degeneracy(b'Y', &[b'C', b'T']);
@@ -196,6 +219,7 @@ impl Alphabet {
         // * = nonresidue, ~ = missing: leave empty
     }
 
+    /// Install the standard IUPAC nucleotide degeneracy table for RNA.
     fn set_rna_degeneracies(&mut self) {
         self.set_degeneracy(b'R', &[b'A', b'G']);
         self.set_degeneracy(b'Y', &[b'C', b'U']);
@@ -210,6 +234,7 @@ impl Alphabet {
         self.set_degeneracy(b'N', &[b'A', b'C', b'G', b'U']);
     }
 
+    /// Install standard amino acid ambiguity codes (B, J, Z, O, U, X).
     fn set_amino_degeneracies(&mut self) {
         // B = N or D (Asx)
         self.set_degeneracy(b'B', &[b'N', b'D']);
@@ -226,6 +251,7 @@ impl Alphabet {
         self.set_degeneracy(b'X', &all);
     }
 
+    /// Fill in the DNA complement table indexed by digital code.
     fn set_complement_dna(&mut self) {
         let mut comp = vec![0u8; self.kp];
         // A<->T, C<->G
@@ -251,6 +277,7 @@ impl Alphabet {
         self.complement = Some(comp);
     }
 
+    /// Fill in the RNA complement table (identical to DNA, U at position 3 mirrors T).
     fn set_complement_rna(&mut self) {
         // Same as DNA complement (U maps same as T at position 3)
         self.set_complement_dna();
@@ -258,48 +285,57 @@ impl Alphabet {
 
     // ===== Query methods =====
 
+    /// True if `x` is one of the K canonical residues (codes 0..K-1).
     #[inline]
     pub fn is_canonical(&self, x: Dsq) -> bool {
         (x as usize) < self.k
     }
 
+    /// True if `x` is the gap symbol (code K).
     #[inline]
     pub fn is_gap(&self, x: Dsq) -> bool {
         x as usize == self.k
     }
 
+    /// True if `x` is a degenerate residue code (K+1..Kp-3).
     #[inline]
     pub fn is_degenerate(&self, x: Dsq) -> bool {
         let xu = x as usize;
         xu > self.k && xu < self.kp - 2
     }
 
+    /// True if `x` is any residue (canonical or degenerate), excluding gap/missing/nonresidue.
     #[inline]
     pub fn is_residue(&self, x: Dsq) -> bool {
         let xu = x as usize;
         xu < self.k || (xu > self.k && xu < self.kp - 2)
     }
 
+    /// True if `x` is the missing-data symbol (`~`, code Kp-1).
     #[inline]
     pub fn is_missing(&self, x: Dsq) -> bool {
         x as usize == self.kp - 1
     }
 
+    /// Digital code for the gap symbol `-`.
     #[inline]
     pub fn gap_code(&self) -> Dsq {
         self.k as Dsq
     }
 
+    /// Digital code for the "any residue" symbol (N for nucleic, X for amino).
     #[inline]
     pub fn unknown_code(&self) -> Dsq {
         (self.kp - 3) as Dsq
     }
 
+    /// Digital code for the nonresidue marker `*` (Kp-2).
     #[inline]
     pub fn nonresidue_code(&self) -> Dsq {
         (self.kp - 2) as Dsq
     }
 
+    /// Digital code for the missing-data marker `~` (Kp-1).
     #[inline]
     pub fn missing_code(&self) -> Dsq {
         (self.kp - 1) as Dsq
@@ -307,7 +343,7 @@ impl Alphabet {
 
     // ===== Digitization =====
 
-    /// Digitize a single character.
+    /// Digitize a single ASCII character to its digital code, or DSQ_ILLEGAL.
     #[inline]
     pub fn digitize_symbol(&self, c: u8) -> Dsq {
         if (c as usize) < 128 {
@@ -317,8 +353,15 @@ impl Alphabet {
         }
     }
 
-    /// Digitize a text sequence into a new Vec<Dsq>.
-    /// Returns a 1-based digital sequence: dsq[0] = SENTINEL, dsq[1..L] = sequence, dsq[L+1] = SENTINEL.
+    /// True if `c` is explicitly ignored while digitizing text input.
+    #[inline]
+    pub fn is_ignored_symbol(&self, c: u8) -> bool {
+        self.digitize_symbol(c) == DSQ_IGNORED
+    }
+
+    /// Digitize an ASCII sequence into a new `Vec<Dsq>`.
+    /// Returns a 1-based digital sequence: `dsq[0] = SENTINEL`, `dsq[1..=L]` = residues,
+    /// `dsq[L+1] = SENTINEL`. Counterpart to Easel's `esl_abc_Digitize()`.
     pub fn digitize(&self, seq: &[u8]) -> Vec<Dsq> {
         let mut dsq = Vec::with_capacity(seq.len() + 2);
         dsq.push(DSQ_SENTINEL);
@@ -332,8 +375,34 @@ impl Alphabet {
         dsq
     }
 
-    /// Convert a digital sequence back to text (ASCII).
-    /// Input dsq is 1-based (dsq[1..=l] are the residues).
+    /// Checked variant of [`Self::digitize`]. Illegal symbols return an error
+    /// instead of being silently dropped.
+    pub fn digitize_checked(&self, seq: &[u8]) -> crate::errors::HmmerResult<Vec<Dsq>> {
+        let mut dsq = Vec::with_capacity(seq.len() + 2);
+        dsq.push(DSQ_SENTINEL);
+        for &c in seq {
+            let code = self.digitize_symbol(c);
+            if code == DSQ_IGNORED {
+                continue;
+            }
+            if code == DSQ_ILLEGAL || (!self.is_residue(code) && code != self.nonresidue_code()) {
+                let display = if c.is_ascii_graphic() || c == b' ' {
+                    (c as char).to_string()
+                } else {
+                    format!("\\x{c:02x}")
+                };
+                return Err(crate::errors::HmmerError::Format(format!(
+                    "Illegal symbol '{display}' in sequence"
+                )));
+            }
+            dsq.push(code);
+        }
+        dsq.push(DSQ_SENTINEL);
+        Ok(dsq)
+    }
+
+    /// Convert a 1-based digital sequence back to ASCII text.
+    /// Counterpart to Easel's `esl_abc_Textize()`.
     pub fn textize(&self, dsq: &[Dsq], l: usize) -> String {
         let mut s = String::with_capacity(l);
         for i in 1..=l {
@@ -347,8 +416,8 @@ impl Alphabet {
         s
     }
 
-    /// Reverse complement a digital sequence in place (DNA/RNA only).
-    /// dsq is 1-based: dsq[1..=n] are the residues.
+    /// Reverse-complement a 1-based digital sequence in place (DNA/RNA only).
+    /// Counterpart to Easel's `esl_abc_revcomp()`. Panics if the alphabet has no complement table.
     pub fn revcomp(&self, dsq: &mut [Dsq], n: usize) {
         let comp = self
             .complement
@@ -415,6 +484,15 @@ mod tests {
         assert_eq!(dsq[2], 1);
         assert_eq!(dsq[3], 2);
         assert_eq!(dsq[4], 3);
+    }
+
+    #[test]
+    fn test_whitespace_is_ignored() {
+        let abc = Alphabet::amino();
+        assert!(abc.is_ignored_symbol(b' '));
+        assert!(abc.is_ignored_symbol(b'\t'));
+        assert!(abc.is_ignored_symbol(b'\n'));
+        assert_eq!(abc.digitize(b"AC D\tE\nF").len(), 7);
     }
 
     #[test]

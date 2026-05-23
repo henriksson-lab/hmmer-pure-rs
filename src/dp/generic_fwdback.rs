@@ -6,9 +6,13 @@ use crate::dp::gmx::*;
 use crate::logsum::p7_flogsum;
 use crate::profile::*;
 
-/// Generic Forward algorithm.
-/// Returns the Forward log-likelihood score in nats.
-/// `dsq` is a 1-based digital sequence (dsq[1..=L]).
+/// The Forward algorithm: total log-likelihood summed over all alignments.
+///
+/// Standard Forward DP. Given digital sequence `dsq` (1-based, `dsq[1..=L]`),
+/// profile `gm`, and DP matrix `gx`, fills `gx` and returns the Forward lod
+/// score in nats. Caller subtracts a null model lod score to obtain a bit
+/// score. The log-sum table is (re)initialized internally via
+/// `p7_flogsuminit`. Counterpart of `p7_GForward`.
 pub fn g_forward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
     let esc: f32 = if gm.is_local() {

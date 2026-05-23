@@ -1,68 +1,107 @@
 //! Output formatting utilities to match C printf behavior.
 
-/// Format a float like C's `%9.2g` — 9 characters wide, 2 significant digits.
-/// C's %g trims trailing zeros and uses exponential when exp < -4 or >= precision.
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_double, c_int};
+
+extern "C" {
+    fn snprintf(s: *mut c_char, n: usize, format: *const c_char, ...) -> c_int;
+}
+
+fn c_snprintf_double(fmt: &[u8], val: f64) -> String {
+    let mut buf = [0_i8; 64];
+    let n = unsafe {
+        snprintf(
+            buf.as_mut_ptr(),
+            buf.len(),
+            fmt.as_ptr().cast::<c_char>(),
+            val as c_double,
+        )
+    };
+    if n < 0 {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Format an E-value the same way C's `printf("%9.2g", val)` does.
+///
+/// Width 9, 2 significant digits, exponential form when the decimal exponent
+/// is < -4 or >= the precision; trailing zeros and trailing `.` are trimmed.
+/// Reproduces C output byte-for-byte for the values HMMER emits.
 pub fn fmt_evalue(val: f64) -> String {
-    if val == 0.0 {
-        return format!("{:>9}", "0");
-    }
-    if val.is_infinite() {
-        return format!("{:>9}", "inf");
-    }
-    if val.is_nan() {
-        return format!("{:>9}", "nan");
-    }
-
-    let abs_val = val.abs();
-    let exp = abs_val.log10().floor() as i32;
-
-    // C's %g with precision 2: use exponential if exp < -4 or exp >= 2
-    if exp >= -4 && exp < 2 {
-        // Fixed notation
-        // Number of decimal places = precision - 1 - exp (but min 0)
-        let decimals = (1 - exp).max(0) as usize;
-        let s = format!("{:.*}", decimals, val);
-        // Trim trailing zeros after decimal point (like C's %g)
-        let s = if s.contains('.') {
-            let s = s.trim_end_matches('0');
-            let s = s.trim_end_matches('.');
-            s.to_string()
-        } else {
-            s
-        };
-        format!("{:>9}", s)
-    } else {
-        // Exponential notation
-        // Format with 1 decimal place, then trim trailing zeros
-        let mut exp = exp;
-        let mut mantissa = val / 10.0_f64.powi(exp);
-        mantissa = (mantissa * 10.0).round() / 10.0;
-        if mantissa.abs() >= 10.0 {
-            mantissa /= 10.0;
-            exp += 1;
-        }
-        if exp >= 0 {
-            let exp_str = format!("e+{:02}", exp);
-            let m = format!("{:.1}", mantissa);
-            let m = m.trim_end_matches('0').trim_end_matches('.');
-            format!("{:>9}", format!("{}{}", m, exp_str))
-        } else {
-            let exp_str = format!("e-{:02}", -exp);
-            let m = format!("{:.1}", mantissa);
-            let m = m.trim_end_matches('0').trim_end_matches('.');
-            format!("{:>9}", format!("{}{}", m, exp_str))
-        }
-    }
+    c_snprintf_double(b"%9.2g\0", val)
 }
 
-/// Format a score like C's `%6.1f`.
+/// Format a bit score using C's `%6.1f` (width 6, 1 decimal).
 pub fn fmt_score(val: f32) -> String {
-    format!("{:6.1}", val)
+    c_snprintf_double(b"%6.1f\0", val as f64)
 }
 
-/// Format a bias like C's `%5.1f`.
+/// Format a bias-composition correction using C's `%5.1f` (width 5, 1 decimal).
 pub fn fmt_bias(val: f32) -> String {
-    format!("{:5.1}", val)
+    c_snprintf_double(b"%5.1f\0", val as f64)
+}
+
+/// Format a `SystemTime` as HMMER's ctime-style footer date.
+pub fn format_hmmer_date(t: std::time::SystemTime) -> String {
+    use std::time::UNIX_EPOCH;
+
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (sec, min, hour, day, month, year) = broken_down_time(secs);
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let dow = (((secs / 86400) + 4) % 7) as usize;
+    format!(
+        "{} {} {:>2} {:02}:{:02}:{:02} {}",
+        days[dow],
+        months[(month - 1) as usize],
+        day,
+        hour,
+        min,
+        sec,
+        year
+    )
+}
+
+fn broken_down_time(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let sec = (secs % 60) as u32;
+    let min = ((secs / 60) % 60) as u32;
+    let hour = ((secs / 3600) % 24) as u32;
+    let mut days = secs / 86400;
+    let mut year = 1970;
+    loop {
+        let yd = if is_leap(year) { 366 } else { 365 };
+        if days < yd {
+            break;
+        }
+        days -= yd;
+        year += 1;
+    }
+    let mdays = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1;
+    for &m in &mdays {
+        if days < m {
+            break;
+        }
+        days -= m;
+        month += 1;
+    }
+    (sec, min, hour, (days + 1) as u32, month, year)
+}
+
+fn is_leap(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 #[cfg(test)]
@@ -79,72 +118,5 @@ mod tests {
         assert_eq!(fmt_evalue(2.9e-14), "  2.9e-14");
         assert_eq!(fmt_evalue(10.0), "       10"); // Fixed, no trailing .0
         assert_eq!(fmt_evalue(0.5), "      0.5");
-    }
-}
-
-use crate::tophits::{TopHits, P7_IS_REPORTED};
-use std::io::Write;
-
-/// Write per-sequence tabular output (--tblout format).
-pub fn write_tblout<W: Write>(f: &mut W, qname: &str, qacc: Option<&str>, th: &TopHits, z: f64) {
-    writeln!(f, "#                                                               --- full sequence ---- --- best 1 domain ---- --- domain number estimation ----").unwrap();
-    writeln!(f, "# target name        accession  query name           accession    E-value  score  bias   E-value  score  bias   exp reg clu  ov env dom rep inc description of target").unwrap();
-    writeln!(f, "#------------------- ---------- -------------------- ---------- --------- ------ ----- --------- ------ -----   --- --- --- --- --- --- --- --- ---------------------").unwrap();
-
-    for hit in &th.hits {
-        if hit.flags & P7_IS_REPORTED == 0 {
-            continue;
-        }
-        let evalue = z * hit.lnp.exp();
-        let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
-        let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
-        let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
-        let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
-        writeln!(f,
-            "{:<19} {:<10} {:<20} {:<10} {:>9.2e} {:>6.1} {:>5.1} {:>9.2e} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
-            hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc },
-            qname, qacc.unwrap_or("-"),
-            evalue, hit.score, hit.bias, dom_evalue, dom_score, dom_bias,
-            hit.nexpected, hit.ndom, 0, 0, hit.ndom, hit.ndom, hit.nreported, hit.nincluded,
-            if hit.desc.is_empty() { "-" } else { &hit.desc },
-        ).unwrap();
-    }
-}
-
-/// Write per-domain tabular output (--domtblout format).
-pub fn write_domtblout<W: Write>(
-    f: &mut W,
-    qname: &str,
-    qacc: Option<&str>,
-    th: &TopHits,
-    z: f64,
-    domz: f64,
-) {
-    writeln!(f, "#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord").unwrap();
-    writeln!(f, "# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target").unwrap();
-    writeln!(f, "#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------").unwrap();
-
-    for hit in &th.hits {
-        if hit.flags & P7_IS_REPORTED == 0 {
-            continue;
-        }
-        let evalue = z * hit.lnp.exp();
-        for (di, dom) in hit.dcl.iter().enumerate() {
-            if !dom.is_reported {
-                continue;
-            }
-            let c_evalue = domz * dom.lnp.exp();
-            let i_evalue = z * dom.lnp.exp();
-            let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
-            writeln!(f,
-                "{:<19} {:<10} {:>5} {:<20} {:<10} {:>5} {:>9.2e} {:>6.1} {:>5.1} {:>3} {:>3} {:>9.2e} {:>9.2e} {:>6.1} {:>5.1} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:.2} {}",
-                hit.name, if hit.acc.is_empty() { "-" } else { &hit.acc }, hit.n,
-                qname, qacc.unwrap_or("-"), 0,
-                evalue, hit.score, hit.bias, di + 1, hit.ndom,
-                c_evalue, i_evalue, dom.bitscore, dom.dombias,
-                1, 0, dom.iali, dom.jali, dom.ienv, dom.jenv, acc,
-                if hit.desc.is_empty() { "-" } else { &hit.desc },
-            ).unwrap();
-        }
     }
 }

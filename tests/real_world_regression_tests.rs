@@ -57,6 +57,27 @@ fn run_nhmmer_tblout(hmm: &str, seqdb: &str) -> String {
     std::fs::read_to_string(tblout).unwrap()
 }
 
+fn run_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let dfamtblout = dir.path().join("dfamtblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "nhmmer",
+            "--dfamtblout",
+            dfamtblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
+        .output()
+        .expect("failed to run hmmer nhmmer");
+    assert!(
+        output.status.success(),
+        "hmmer nhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(dfamtblout).unwrap()
+}
+
 fn run_nhmmer(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
@@ -76,6 +97,136 @@ fn run_nhmmer(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         std::fs::read_to_string(tblout).unwrap(),
     )
+}
+
+fn run_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["press", "-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmer press");
+    assert!(
+        press.status.success(),
+        "hmmer press failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let tblout = dir.path().join("tblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "nhmmscan",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run hmmer nhmmscan");
+    assert!(
+        output.status.success(),
+        "hmmer nhmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["press", "-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmer press");
+    assert!(
+        press.status.success(),
+        "hmmer press failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let dfamtblout = dir.path().join("dfamtblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "nhmmscan",
+            "--dfamtblout",
+            dfamtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run hmmer nhmmscan");
+    assert!(
+        output.status.success(),
+        "hmmer nhmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(dfamtblout).unwrap()
+}
+
+fn run_c_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+
+    let press = Command::new(test_path("hmmer/src/hmmpress"))
+        .args(["-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run bundled C hmmpress");
+    assert!(
+        press.status.success(),
+        "bundled C hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+
+    let tblout = dir.path().join("tblout.txt");
+    let output = Command::new(test_path("hmmer/src/nhmmscan"))
+        .args([
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run bundled C nhmmscan");
+    assert!(
+        output.status.success(),
+        "bundled C nhmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+
+    let press = Command::new(test_path("hmmer/src/hmmpress"))
+        .args(["-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run bundled C hmmpress");
+    assert!(
+        press.status.success(),
+        "bundled C hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+
+    let dfamtblout = dir.path().join("dfamtblout.txt");
+    let output = Command::new(test_path("hmmer/src/nhmmscan"))
+        .args([
+            "--dfamtblout",
+            dfamtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run bundled C nhmmscan");
+    assert!(
+        output.status.success(),
+        "bundled C nhmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(dfamtblout).unwrap()
 }
 
 fn run_nhmmer_stdout(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
@@ -111,6 +262,27 @@ fn run_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
     assert!(
         output.status.success(),
         "hmmer search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
+fn run_c_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domtblout.txt");
+    let output = Command::new(test_path("hmmer/src/hmmsearch"))
+        .args([
+            "--noali",
+            "--domtblout",
+            domtblout.to_str().unwrap(),
+            hmm,
+            seqdb,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmsearch");
+    assert!(
+        output.status.success(),
+        "bundled C hmmsearch failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     std::fs::read_to_string(domtblout).unwrap()
@@ -277,6 +449,55 @@ struct NhmmerRow {
     bias: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DfamRow {
+    target: String,
+    acc: String,
+    query: String,
+    score: String,
+    evalue: String,
+    bias: String,
+    hmm_from: usize,
+    hmm_to: usize,
+    strand: String,
+    ali_from: usize,
+    ali_to: usize,
+    env_from: usize,
+    env_to: usize,
+    sq_len: usize,
+}
+
+fn parse_dfamtbl_rows(content: &str) -> Vec<DfamRow> {
+    content
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with('#') || line.trim().is_empty() {
+                return None;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 14 || (fields[8] != "+" && fields[8] != "-") {
+                return None;
+            }
+            Some(DfamRow {
+                target: fields[0].to_string(),
+                acc: fields[1].to_string(),
+                query: fields[2].to_string(),
+                score: fields[3].to_string(),
+                evalue: fields[4].to_string(),
+                bias: fields[5].to_string(),
+                hmm_from: fields[6].parse().ok()?,
+                hmm_to: fields[7].parse().ok()?,
+                strand: fields[8].to_string(),
+                ali_from: fields[9].parse().ok()?,
+                ali_to: fields[10].parse().ok()?,
+                env_from: fields[11].parse().ok()?,
+                env_to: fields[12].parse().ok()?,
+                sq_len: fields[13].parse().ok()?,
+            })
+        })
+        .collect()
+}
+
 fn parse_nhmmer_rows(content: &str) -> Vec<NhmmerRow> {
     content
         .lines()
@@ -311,14 +532,6 @@ fn query_hit_counts(rows: &[(String, String, f64, f64)]) -> BTreeMap<String, usi
     let mut counts = BTreeMap::new();
     for (_, query, _, _) in rows {
         *counts.entry(query.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn dom_query_counts(rows: &[DomtblRow]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for row in rows {
-        *counts.entry(row.query.clone()).or_insert(0) += 1;
     }
     counts
 }
@@ -394,6 +607,44 @@ fn test_nhmmer_made1_tblout_matches_golden_rows() {
         rust_rows, golden_rows,
         "nhmmer MADE1 rows diverged from golden output"
     );
+}
+
+#[test]
+fn test_nhmmer_made1_dfamtblout_is_written() {
+    let golden = std::fs::read_to_string(test_path("tests/golden/nhmmer_made1.tblout")).unwrap();
+    let rust = run_nhmmer_dfamtblout(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+    );
+
+    assert!(rust.contains("# hit scores"));
+    assert!(rust.contains("sq-len"));
+    assert!(!rust.contains("modlen"));
+    let dfam_rows = parse_dfamtbl_rows(&rust);
+    let tblout_rows = parse_nhmmer_rows(&golden);
+    assert_eq!(dfam_rows.len(), tblout_rows.len());
+    for (dfam, tblout) in dfam_rows.iter().zip(tblout_rows.iter()) {
+        assert_eq!(dfam.target, tblout.target);
+        assert_eq!(dfam.acc, "DF0000629.2");
+        assert_eq!(dfam.query, tblout.query);
+        assert_eq!(dfam.score, tblout.score);
+        assert_eq!(dfam.evalue, tblout.evalue);
+        assert_eq!(dfam.bias, tblout.bias);
+        assert_eq!(
+            (dfam.hmm_from, dfam.hmm_to),
+            (tblout.hmm_from, tblout.hmm_to)
+        );
+        assert_eq!(
+            (dfam.ali_from, dfam.ali_to),
+            (tblout.ali_from, tblout.ali_to)
+        );
+        assert_eq!(
+            (dfam.env_from, dfam.env_to),
+            (tblout.env_from, tblout.env_to)
+        );
+        assert_eq!(dfam.strand, tblout.strand);
+        assert_eq!(dfam.sq_len, tblout.sq_len);
+    }
 }
 
 #[test]
@@ -503,6 +754,106 @@ fn test_nhmmer_made1_watson_and_crick_split_hits_cleanly() {
 }
 
 #[test]
+fn test_nhmmer_z_option_scales_longtarget_evalues() {
+    let (_z1_stdout, z1_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &["--watson", "-Z", "1"],
+    );
+    let (_z2_stdout, z2_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &["--watson", "-Z", "2"],
+    );
+
+    let z1_rows = parse_nhmmer_rows(&z1_tbl);
+    let z2_rows = parse_nhmmer_rows(&z2_tbl);
+    assert_eq!(z1_rows.len(), z2_rows.len());
+    assert!(!z1_rows.is_empty());
+    for (a, b) in z1_rows.iter().zip(&z2_rows) {
+        assert_eq!(
+            (&a.target, &a.query, a.ali_from, a.ali_to),
+            (&b.target, &b.query, b.ali_from, b.ali_to)
+        );
+        let e1: f64 = a.evalue.parse().unwrap();
+        let e2: f64 = b.evalue.parse().unwrap();
+        let ratio = e2 / e1;
+        assert!(
+            (1.8..=2.2).contains(&ratio),
+            "-Z did not scale nhmmer E-value about 2x: {e1} -> {e2} ({ratio})"
+        );
+    }
+}
+
+#[test]
+fn test_nhmmer_keeps_hits_from_duplicate_target_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let dup_targets = dir.path().join("duplicate-targets.fa");
+    let target = std::fs::read_to_string(test_path("hmmer/tutorial/dna_target.fa")).unwrap();
+    std::fs::write(&dup_targets, format!("{target}{target}")).unwrap();
+
+    let (_single_stdout, single_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &[],
+    );
+    let (_dup_stdout, dup_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        dup_targets.to_str().unwrap(),
+        &[],
+    );
+
+    let single_rows = parse_nhmmer_rows(&single_tbl);
+    let dup_rows = parse_nhmmer_rows(&dup_tbl);
+    assert_eq!(dup_rows.len(), single_rows.len() * 2);
+}
+
+#[test]
+fn test_nhmmer_longtarget_window_length_override_is_honored() {
+    let (_default_stdout, default_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &[],
+    );
+    let (_tiny_window_stdout, tiny_window_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &["--w_length", "4"],
+    );
+
+    assert_eq!(parse_nhmmer_rows(&default_tbl).len(), 5);
+    assert!(
+        parse_nhmmer_rows(&tiny_window_tbl).is_empty(),
+        "a tiny --w_length override should be used by all long-target filter stages"
+    );
+}
+
+#[test]
+fn test_nhmmscan_made1_tblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/MADE1.hmm");
+    let seqdb = test_path("hmmer/tutorial/dna_target.fa");
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmscan_tblout(&hmm, &seqdb));
+    let rust_rows = parse_nhmmer_rows(&run_nhmmscan_tblout(&hmm, &seqdb));
+
+    assert_eq!(rust_rows, c_rows);
+    assert_eq!(rust_rows.len(), 5);
+    assert_eq!(rust_rows.iter().filter(|row| row.strand == "+").count(), 3);
+    assert_eq!(rust_rows.iter().filter(|row| row.strand == "-").count(), 2);
+}
+
+#[test]
+fn test_nhmmscan_made1_dfamtblout_matches_bundled_c() {
+    let hmm = test_path("hmmer/tutorial/MADE1.hmm");
+    let seqdb = test_path("hmmer/tutorial/dna_target.fa");
+    let c_dfam = run_c_nhmmscan_dfamtblout(&hmm, &seqdb);
+    let rust_dfam = run_nhmmscan_dfamtblout(&hmm, &seqdb);
+
+    assert_eq!(rust_dfam, c_dfam);
+    assert!(rust_dfam.contains(" strand  ali-st  ali-en"));
+    assert!(rust_dfam.contains("    -    302466  302390"));
+}
+
+#[test]
 fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
     let golden_stdout =
         std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.stdout")).unwrap();
@@ -601,11 +952,7 @@ fn test_gecco_pfam5_real_world_query_hit_counts_match_golden() {
         golden_rows.len(),
         "gecco_pfam5 total hit count diverged"
     );
-    assert_eq!(
-        query_hit_counts(&rust_rows),
-        query_hit_counts(&golden_rows),
-        "gecco_pfam5 per-query hit counts diverged"
-    );
+    assert_eq!(rust_rows, golden_rows, "gecco_pfam5 core hit rows diverged");
 }
 
 #[test]
@@ -626,9 +973,8 @@ fn test_gecco_missed_real_world_query_hit_counts_match_golden() {
         "gecco_missed total hit count diverged"
     );
     assert_eq!(
-        query_hit_counts(&rust_rows),
-        query_hit_counts(&golden_rows),
-        "gecco_missed per-query hit counts diverged"
+        rust_rows, golden_rows,
+        "gecco_missed core hit rows diverged"
     );
 }
 
@@ -860,18 +1206,11 @@ fn test_fn3_domtblout_rows_match_golden_core_columns() {
 
 #[test]
 fn test_gecco_pfam5_domtblout_query_counts_are_stable() {
-    let rows = parse_domtbl_rows(&run_hmmsearch_domtblout(
-        &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
-    ));
-    let expected = BTreeMap::from([
-        ("AAA".to_string(), 3usize),
-        ("AAA_16".to_string(), 8usize),
-        ("AAA_21".to_string(), 6usize),
-        ("AAA_29".to_string(), 4usize),
-        ("SMC_N".to_string(), 3usize),
-    ]);
-    assert_eq!(dom_query_counts(&rows), expected);
+    let hmm = test_path("hmmer/testsuite/gecco_pfam5.hmm");
+    let seqdb = test_path("hmmer/testsuite/gecco_proteins.faa");
+    let rust_rows = parse_domtbl_rows(&run_hmmsearch_domtblout(&hmm, &seqdb));
+    let c_rows = parse_domtbl_rows(&run_c_hmmsearch_domtblout(&hmm, &seqdb));
+    assert_eq!(rust_rows, c_rows);
 }
 
 #[test]

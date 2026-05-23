@@ -1,7 +1,7 @@
 //! Binary HMM file I/O — reading C HMMER's .h3m format.
 //! Enables interoperability with C hmmpress output.
 
-use std::io::{BufReader, Read};
+use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 
 use crate::alphabet::AlphabetType;
@@ -16,39 +16,73 @@ const MAGIC_3D: u32 = 0xe8ededb9;
 const MAGIC_3E: u32 = 0xe8ededb0;
 const MAGIC_3F: u32 = 0xe8ededba;
 
+/// Return true if a path starts with a supported HMMER3 binary HMM magic.
+pub fn looks_like_binary_hmm_file(path: &Path) -> HmmerResult<bool> {
+    let mut file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+    let mut magic_buf = [0u8; 4];
+    match file.read_exact(&mut magic_buf) {
+        Ok(()) => {
+            let magic = u32::from_ne_bytes(magic_buf);
+            Ok(matches!(
+                magic,
+                MAGIC_3A | MAGIC_3B | MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F
+            ))
+        }
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(HmmerError::Io(e)),
+    }
+}
+
+/// Read a little/native-endian `u32` from `r` (matches C's raw `fread` of `uint32_t`).
 fn read_u32<R: Read>(r: &mut R) -> HmmerResult<u32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
     Ok(u32::from_ne_bytes(buf))
 }
 
+/// Read a native-endian `i32` from `r`.
 fn read_i32<R: Read>(r: &mut R) -> HmmerResult<i32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
     Ok(i32::from_ne_bytes(buf))
 }
 
+/// Read a native-endian `f32` from `r`.
 fn read_f32<R: Read>(r: &mut R) -> HmmerResult<f32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
     Ok(f32::from_ne_bytes(buf))
 }
 
+/// Read a length-prefixed C-string: `i32` length including trailing NUL, then bytes.
+/// A length of `-1` (absent) or `0` (empty) yields an empty string.
 fn read_string<R: Read>(r: &mut R) -> HmmerResult<String> {
     let len = read_i32(r)?;
     if len <= 0 {
+        if len < -1 {
+            return Err(HmmerError::Format(format!(
+                "Invalid binary HMM string length: {len}"
+            )));
+        }
         return Ok(String::new()); // -1 = absent, 0 = empty
     }
     let len = len as usize;
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-    // Remove null terminator if present
-    if buf.last() == Some(&0) {
-        buf.pop();
+    if buf.last() != Some(&0) {
+        return Err(HmmerError::Format(
+            "Binary HMM string is missing trailing NUL terminator".to_string(),
+        ));
     }
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    if buf[..len - 1].contains(&0) {
+        return Err(HmmerError::Format(
+            "Binary HMM string contains embedded NUL byte".to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&buf[..len - 1]).to_string())
 }
 
+/// Like [`read_string`] but returns `None` for empty/absent strings.
 fn read_string_optional<R: Read>(r: &mut R) -> HmmerResult<Option<String>> {
     let s = read_string(r)?;
     if s.is_empty() {
@@ -58,13 +92,31 @@ fn read_string_optional<R: Read>(r: &mut R) -> HmmerResult<Option<String>> {
     }
 }
 
-/// Read a single HMM from a binary .h3m stream.
+/// Read one binary HMMER3 HMM record from `r` (port of `read_bin30hmm`).
+///
+/// Dispatches on the leading magic to pick the file format (3/a..3/f), then
+/// reads flags, M, alphabet code, the match/insert/transition probability
+/// blocks, name, optional annotation strings/arrays, comlog, nseq, eff_nseq,
+/// maxlen (3/c+), ctime, map (if `P7H_MAP`), checksum, E-value parameters
+/// (full array in 3/b+, the legacy three scalars in 3/a), Pfam cutoffs, and
+/// optional COMPO composition vector. Returns `Ok(None)` on clean EOF.
 pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     // Read magic number
-    let magic = match read_u32(r) {
-        Ok(m) => m,
-        Err(_) => return Ok(None), // EOF
-    };
+    let mut magic_buf = [0u8; 4];
+    match r.read(&mut magic_buf[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!(),
+        Err(e) => return Err(HmmerError::Io(e)),
+    }
+    if let Err(e) = r.read_exact(&mut magic_buf[1..]) {
+        return if e.kind() == ErrorKind::UnexpectedEof {
+            Err(HmmerError::Io(e))
+        } else {
+            Err(HmmerError::Io(e))
+        };
+    }
+    let magic = u32::from_ne_bytes(magic_buf);
 
     let (has_maxl, has_modern_evparams) = match magic {
         MAGIC_3A => (false, false),
@@ -79,13 +131,23 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     };
 
     let flags = read_i32(r)? as u32;
-    let m = read_i32(r)? as usize;
+    let m_i32 = read_i32(r)?;
+    if m_i32 <= 0 {
+        return Err(HmmerError::Format(format!(
+            "Invalid binary HMM model length: {m_i32}"
+        )));
+    }
+    let m = m_i32 as usize;
     let abc_type_int = read_i32(r)?;
     let abc_type = match abc_type_int {
         1 => AlphabetType::Rna,
         2 => AlphabetType::Dna,
         3 => AlphabetType::Amino,
-        _ => AlphabetType::Amino,
+        _ => {
+            return Err(HmmerError::Format(format!(
+                "Unknown binary HMM alphabet code: {abc_type_int}"
+            )))
+        }
     };
 
     let k = match abc_type {
@@ -120,6 +182,11 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
 
     // Read name
     hmm.name = read_string(r)?;
+    if hmm.name.is_empty() {
+        return Err(HmmerError::Format(
+            "Binary HMM record has empty required NAME".to_string(),
+        ));
+    }
 
     // Optional fields based on flags
     if flags & P7H_ACC != 0 {
@@ -206,21 +273,37 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     Ok(Some(hmm))
 }
 
+/// Read an `m + 2` byte per-node annotation array (RF/MM/CONS/CS/CA) as raw bytes.
 fn read_annotation<R: Read>(r: &mut R, m: usize) -> HmmerResult<Vec<u8>> {
     let mut buf = vec![0u8; m + 2];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
     Ok(buf)
 }
 
-/// Read all HMMs from a binary .h3m file.
+/// Open a `.h3m` binary HMM database and read every contained HMM.
 pub fn read_binary_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
     let mut hmms = Vec::new();
+    let mut expected_abc = None;
 
     loop {
         match read_binary_hmm(&mut reader)? {
-            Some(hmm) => hmms.push(hmm),
+            Some(hmm) => {
+                if let Some(expected) = expected_abc {
+                    if hmm.abc_type != expected {
+                        return Err(HmmerError::Format(format!(
+                            "Binary HMM file contains mixed alphabets: first record is {:?}, record {} is {:?}",
+                            expected,
+                            hmms.len() + 1,
+                            hmm.abc_type
+                        )));
+                    }
+                } else {
+                    expected_abc = Some(hmm.abc_type);
+                }
+                hmms.push(hmm);
+            }
             None => break,
         }
     }
@@ -228,16 +311,33 @@ pub fn read_binary_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     Ok(hmms)
 }
 
-/// Write a single HMM in C-compatible binary .h3m format.
+/// Write a single HMM in HMMER3/f binary format (port of `p7_hmmfile_WriteBinary`).
+///
+/// Emits magic, flags, M, alphabet code, all match/insert/transition
+/// probability blocks, name, optional acc/desc, RF/MM/CONS/CS/CA annotation
+/// arrays, comlog, nseq/eff_nseq, max_length, ctime, optional map, checksum,
+/// E-value parameter array, Pfam cutoffs, and optional COMPO. Output is
+/// byte-compatible with C `hmmpress`/`hmmconvert -b`.
 pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     let k = hmm.abc_k;
+    let mut flags = hmm.flags;
+    if hmm.acc.is_some() {
+        flags |= P7H_ACC;
+    } else {
+        flags &= !P7H_ACC;
+    }
+    if hmm.desc.is_some() {
+        flags |= P7H_DESC;
+    } else {
+        flags &= !P7H_DESC;
+    }
 
     // Magic number (3/f format)
     w.write_all(&MAGIC_3F.to_ne_bytes())
         .map_err(HmmerError::Io)?;
 
     // Flags
-    w.write_all(&(hmm.flags as i32).to_ne_bytes())
+    w.write_all(&(flags as i32).to_ne_bytes())
         .map_err(HmmerError::Io)?;
 
     // M
@@ -282,26 +382,26 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     write_string(w, &hmm.name)?;
 
     // Optional fields
-    if hmm.flags & P7H_ACC != 0 {
+    if flags & P7H_ACC != 0 {
         write_string(w, hmm.acc.as_deref().unwrap_or(""))?;
     }
-    if hmm.flags & P7H_DESC != 0 {
+    if flags & P7H_DESC != 0 {
         write_string(w, hmm.desc.as_deref().unwrap_or(""))?;
     }
 
-    if hmm.flags & P7H_RF != 0 {
+    if flags & P7H_RF != 0 {
         write_annotation(w, &hmm.rf, hmm.m)?;
     }
-    if hmm.flags & P7H_MMASK != 0 {
+    if flags & P7H_MMASK != 0 {
         write_annotation(w, &hmm.mm, hmm.m)?;
     }
-    if hmm.flags & P7H_CONS != 0 {
+    if flags & P7H_CONS != 0 {
         write_annotation(w, &hmm.consensus, hmm.m)?;
     }
-    if hmm.flags & P7H_CS != 0 {
+    if flags & P7H_CS != 0 {
         write_annotation(w, &hmm.cs, hmm.m)?;
     }
-    if hmm.flags & P7H_CA != 0 {
+    if flags & P7H_CA != 0 {
         write_annotation(w, &hmm.ca, hmm.m)?;
     }
 
@@ -322,7 +422,7 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     write_string(w, hmm.ctime.as_deref().unwrap_or(""))?;
 
     // Map
-    if hmm.flags & P7H_MAP != 0 {
+    if flags & P7H_MAP != 0 {
         if let Some(ref map) = hmm.map {
             for node in 0..=hmm.m {
                 let value = map.get(node).copied().unwrap_or(0);
@@ -352,7 +452,7 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     }
 
     // Composition
-    if hmm.flags & P7H_COMPO != 0 {
+    if flags & P7H_COMPO != 0 {
         for i in 0..k.min(MAXABET) {
             w.write_all(&hmm.compo[i].to_ne_bytes())
                 .map_err(HmmerError::Io)?;
@@ -362,6 +462,8 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     Ok(())
 }
 
+/// Write an `m + 2` byte per-node annotation array, padding with spaces and a
+/// trailing NUL if `data` is `None` or shorter than the expected length.
 fn write_annotation<W: std::io::Write>(
     w: &mut W,
     data: &Option<Vec<u8>>,
@@ -385,6 +487,7 @@ fn write_annotation<W: std::io::Write>(
     Ok(())
 }
 
+/// Write a length-prefixed C-string: length (including NUL), bytes, terminating NUL.
 fn write_string<W: std::io::Write>(w: &mut W, s: &str) -> HmmerResult<()> {
     let bytes = s.as_bytes();
     let len = (bytes.len() + 1) as i32; // include null terminator
@@ -404,6 +507,8 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
     }
 
+    /// Test helper: run the C `hmmconvert -b` binary on an ASCII HMM and
+    /// stage the resulting `.h3m` in `dir` for the Rust reader to consume.
     fn c_binary_hmm_from_text(text_hmm: &Path, dir: &tempfile::TempDir) -> std::path::PathBuf {
         let output = Command::new(test_path("hmmer/src/hmmconvert"))
             .arg("-b")
@@ -419,6 +524,90 @@ mod tests {
         let path = dir.path().join("converted.h3m");
         std::fs::write(&path, output.stdout).unwrap();
         path
+    }
+
+    #[test]
+    fn rejects_unknown_binary_alphabet_code() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC_3F.to_ne_bytes());
+        buf.extend_from_slice(&0i32.to_ne_bytes()); // flags
+        buf.extend_from_slice(&1i32.to_ne_bytes()); // M
+        buf.extend_from_slice(&99i32.to_ne_bytes()); // invalid alphabet code
+
+        let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("Unknown binary HMM alphabet code"))
+        );
+    }
+
+    #[test]
+    fn rejects_nonpositive_binary_model_length_before_allocating() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC_3F.to_ne_bytes());
+        buf.extend_from_slice(&0i32.to_ne_bytes()); // flags
+        buf.extend_from_slice(&(-1i32).to_ne_bytes()); // invalid M
+        buf.extend_from_slice(&3i32.to_ne_bytes()); // amino
+
+        let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("Invalid binary HMM model length"))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_binary_string_length() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC_3F.to_ne_bytes());
+        buf.extend_from_slice(&0i32.to_ne_bytes()); // flags
+        buf.extend_from_slice(&1i32.to_ne_bytes()); // M
+        buf.extend_from_slice(&3i32.to_ne_bytes()); // amino
+        for _ in 0..20 {
+            buf.extend_from_slice(&0f32.to_ne_bytes()); // mat[1]
+        }
+        for _ in 0..40 {
+            buf.extend_from_slice(&0f32.to_ne_bytes()); // ins[0..1]
+        }
+        for _ in 0..14 {
+            buf.extend_from_slice(&0f32.to_ne_bytes()); // t[0..1]
+        }
+        buf.extend_from_slice(&(-2i32).to_ne_bytes()); // invalid name length
+
+        let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("Invalid binary HMM string length"))
+        );
+    }
+
+    #[test]
+    fn rejects_binary_string_without_trailing_nul() {
+        let mut buf = Cursor::new([3i32.to_ne_bytes().as_slice(), b"abc"].concat());
+
+        let err = read_string(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("missing trailing NUL"));
+    }
+
+    #[test]
+    fn rejects_binary_string_with_embedded_nul() {
+        let mut buf = Cursor::new([4i32.to_ne_bytes().as_slice(), b"a\0b\0"].concat());
+
+        let err = read_string(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
+    fn rejects_binary_hmm_with_empty_required_name() {
+        let mut hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        hmm.name.clear();
+        let mut buf = Vec::new();
+        write_binary_hmm(&mut buf, &hmm).unwrap();
+
+        let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
+        assert!(err.to_string().contains("empty required NAME"));
     }
 
     #[test]
@@ -454,6 +643,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn read_binary_hmm_file_rejects_mixed_alphabet_records() {
+        let amino = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        let dna = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/mapali/ecori-rebuilt.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.h3m");
+        let mut file = std::fs::File::create(&path).unwrap();
+        write_binary_hmm(&mut file, &amino).unwrap();
+        write_binary_hmm(&mut file, &dna).unwrap();
+        drop(file);
+
+        let err = read_binary_hmm_file(&path).unwrap_err();
+
+        assert!(err.to_string().contains("mixed alphabets"));
+    }
+
+    #[test]
+    fn binary_writer_normalizes_acc_and_desc_flags_from_fields() {
+        let mut hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        hmm.acc = Some("ACC123".to_string());
+        hmm.desc = Some("description".to_string());
+        hmm.flags &= !(P7H_ACC | P7H_DESC);
+
+        let mut buf = Vec::new();
+        write_binary_hmm(&mut buf, &hmm).unwrap();
+        let read = read_binary_hmm(&mut Cursor::new(buf)).unwrap().unwrap();
+        assert_eq!(read.acc.as_deref(), Some("ACC123"));
+        assert_eq!(read.desc.as_deref(), Some("description"));
+
+        let mut no_meta = hmm;
+        no_meta.acc = None;
+        no_meta.desc = None;
+        no_meta.flags |= P7H_ACC | P7H_DESC;
+        let mut buf = Vec::new();
+        write_binary_hmm(&mut buf, &no_meta).unwrap();
+        let read = read_binary_hmm(&mut Cursor::new(buf)).unwrap().unwrap();
+        assert_eq!(read.acc, None);
+        assert_eq!(read.desc, None);
     }
 
     #[test]

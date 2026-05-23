@@ -10,11 +10,12 @@ const ETARGET_DNA: f64 = 0.62;
 const ESIGMA_DEFAULT: f64 = 45.0;
 const LOG2_INV: f64 = std::f64::consts::LOG2_E;
 
-/// Compute the effective sequence number for an HMM using entropy weighting.
-/// Adjusts the effective sequence count so that the mean match-state relative
-/// entropy matches a target value.
+/// Determine the effective sequence number Neff by entropy weighting.
 ///
-/// Returns the effective sequence number (Neff).
+/// Bisects on Neff so that the resulting parameterized HMM's mean match-state
+/// relative entropy matches the target (in bits). Caller passes a count-based
+/// HMM; the HMM itself is not modified except for `eff_nseq`.
+/// Returns Neff in `[0, hmm.nseq]`. Counterpart to C's `p7_EntropyWeight()`.
 pub fn entropy_weight(hmm: &mut Hmm, bg: &Bg, target_re: Option<f64>) -> f32 {
     let target = target_re.unwrap_or(default_re_target(hmm));
     let etarget = entropy_target(hmm, target, ESIGMA_DEFAULT);
@@ -50,6 +51,7 @@ pub fn entropy_weight(hmm: &mut Hmm, bg: &Bg, target_re: Option<f64>) -> f32 {
     neff
 }
 
+/// Pick the default relative-entropy target by alphabet (amino vs nucleic).
 fn default_re_target(hmm: &Hmm) -> f64 {
     if hmm.abc_k == 20 {
         ETARGET_AMINO
@@ -58,12 +60,14 @@ fn default_re_target(hmm: &Hmm) -> f64 {
     }
 }
 
+/// Apply Karplus-style entropy-target floor: at least `esigma / M` bits/match.
 fn entropy_target(hmm: &Hmm, re_target: f64, esigma: f64) -> f64 {
     let m = hmm.m as f64;
     let sigma_target = (esigma - LOG2_INV * (2.0 / (m * (m + 1.0))).ln()) / m;
     re_target.max(sigma_target)
 }
 
+/// Evaluate `f(Neff) = mean_match_re(scaled HMM) - etarget`; root sought by bisection.
 fn relative_entropy_fx(hmm: &Hmm, bg: &Bg, neff: f64, etarget: f64) -> f64 {
     let mut trial = hmm.clone();
     let nseq = trial.nseq as f64;
@@ -72,6 +76,8 @@ fn relative_entropy_fx(hmm: &Hmm, bg: &Bg, neff: f64, etarget: f64) -> f64 {
     mean_match_relative_entropy(&trial, bg) - etarget
 }
 
+/// Multiply all transition and emission counts in `hmm` by `scale` in place.
+/// Used to rescale a count-based HMM to its effective sequence number.
 pub fn scale_counts(hmm: &mut Hmm, scale: f64) {
     for k in 0..=hmm.m {
         for t in &mut hmm.t[k] {
@@ -84,6 +90,7 @@ pub fn scale_counts(hmm: &mut Hmm, scale: f64) {
     }
 }
 
+/// Mean per-position KL divergence (bits) between match emissions and background.
 fn mean_match_relative_entropy(hmm: &Hmm, bg: &Bg) -> f64 {
     let mut kl = 0.0_f64;
     for k in 1..=hmm.m {

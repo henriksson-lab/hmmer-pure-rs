@@ -183,7 +183,7 @@ pub struct Hit {
     pub acc: String,
     pub desc: String,
     pub n: usize,       // target sequence length
-    pub sortkey: f64,   // primary sort key (negative lnP)
+    pub sortkey: f64,   // primary sort key (lnP, or negative score for score-threshold ranking)
     pub score: f32,     // overall bit score
     pub bias: f32,      // bias correction in bits
     pub pre_score: f32, // pre-bias-correction score
@@ -221,6 +221,8 @@ pub struct TopHits {
 }
 
 impl TopHits {
+    /// Allocate a new (empty) ranked hit list.
+    /// Port of `p7_tophits_Create()`. Hits are added with `create_next_hit()`.
     pub fn new() -> Self {
         TopHits {
             hits: Vec::new(),
@@ -230,7 +232,8 @@ impl TopHits {
         }
     }
 
-    /// Add a new hit and return a mutable reference to it.
+    /// Append a fresh zero-initialized `Hit` and return a mutable reference for
+    /// the caller to fill in. Port of `p7_tophits_CreateNextHit()`.
     pub fn create_next_hit(&mut self) -> &mut Hit {
         self.hits.push(Hit {
             name: String::new(),
@@ -367,28 +370,17 @@ impl TopHits {
     /// position are adjacent.
     pub fn sort_by_seqidx_and_alipos(&mut self) {
         self.hits.sort_by(|a, b| {
-            let a_dom = a.dcl.first();
-            let b_dom = b.dcl.first();
-            let a_idx = a.seqidx;
-            let b_idx = b.seqidx;
-            a_idx
-                .cmp(&b_idx)
-                .then_with(|| {
-                    let a_name = a.name.as_str();
-                    let b_name = b.name.as_str();
-                    a_name.cmp(b_name)
-                })
-                .then_with(|| {
-                    let a_pos = a_dom.map(|d| d.iali.min(d.jali)).unwrap_or(0);
-                    let b_pos = b_dom.map(|d| d.iali.min(d.jali)).unwrap_or(0);
-                    a_pos.cmp(&b_pos)
-                })
-                .then_with(|| {
-                    let a_pos = a_dom.map(|d| d.iali.max(d.jali)).unwrap_or(0);
-                    let b_pos = b_dom.map(|d| d.iali.max(d.jali)).unwrap_or(0);
-                    a_pos.cmp(&b_pos)
-                })
+            a.seqidx
+                .cmp(&b.seqidx)
+                .then_with(|| compare_hit_alipos(a, b))
         });
+    }
+
+    /// Sort hits by (model name, alignment position) for duplicate detection in
+    /// nhmmscan. Mirrors C `p7_tophits_SortByModelnameAndAlipos`.
+    pub fn sort_by_modelname_and_alipos(&mut self) {
+        self.hits
+            .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| compare_hit_alipos(a, b)));
     }
 
     /// Sort hits by sort key (E-value / score) with C HMMER's tiebreakers
@@ -396,7 +388,7 @@ impl TopHits {
     ///   1. sortkey ascending (lnP ascending = most-significant first).
     ///   2. name.
     ///   3. strand (positive first).
-    ///   4. dcl[0].iali ascending.
+    ///   4. `dcl[0].iali` ascending.
     pub fn sort_by_sortkey(&mut self) {
         self.hits.sort_by(|a, b| {
             a.sortkey
@@ -431,14 +423,41 @@ impl TopHits {
         self.nreported = 0;
         self.nincluded = 0;
 
+        if pli.use_bit_cutoffs != super::pipeline::BitCutoff::None {
+            for hit in &mut self.hits {
+                hit.sortkey = pli.hit_sortkey(hit.score, hit.lnp);
+                hit.nreported = hit.dcl.iter().filter(|dom| dom.is_reported).count();
+                hit.nincluded = hit.dcl.iter().filter(|dom| dom.is_included).count();
+                if hit.flags & P7_IS_REPORTED != 0 {
+                    self.nreported += 1;
+                }
+                if hit.flags & P7_IS_INCLUDED != 0 {
+                    self.nincluded += 1;
+                }
+            }
+            if pli.score_sort_active() {
+                self.sort_by_sortkey();
+            }
+            return;
+        }
+
         for hit in &mut self.hits {
+            hit.flags &= !(P7_IS_REPORTED | P7_IS_INCLUDED | P7_IS_DROPPED);
+            hit.nreported = 0;
+            hit.nincluded = 0;
+            hit.sortkey = pli.hit_sortkey(hit.score, hit.lnp);
+            for dom in &mut hit.dcl {
+                dom.is_reported = false;
+                dom.is_included = false;
+            }
+
             // Skip hits already marked duplicate by remove_duplicates.
             if hit.flags & P7_IS_DUPLICATE != 0 {
                 continue;
             }
+
             let evalue = z * hit.lnp.exp();
 
-            // Sequence-level reporting
             let reported = if pli.by_e {
                 evalue <= pli.e_value_threshold
             } else if let Some(t) = pli.t {
@@ -450,26 +469,41 @@ impl TopHits {
             if reported {
                 hit.flags |= P7_IS_REPORTED;
                 self.nreported += 1;
-
-                // Sequence-level inclusion
-                let included = if pli.inc_by_e {
-                    evalue <= pli.inc_e
-                } else if let Some(t) = pli.inc_t {
-                    hit.score >= t
-                } else {
-                    evalue <= pli.inc_e
-                };
-                if included {
-                    hit.flags |= P7_IS_INCLUDED;
-                    self.nincluded += 1;
-                }
             } else {
                 hit.flags |= P7_IS_DROPPED;
             }
 
-            // Domain-level thresholding
-            hit.nreported = 0;
-            hit.nincluded = 0;
+            let included = if pli.inc_by_e {
+                evalue <= pli.inc_e
+            } else if let Some(t) = pli.inc_t {
+                hit.score >= t
+            } else {
+                evalue <= pli.inc_e
+            };
+            if reported && included {
+                hit.flags |= P7_IS_INCLUDED;
+                self.nincluded += 1;
+            }
+        }
+
+        for hit in &mut self.hits {
+            if hit.flags & P7_IS_REPORTED == 0 {
+                continue;
+            }
+
+            if pli.long_target {
+                if let Some(dom) = hit.dcl.first_mut() {
+                    dom.is_reported = true;
+                    hit.nreported = 1;
+                    if hit.flags & P7_IS_INCLUDED != 0 {
+                        dom.is_included = true;
+                        hit.nincluded = 1;
+                    }
+                }
+                continue;
+            }
+
+            let target_included = hit.flags & P7_IS_INCLUDED != 0;
             for dom in &mut hit.dcl {
                 let dom_evalue = domz * dom.lnp.exp();
 
@@ -484,24 +518,357 @@ impl TopHits {
                 if dom_reported {
                     dom.is_reported = true;
                     hit.nreported += 1;
+                }
 
-                    let dom_included = if pli.incdom_by_e {
+                let dom_included = target_included
+                    && if pli.incdom_by_e {
                         dom_evalue <= pli.inc_dome
                     } else if let Some(t) = pli.inc_dom_t {
                         dom.bitscore >= t
                     } else {
                         dom_evalue <= pli.inc_dome
                     };
-                    if dom_included {
-                        dom.is_included = true;
-                        hit.nincluded += 1;
-                    }
+                if dom_included {
+                    dom.is_included = true;
+                    hit.nincluded += 1;
                 }
             }
+        }
+
+        if pli.score_sort_active() {
+            self.sort_by_sortkey();
         }
     }
 }
 
+fn compare_hit_alipos(a: &Hit, b: &Hit) -> std::cmp::Ordering {
+    let (a_start, a_end, a_dir) = normalized_domain_span(a.dcl.first());
+    let (b_start, b_end, b_dir) = normalized_domain_span(b.dcl.first());
+    if a_dir != b_dir {
+        return b_dir.cmp(&a_dir);
+    }
+    a_start.cmp(&b_start).then_with(|| b_end.cmp(&a_end))
+}
+
+fn normalized_domain_span(dom: Option<&Domain>) -> (i64, i64, i32) {
+    let (mut start, mut end) = dom.map(|d| (d.iali, d.jali)).unwrap_or((0, 0));
+    let dir = if start < end { 1 } else { -1 };
+    if dir == -1 {
+        std::mem::swap(&mut start, &mut end);
+    }
+    (start, end, dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::Pipeline;
+
+    fn test_domain(bitscore: f32, lnp: f64) -> Domain {
+        Domain {
+            iali: 1,
+            jali: 10,
+            ienv: 1,
+            jenv: 10,
+            bitscore,
+            lnp,
+            dombias: 0.0,
+            oasc: 0.0,
+            envsc: 0.0,
+            domcorrection: 0.0,
+            is_reported: true,
+            is_included: true,
+            ad: None,
+        }
+    }
+
+    fn test_hit(name: &str, score: f32, lnp: f64, domains: Vec<Domain>) -> Hit {
+        Hit {
+            name: name.to_string(),
+            acc: String::new(),
+            desc: String::new(),
+            n: 100,
+            sortkey: 123.0,
+            score,
+            bias: 0.0,
+            pre_score: score,
+            sum_score: score,
+            lnp,
+            pre_lnp: lnp,
+            sum_lnp: lnp,
+            nexpected: 1.0,
+            nregions: 0,
+            nclustered: 0,
+            noverlaps: 0,
+            nenvelopes: domains.len(),
+            ndom: domains.len(),
+            nreported: 9,
+            nincluded: 9,
+            dcl: domains,
+            flags: P7_IS_REPORTED | P7_IS_INCLUDED | P7_IS_DROPPED,
+            seqidx: 0,
+            subseq_start: 0,
+        }
+    }
+
+    #[test]
+    fn threshold_clears_previous_state_and_gates_domains_by_parent() {
+        let mut pli = Pipeline::new();
+        pli.e_value_threshold = 1.0;
+        pli.inc_e = 0.01;
+        pli.dom_e_value_threshold = 1.0;
+        pli.inc_dome = 1.0;
+
+        let mut th = TopHits::new();
+        th.hits.push(test_hit(
+            "included",
+            20.0,
+            -8.0,
+            vec![test_domain(10.0, -8.0)],
+        ));
+        th.hits.push(test_hit(
+            "reported-only",
+            20.0,
+            -2.0,
+            vec![test_domain(10.0, -8.0)],
+        ));
+        th.hits.push(test_hit(
+            "dropped",
+            20.0,
+            1.0,
+            vec![test_domain(10.0, -8.0)],
+        ));
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        assert_eq!(th.nreported, 2);
+        assert_eq!(th.nincluded, 1);
+
+        assert!(th.hits[0].flags & P7_IS_REPORTED != 0);
+        assert!(th.hits[0].flags & P7_IS_INCLUDED != 0);
+        assert_eq!(th.hits[0].nreported, 1);
+        assert_eq!(th.hits[0].nincluded, 1);
+        assert!(th.hits[0].dcl[0].is_reported);
+        assert!(th.hits[0].dcl[0].is_included);
+
+        assert!(th.hits[1].flags & P7_IS_REPORTED != 0);
+        assert_eq!(th.hits[1].flags & P7_IS_INCLUDED, 0);
+        assert_eq!(th.hits[1].nreported, 1);
+        assert_eq!(th.hits[1].nincluded, 0);
+        assert!(th.hits[1].dcl[0].is_reported);
+        assert!(!th.hits[1].dcl[0].is_included);
+
+        assert_eq!(th.hits[2].flags & P7_IS_REPORTED, 0);
+        assert_eq!(th.hits[2].flags & P7_IS_INCLUDED, 0);
+        assert!(th.hits[2].flags & P7_IS_DROPPED != 0);
+        assert_eq!(th.hits[2].nreported, 0);
+        assert_eq!(th.hits[2].nincluded, 0);
+        assert!(!th.hits[2].dcl[0].is_reported);
+        assert!(!th.hits[2].dcl[0].is_included);
+    }
+
+    #[test]
+    fn domain_inclusion_is_independent_from_domain_reporting_threshold() {
+        let mut pli = Pipeline::new();
+        pli.e_value_threshold = 1.0;
+        pli.inc_e = 1.0;
+        pli.dom_e_value_threshold = 0.001;
+        pli.inc_dome = 0.1;
+
+        let mut th = TopHits::new();
+        th.hits.push(test_hit(
+            "included-target",
+            20.0,
+            0.01_f64.ln(),
+            vec![test_domain(10.0, 0.01_f64.ln())],
+        ));
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        assert_eq!(th.nreported, 1);
+        assert_eq!(th.nincluded, 1);
+        assert_eq!(th.hits[0].nreported, 0);
+        assert_eq!(th.hits[0].nincluded, 1);
+        assert!(!th.hits[0].dcl[0].is_reported);
+        assert!(th.hits[0].dcl[0].is_included);
+    }
+
+    #[test]
+    fn seqidx_alipos_sort_matches_c_longtarget_order() {
+        let mut plus_short = test_hit("z", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        plus_short.seqidx = 1;
+        plus_short.dcl[0].iali = 10;
+        plus_short.dcl[0].jali = 20;
+        let mut minus = test_hit("a", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        minus.seqidx = 1;
+        minus.dcl[0].iali = 25;
+        minus.dcl[0].jali = 10;
+        let mut plus_long = test_hit("b", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        plus_long.seqidx = 1;
+        plus_long.dcl[0].iali = 10;
+        plus_long.dcl[0].jali = 30;
+
+        let mut th = TopHits::new();
+        th.hits = vec![minus, plus_short, plus_long];
+        th.sort_by_seqidx_and_alipos();
+
+        assert_eq!(th.hits[0].name, "b");
+        assert_eq!(th.hits[1].name, "z");
+        assert_eq!(th.hits[2].name, "a");
+    }
+
+    #[test]
+    fn modelname_alipos_sort_groups_nhmmscan_models_like_c() {
+        let mut model_b = test_hit("model-b", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        model_b.dcl[0].iali = 5;
+        model_b.dcl[0].jali = 20;
+        let mut model_a_minus = test_hit("model-a", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        model_a_minus.dcl[0].iali = 20;
+        model_a_minus.dcl[0].jali = 5;
+        let mut model_a_plus = test_hit("model-a", 10.0, -1.0, vec![test_domain(10.0, -1.0)]);
+        model_a_plus.dcl[0].iali = 5;
+        model_a_plus.dcl[0].jali = 20;
+
+        let mut th = TopHits::new();
+        th.hits = vec![model_b, model_a_minus, model_a_plus];
+        th.sort_by_modelname_and_alipos();
+
+        assert_eq!(th.hits[0].name, "model-a");
+        assert!(th.hits[0].dcl[0].iali < th.hits[0].dcl[0].jali);
+        assert_eq!(th.hits[1].name, "model-a");
+        assert!(th.hits[1].dcl[0].iali > th.hits[1].dcl[0].jali);
+        assert_eq!(th.hits[2].name, "model-b");
+    }
+
+    #[test]
+    fn inclusion_score_thresholds_use_negative_score_sortkeys_for_ascending_sort() {
+        let mut pli = Pipeline::new();
+        pli.inc_by_e = false;
+        pli.inc_t = Some(0.0);
+
+        let mut th = TopHits::new();
+        th.hits
+            .push(test_hit("low", 10.0, -20.0, vec![test_domain(10.0, -20.0)]));
+        th.hits
+            .push(test_hit("high", 50.0, -1.0, vec![test_domain(10.0, -1.0)]));
+
+        th.threshold(&pli, 1.0, 1.0);
+        assert_eq!(th.hits[0].name, "high");
+        assert_eq!(th.hits[0].sortkey, -50.0);
+        assert_eq!(th.hits[1].name, "low");
+        assert_eq!(th.hits[1].sortkey, -10.0);
+    }
+
+    #[test]
+    fn long_target_threshold_uses_caller_supplied_z() {
+        let mut pli = Pipeline::new();
+        pli.long_target = true;
+        pli.e_value_threshold = 0.2;
+        pli.inc_e = 0.2;
+        pli.dom_e_value_threshold = 0.2;
+        pli.inc_dome = 0.2;
+
+        let lnp = 0.1_f64.ln();
+        let mut th = TopHits::new();
+        th.hits
+            .push(test_hit("nhmmer", 20.0, lnp, vec![test_domain(10.0, lnp)]));
+
+        th.threshold(&pli, 1.0, 1.0);
+        assert_eq!(th.nreported, 1);
+        assert_eq!(th.nincluded, 1);
+        assert_eq!(th.hits[0].nreported, 1);
+        assert_eq!(th.hits[0].nincluded, 1);
+
+        th.threshold(&pli, 10.0, 10.0);
+        assert_eq!(th.nreported, 0);
+        assert_eq!(th.nincluded, 0);
+        assert_eq!(th.hits[0].nreported, 0);
+        assert_eq!(th.hits[0].nincluded, 0);
+    }
+
+    #[test]
+    fn bit_cutoff_threshold_counts_preassigned_model_specific_flags() {
+        let mut pli = Pipeline::new();
+        pli.use_bit_cutoffs = crate::pipeline::BitCutoff::GA;
+        pli.t = Some(100.0);
+        pli.inc_t = Some(100.0);
+        pli.dom_t = Some(100.0);
+        pli.inc_dom_t = Some(100.0);
+        pli.by_e = false;
+        pli.inc_by_e = false;
+        pli.dom_by_e = false;
+        pli.incdom_by_e = false;
+
+        let mut flagged = test_hit("kept", 10.0, -1.0, vec![test_domain(5.0, -1.0)]);
+        flagged.flags = P7_IS_REPORTED | P7_IS_INCLUDED;
+        flagged.dcl[0].is_reported = true;
+        flagged.dcl[0].is_included = true;
+
+        let mut unflagged = test_hit(
+            "not-recomputed",
+            200.0,
+            -100.0,
+            vec![test_domain(200.0, -100.0)],
+        );
+        unflagged.flags = 0;
+        unflagged.dcl[0].is_reported = false;
+        unflagged.dcl[0].is_included = false;
+
+        let mut th = TopHits::new();
+        th.hits.push(unflagged);
+        th.hits.push(flagged);
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        assert_eq!(th.nreported, 1);
+        assert_eq!(th.nincluded, 1);
+        assert_eq!(th.hits[0].name, "not-recomputed");
+        assert_eq!(th.hits[0].flags & P7_IS_REPORTED, 0);
+        assert_eq!(th.hits[0].nreported, 0);
+        assert_eq!(th.hits[1].name, "kept");
+        assert!(th.hits[1].flags & P7_IS_REPORTED != 0);
+        assert!(th.hits[1].flags & P7_IS_INCLUDED != 0);
+        assert_eq!(th.hits[1].nreported, 1);
+        assert_eq!(th.hits[1].nincluded, 1);
+    }
+
+    #[test]
+    fn bit_cutoff_threshold_does_not_fall_back_to_evalues_when_no_hits_preassigned() {
+        let mut pli = Pipeline::new();
+        pli.use_bit_cutoffs = crate::pipeline::BitCutoff::GA;
+        pli.e_value_threshold = 10.0;
+        pli.inc_e = 10.0;
+
+        let mut th = TopHits::new();
+        let mut hit = test_hit(
+            "low-evalue-but-below-cutoff",
+            200.0,
+            -100.0,
+            vec![test_domain(200.0, -100.0)],
+        );
+        hit.flags = 0;
+        hit.dcl[0].is_reported = false;
+        hit.dcl[0].is_included = false;
+        th.hits.push(hit);
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        assert_eq!(th.nreported, 0);
+        assert_eq!(th.nincluded, 0);
+        assert_eq!(th.hits[0].flags & P7_IS_REPORTED, 0);
+        assert_eq!(th.hits[0].flags & P7_IS_INCLUDED, 0);
+        assert_eq!(th.hits[0].nreported, 0);
+        assert_eq!(th.hits[0].nincluded, 0);
+    }
+}
+
+/// Build a multiple sequence alignment from all included hits/domains in `th`.
+/// Each included domain's `AliDisplay` is back-converted to a (sequence, trace)
+/// pair, then a faux MSA is assembled mapping each match column of the model.
+/// Port of `p7_tophits_Alignment()` (hmmer/src/p7_tophits.c:1478) with the
+/// supporting machinery from Easel's `esl_msa_*` helpers. `extra` lets callers
+/// (e.g. `jackhmmer`) prepend the query sequence/trace into the alignment.
+/// Returns `None` if no included domains and no `extra` were supplied.
 pub fn included_alignment(
     th: &TopHits,
     abc: &Alphabet,
@@ -559,6 +926,7 @@ pub fn included_alignment(
 
         return Some(Msa {
             name: msa_name.to_string(),
+            acc: None,
             desc: None,
             author: None,
             sqname,
@@ -622,6 +990,7 @@ pub fn included_alignment(
 
     Some(Msa {
         name: msa_name.to_string(),
+        acc: None,
         desc: None,
         author: None,
         sqname,
@@ -635,6 +1004,10 @@ pub fn included_alignment(
     })
 }
 
+/// Reconstruct a `(Sequence, Trace)` pair from a printable `AliDisplay`.
+/// Walks the alignment columns, dropping gap columns and emitting M/I/D states
+/// with sequence indices. Port of `p7_alidisplay_Backconvert()`
+/// (hmmer/src/p7_alidisplay.c:1233).
 fn alidisplay_backconvert(
     hit: &Hit,
     dom: &Domain,
@@ -709,6 +1082,8 @@ fn alidisplay_backconvert(
     (sq, tr)
 }
 
+/// Encode a posterior probability as a single ASCII character ('0'..'9' or '*').
+/// Port of `p7_alidisplay_EncodePostProb()`.
 fn encode_postprob(p: f32) -> u8 {
     if p + 0.05 >= 1.0 {
         b'*'
@@ -717,6 +1092,8 @@ fn encode_postprob(p: f32) -> u8 {
     }
 }
 
+/// Decode a posterior-probability character back to a float in [0, 1].
+/// Inverse of `encode_postprob`; matches `p7_alidisplay_DecodePostProb()`.
 fn decode_postprob(pc: u8) -> f32 {
     match pc {
         b'0' => 0.01,
@@ -727,6 +1104,8 @@ fn decode_postprob(pc: u8) -> f32 {
     }
 }
 
+/// Compute the per-column consensus PP line by averaging recorded values and
+/// encoding the mean. Returns `None` if no column had any PP-bearing row.
 fn pp_consensus(pp_totals: &[f32], pp_counts: &[usize]) -> Option<Vec<u8>> {
     if pp_counts.iter().all(|&count| count == 0) {
         return None;
@@ -746,6 +1125,11 @@ fn pp_consensus(pp_totals: &[f32], pp_counts: &[usize]) -> Option<Vec<u8>> {
     )
 }
 
+/// Plan an MSA layout from a set of traces against a model of length `m`.
+/// Returns `(inscount[k], matuse[k], matmap[k], alen)`: per-column max insert
+/// length, which match columns are used by at least one trace, the mapping
+/// from model node 1..M to its alignment column (1-based), and the total
+/// alignment width. Mirrors C `map_new_msa()` in `p7_tophits.c`.
 fn map_new_msa(m: usize, traces: &[Trace]) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
     let mut inscount = vec![0usize; m + 1];
     let mut matuse = vec![true; m + 1];
@@ -784,6 +1168,9 @@ fn map_new_msa(m: usize, traces: &[Trace]) -> (Vec<usize>, Vec<bool>, Vec<usize>
     (inscount, matuse, matmap, alen)
 }
 
+/// Render one aligned sequence row for `sq`/`tr` into the MSA layout produced
+/// by `map_new_msa`. Match states use uppercase, inserts use lowercase, and
+/// unused match columns get '-' or '.'. Mirrors `make_text_row()` in C.
 fn make_text_row(
     abc: &Alphabet,
     sq: &Sequence,
@@ -837,6 +1224,9 @@ fn make_text_row(
     aseq
 }
 
+/// Render one PP annotation row aligned to the MSA columns and accumulate the
+/// per-column running totals/counts used to build the consensus PP line. Returns
+/// `None` if the trace lacks PP annotations.
 fn make_pp_row(
     tr: &Trace,
     matmap: &[usize],
@@ -882,6 +1272,9 @@ fn make_pp_row(
     Some(pp)
 }
 
+/// Right-justify insert columns so that aligned residues sit flush against the
+/// next match column on either side, matching Easel's
+/// `rejustify_insertions_text()` used by `esl_msa_FromAliDisplay`-style outputs.
 fn rejustify_insertions_text(
     aseq: &mut [u8],
     mut pp: Option<&mut [u8]>,

@@ -5,10 +5,14 @@ use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::Profile;
 
-/// Generic MSV algorithm.
-/// Returns the MSV score in nats.
-/// `dsq` is a 1-based digital sequence (dsq[1..=L]).
-/// `nu` is the expected number of hits (typically 2.0).
+/// The MSV score algorithm (slow, correct reference version).
+///
+/// Calculates the maximal score of ungapped local segment pair alignments,
+/// equivalent to setting all MM transitions to 1.0 in a multihit local profile.
+/// `dsq` is a 1-based digital sequence (`dsq[1..=L]`); `nu` is the configured
+/// expected number of hits (default 2.0). Returns the MSV lod score in nats.
+/// CC, NN, JJ transitions are real scores here (unlike the SIMD impls which fix
+/// them to 0). Counterpart of `p7_GMSV`.
 pub fn g_msv(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx, nu: f32) -> f32 {
     let m = gm.m;
     let tloop = (l as f32 / (l as f32 + 3.0)).ln();

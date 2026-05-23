@@ -62,14 +62,25 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
     arr
 }
 
-/// SSV filter for long target sequences.
-/// Port of p7_SSVFilter_longtarget().
+/// Finds windows with SSV scores above some threshold (vewy vewy fast, in
+/// limited precision). Port of `p7_SSVFilter_longtarget`
+/// (hmmer/src/impl_sse/msvfilter.c:213, despite the C filename it is the SSV
+/// long-target entry point).
 ///
-/// Scans the full sequence `dsq[1..=L]` and returns a list of windows
-/// where the SSV score exceeds the P-value threshold `p_thresh`.
+/// Calculates an approximation of the SSV (single ungapped diagonal) score
+/// for regions of `dsq[1..=l]` using the optimized profile `om`, and
+/// captures the positions at which such regions exceed the score required to
+/// be significant for the supplied P-value (usually p=0.02 for nhmmer).
+/// Never passes through the J state — the SSV threshold is sufficient to
+/// pass MSV for essentially all DNA models tested.
+///
+/// Above-threshold diagonals become `HmmWindow` entries with start/end
+/// positions established by tracing the diagonal forward and backward
+/// through the SSV emission scores. Callers typically merge overlapping
+/// windows via `extend_and_merge_windows`.
 ///
 /// # Safety
-/// Requires SSE2 support.
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn ssv_filter_longtarget(
@@ -322,8 +333,8 @@ pub unsafe fn ssv_filter_longtarget(
 /// contribution of model positions to the expected window length.
 ///
 /// For each position k in 1..M:
-///   raw[k] = 1 + floor(log(BETA/t_MI[k]) / log(t_II[k]))  (if t_MI[k] != 0)
-///   raw[k] = 1                                             (otherwise)
+///   `raw[k]` = 1 + floor(log(BETA/`t_MI[k]`) / log(`t_II[k]`))  (if `t_MI[k]` != 0)
+///   `raw[k]` = 1                                             (otherwise)
 /// Then `raw` is normalized by sum, suffix-summed, and prefix-summed.
 pub fn compute_prefix_suffix_lengths(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f32>) {
     // Deprecated: uses raw HMM transitions. Prefer `compute_prefix_suffix_lengths_from_om`
@@ -333,6 +344,10 @@ pub fn compute_prefix_suffix_lengths(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f3
     compute_prefix_suffix_lengths_hmm(hmm)
 }
 
+/// Legacy variant of `p7_hmm_ScoreDataComputeRest` that reads transitions
+/// straight from the raw HMM (`hmm.t[k][MI]`, `hmm.t[k][II]`). Kept for
+/// callers that don't yet have an `OProfile`; prefer
+/// `compute_prefix_suffix_lengths_from_om` for byte-exact C parity.
 fn compute_prefix_suffix_lengths_hmm(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f32>) {
     use crate::hmm::{II, MI};
     const BETA: f32 = 1.0e-7;
@@ -521,6 +536,11 @@ pub fn extend_and_merge_windows_with_scoredata(
     merge_windows_impl(windows, pct_overlap);
 }
 
+/// Merge adjacent windows whose overlap exceeds `pct_overlap` of the
+/// shorter window's length. Walks the (sorted) `windows` list once and
+/// folds each entry into the previous merged entry when the same-strand
+/// overlap fraction crosses the threshold; otherwise pushes a new entry.
+/// Score is promoted to the max of the two.
 fn merge_windows_impl(windows: &mut Vec<HmmWindow>, pct_overlap: f32) {
     if windows.len() <= 1 {
         return;
@@ -565,6 +585,10 @@ fn merge_windows_impl(windows: &mut Vec<HmmWindow>, pct_overlap: f32) {
     *windows = merged;
 }
 
+/// Variant of `extend_and_merge_windows` with a tunable overlap-percentage
+/// threshold. Uses the simple `0.2 * max_length` fixed extension (no
+/// scoredata). Use this when per-position prefix/suffix lengths aren't
+/// available; otherwise prefer `extend_and_merge_windows_with_scoredata`.
 pub fn extend_and_merge_windows_pct(
     windows: &mut Vec<HmmWindow>,
     max_length: usize,

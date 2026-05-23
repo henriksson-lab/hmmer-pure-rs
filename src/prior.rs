@@ -1,15 +1,19 @@
 //! Dirichlet mixture priors for HMM parameterization.
 //! Simplified port of p7_prior.c.
 
-/// Apply Dirichlet prior pseudocounts to a count vector.
-/// `counts` is the observed counts [0..K-1].
-/// `alpha` is the Dirichlet parameter vector [0..K-1].
-/// Returns the posterior mean estimate.
+/// Add Dirichlet prior pseudocounts and return the posterior mean estimate.
+///
+/// `counts[a]` are the observed pseudocounts and `alpha[a]` the Dirichlet
+/// parameters (`K` of each); result is `(counts[a] + alpha[a]) / sum` then
+/// renormalised. Thin `f32` wrapper around the `f64` core; used wherever a
+/// single Dirichlet component is enough (e.g. transitions).
 pub fn apply_dirichlet(counts: &[f32], alpha: &[f32]) -> Vec<f32> {
     let alpha_d: Vec<f64> = alpha.iter().map(|&v| v as f64).collect();
     apply_dirichlet_f64(counts, &alpha_d)
 }
 
+/// `f64` core of [`apply_dirichlet`]; takes counts and an `f64` alpha vector
+/// and returns the normalised `f32` posterior mean.
 fn apply_dirichlet_f64(counts: &[f32], alpha: &[f64]) -> Vec<f32> {
     let k = counts.len();
     let mut result = vec![0.0_f64; k];
@@ -82,8 +86,13 @@ const SJOLANDER_ALPHA: [[f64; 20]; 9] = [
     ],
 ];
 
-/// Apply mixture Dirichlet prior to a count vector.
-/// Returns posterior mean estimate using 9-component Sjolander mixture.
+/// Posterior mean of an amino-acid count vector under the Sjolander
+/// 9-component mixture Dirichlet (Blocks9 amino acid match prior).
+///
+/// Computes per-component log posteriors (with `q_k` mixture weights and
+/// `LogGamma` Bayes factors), normalises them, and forms the mixture-weighted
+/// mean of each component's posterior mean. Implements the amino-acid match
+/// branch of C's `p7_ParameterEstimation` / `esl_mixdchlet_MPParameters`.
 pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
     let k = counts.len().min(20);
     let counts_d: Vec<f64> = counts[..k].iter().map(|&c| c as f64).collect();
@@ -126,7 +135,8 @@ pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
     result.iter().map(|&v| v as f32).collect()
 }
 
-/// Easel's `esl_stats_LogGamma()` approximation.
+/// Lanczos-style approximation of `log Γ(x)` for `x > 0`,
+/// matching Easel's `esl_stats_LogGamma()`.
 fn ln_gamma(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
@@ -155,6 +165,8 @@ fn ln_gamma(x: f64) -> f64 {
     value.ln() + 0.918938533 + (xx + 0.5) * (tx + 0.5).ln() - (tx + 0.5)
 }
 
+/// Numerically stable `log(sum(exp(values)))` ("log-sum-exp"), terms with
+/// `value < max - 500` are dropped to avoid underflow.
 fn dlog_sum(values: &[f64]) -> f64 {
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if max == f64::INFINITY {
@@ -169,6 +181,8 @@ fn dlog_sum(values: &[f64]) -> f64 {
     sum.ln() + max
 }
 
+/// Normalise a vector of log-probabilities in place to a probability
+/// distribution (exponentiate after subtracting the log-sum-exp, then re-norm).
 fn dlog_norm(values: &mut [f64]) {
     let denom = dlog_sum(values);
     for value in values.iter_mut() {
@@ -177,6 +191,8 @@ fn dlog_norm(values: &mut [f64]) {
     dnorm(values);
 }
 
+/// Normalise a non-negative vector to sum to 1, falling back to the uniform
+/// distribution when the sum is zero (mirrors `esl_vec_DNorm`).
 fn dnorm(values: &mut [f64]) {
     let sum: f64 = values.iter().sum();
     if sum != 0.0 {
@@ -202,6 +218,8 @@ pub struct TransitionPrior {
 }
 
 impl Default for TransitionPrior {
+    /// HMMER3 default transition Dirichlet (Mitchison, trained on Pfam);
+    /// the same numbers as `p7_prior_CreateAmino`.
     fn default() -> Self {
         TransitionPrior {
             tm: [0.7939, 0.0278, 0.0135], // Mitchison, trained on Pfam
@@ -211,6 +229,8 @@ impl Default for TransitionPrior {
     }
 }
 
+/// HMMER3 amino-acid insert-emission Dirichlet (single component) from
+/// `p7_prior_CreateAmino`.
 fn amino_insert_alpha() -> [f64; 20] {
     [
         681.0, 120.0, 623.0, 651.0, 313.0, 902.0, 241.0, 371.0, 687.0, 676.0, 143.0, 548.0, 647.0,
@@ -218,6 +238,8 @@ fn amino_insert_alpha() -> [f64; 20] {
     ]
 }
 
+/// HMMER3 nucleic-acid match-emission 4-component Dirichlet mixture
+/// (`p7_prior_CreateNucleic`): returns (mixture weights, per-component alphas).
 fn nucleic_match_alpha() -> (&'static [f64], &'static [[f64; 4]]) {
     static Q: [f64; 4] = [0.24, 0.26, 0.08, 0.42];
     static ALPHA: [[f64; 4]; 4] = [
@@ -229,10 +251,13 @@ fn nucleic_match_alpha() -> (&'static [f64], &'static [[f64; 4]]) {
     (&Q, &ALPHA)
 }
 
+/// HMMER3 nucleic-acid insert-emission Dirichlet (uniform Laplace prior).
 fn nucleic_insert_alpha() -> [f64; 4] {
     [1.0, 1.0, 1.0, 1.0]
 }
 
+/// Generalised mixture-Dirichlet posterior mean for arbitrary mixture weights
+/// `q` and per-component alphas (used for nucleic match emissions).
 fn apply_mixture_dirichlet_with_components(
     counts: &[f32],
     q: &[f64],
@@ -272,8 +297,16 @@ fn apply_mixture_dirichlet_with_components(
     result.iter().map(|&v| v as f32).collect()
 }
 
-/// Apply Dirichlet priors to an HMM's emission and transition counts.
-/// Modifies the HMM in place, converting counts to probabilities.
+/// Apply HMMER3 Dirichlet priors to an HMM's weighted counts, in place,
+/// turning it into a parameterised probabilistic model (port of
+/// `p7_ParameterEstimation`).
+///
+/// For every node: match transitions (MM/MI/MD) and insert transitions
+/// (IM/II) are estimated via the single-component transition prior; delete
+/// transitions (DM/DD) are estimated for 1..M-1 and conventionally fixed at
+/// the model termini. Match emissions use the Sjolander 9-component prior
+/// for amino acids, the 4-component nucleic prior, or a Laplace fallback;
+/// insert emissions use the simple `amino_insert_alpha` / `nucleic_insert_alpha`.
 pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
     use crate::hmm::*;
     let k = hmm.abc_k;

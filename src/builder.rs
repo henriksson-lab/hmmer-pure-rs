@@ -1,18 +1,17 @@
 //! HMM builder — construct profile HMMs from multiple sequence alignments.
 //! Simplified port of p7_builder.c and build.c.
 
-use crate::alphabet::Alphabet;
+use crate::alphabet::{Alphabet, AlphabetType};
 use crate::bg::Bg;
 use crate::hmm::*;
 use crate::msa::{self, Msa};
 use crate::trace::{State as TraceState, Trace};
 
-/// Henikoff position-based sequence weighting.
-/// Returns weights[0..nseq] that sum to nseq.
+/// Henikoff position-based sequence weights, normalized to sum to `nseq`.
 ///
-/// HMMER only restricts PB weighting to RF consensus columns in `--hand`
-/// mode. In default fast architecture mode, any input RF annotation is
-/// ignored for weighting.
+/// In default "fast" architecture mode, any input RF annotation is ignored;
+/// `use_rf = true` (HMMER's `--hand` mode) restricts the column scan to RF
+/// consensus columns. Counterpart to Easel's `esl_msaweight_PB()`.
 pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f64> {
     let nseq = msa.nseq;
     let k = abc.k;
@@ -99,11 +98,13 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f64> {
     weights
 }
 
-/// Build an HMM from a multiple sequence alignment using fast model construction.
+/// Build a profile HMM from a multiple sequence alignment.
 ///
-/// Uses the "fast" method by default: columns with >= `symfrac` occupancy
-/// become match states. When `hand_arch` is true, input RF annotation defines
-/// the architecture instead, matching HMMER `--hand`.
+/// Pipeline: PB weights -> mark fragments -> assign match columns
+/// (fast architecture, or `--hand` from RF) -> faux trace counts ->
+/// effective Neff via entropy weighting -> Dirichlet priors ->
+/// composition/consensus annotation -> E-value calibration.
+/// Counterpart to C's `p7_Builder()` (with `build.c`'s `build_model()`).
 pub fn build_hmm_from_msa(
     msa: &Msa,
     abc: &Alphabet,
@@ -161,11 +162,27 @@ pub fn build_hmm_from_msa(
         // No match columns — return a trivial HMM
         let mut hmm = Hmm::new(1, abc.abc_type, k);
         hmm.name = msa.name.clone();
+        if let Some(ref acc) = msa.acc {
+            hmm.acc = Some(acc.clone());
+            hmm.flags |= P7H_ACC;
+        }
+        if let Some(ref desc) = msa.desc {
+            hmm.desc = Some(desc.clone());
+            hmm.flags |= P7H_DESC;
+        }
         return hmm;
     }
 
     let mut hmm = Hmm::new(m, abc.abc_type, k);
     hmm.name = msa.name.clone();
+    if let Some(ref acc) = msa.acc {
+        hmm.acc = Some(acc.clone());
+        hmm.flags |= P7H_ACC;
+    }
+    if let Some(ref desc) = msa.desc {
+        hmm.desc = Some(desc.clone());
+        hmm.flags |= P7H_DESC;
+    }
     hmm.nseq = nseq as i32;
     hmm.eff_nseq = nseq as f32;
 
@@ -242,10 +259,16 @@ pub fn build_hmm_from_msa(
 
     // E-value calibration by simulation
     crate::calibrate::calibrate(&mut hmm, abc, bg);
+    if abc.abc_type != AlphabetType::Amino {
+        hmm.max_length = (hmm.m * 4).max(1) as i32;
+    }
 
     hmm
 }
 
+/// Compute the average residue composition implied by the HMM's match and
+/// insert emissions, weighted by per-node occupancy, and store in `hmm.compo`.
+/// Counterpart to C's `p7_hmm_SetComposition()`.
 fn set_hmm_composition(hmm: &mut Hmm) {
     let mut mocc = vec![0.0_f32; hmm.m + 1];
     let mut iocc = vec![0.0_f32; hmm.m + 1];
@@ -288,6 +311,9 @@ fn set_hmm_composition(hmm: &mut Hmm) {
     hmm.flags |= P7H_COMPO;
 }
 
+/// Derive a consensus residue string from the most-probable match emission
+/// per node. Uppercase if its probability >= threshold (0.9 for nucleic,
+/// 0.5 for amino), otherwise lowercase. Counterpart to C's `p7_hmm_SetConsensus()`.
 fn set_hmm_consensus(hmm: &mut Hmm, abc: &Alphabet) {
     let threshold = match hmm.abc_type {
         crate::alphabet::AlphabetType::Dna | crate::alphabet::AlphabetType::Rna => 0.9,
@@ -314,6 +340,9 @@ fn set_hmm_consensus(hmm: &mut Hmm, abc: &Alphabet) {
     hmm.flags |= P7H_CONS;
 }
 
+/// Generate one faux traceback per MSA row consistent with the `matassign[]`
+/// architecture, then run trace doctoring to remove D->I / I->D conflicts.
+/// Counterpart to C's `p7_trace_FauxFromMSA()` + `p7_trace_Doctor()`.
 fn faux_trace_from_msa(ax: &[Vec<u8>], matassign: &[bool], abc: &Alphabet) -> Vec<Trace> {
     let mut traces = Vec::with_capacity(ax.len());
     for row in ax {
@@ -347,6 +376,9 @@ fn faux_trace_from_msa(ax: &[Vec<u8>], matassign: &[bool], abc: &Alphabet) -> Ve
     traces
 }
 
+/// Mark short fragment sequences' leading/trailing gaps as missing-data
+/// symbols so they don't contribute spurious counts at flanking positions.
+/// Counterpart to Easel's `esl_msa_MarkFragments_old()`.
 fn mark_fragments_old(ax: &mut [Vec<u8>], abc: &Alphabet, alen: usize, fragthresh: f32) {
     let missing = abc.missing_code();
     for row in ax {
@@ -373,6 +405,9 @@ fn mark_fragments_old(ax: &mut [Vec<u8>], abc: &Alphabet, alen: usize, fragthres
     }
 }
 
+/// Collapse adjacent D-I / I-D pairs in a faux trace into single M states,
+/// matching the HMMER architecture's disallowed D<->I transitions.
+/// Counterpart to C's `p7_trace_Doctor()`.
 fn doctor_trace(tr: &mut Trace) {
     let mut new_st = Vec::with_capacity(tr.n);
     let mut new_k = Vec::with_capacity(tr.n);
@@ -407,6 +442,9 @@ fn doctor_trace(tr: &mut Trace) {
     tr.n = tr.st.len();
 }
 
+/// Accumulate weight `wt` for symbol `sym` into count vector `ct[0..K]`.
+/// Distributes degenerate residues evenly over their canonical members.
+/// Counterpart to Easel's `esl_abc_FCount()`.
 fn fcount(abc: &Alphabet, ct: &mut [f32], sym: u8, wt: f32) {
     if abc.is_canonical(sym) || abc.is_gap(sym) {
         if let Some(slot) = ct.get_mut(sym as usize) {
@@ -425,6 +463,9 @@ fn fcount(abc: &Alphabet, ct: &mut [f32], sym: u8, wt: f32) {
     }
 }
 
+/// Accumulate weighted emission and transition counts from one trace into
+/// `hmm`. Skips X (missing data) regions at the trace ends. Counterpart to
+/// C's `p7_trace_Count()`.
 fn count_trace(hmm: &mut Hmm, dsq: &[u8], wt: f32, tr: &Trace, abc: &Alphabet) {
     let mut z1 = 0usize;
     let mut z2 = tr.n.saturating_sub(1);

@@ -11,16 +11,22 @@ unsafe extern "C" {
     fn c_log(x: f64) -> f64;
 }
 
+/// Wrap libm `log(x)` and cast the `f64` result to `f32`. Used to reproduce
+/// C HMMER's exact rounding when scoring profile parameters.
 #[inline]
 fn c_log_to_f32(x: f64) -> f32 {
     unsafe { c_log(x) as f32 }
 }
 
+/// Convenience for the most common pattern: promote `f32` to `f64`, take
+/// `log` via libm, then truncate back to `f32` (matches C `log()` chains).
 #[inline]
 fn c_log_f32_to_f32(x: f32) -> f32 {
     c_log_to_f32(x as f64)
 }
 
+/// Tracehash hook: record the per-node B→Mk entry-score derivation so it can
+/// be diff'd against the C reference. Active only under the `tracehash` feature.
 #[cfg(feature = "tracehash")]
 fn trace_profile_entry_source(m: usize, k: usize, occ: f32, z: f32, ratio: f32, score: f32) {
     let mut th = tracehash::th_call!("profile_entry_source_bits");
@@ -70,13 +76,13 @@ pub const P7_UNIGLOCAL: i32 = 4;
 /// Scoring profile derived from an HMM.
 #[derive(Debug, Clone)]
 pub struct Profile {
-    /// Transition scores: tsc[k * P7P_NTRANS + s] for node k, transition s
+    /// Transition scores: `tsc[k * P7P_NTRANS + s]` for node k, transition s
     pub tsc: Vec<f32>,
-    /// Emission scores: rsc[x] is a vec of (M+1)*P7P_NR entries for residue code x.
-    /// rsc[x][k * P7P_NR + P7P_MSC] = match emission score at node k for residue x
-    /// rsc[x][k * P7P_NR + P7P_ISC] = insert emission score at node k for residue x
+    /// Emission scores: `rsc[x]` is a vec of (M+1)*P7P_NR entries for residue code x.
+    /// `rsc[x][k * P7P_NR + P7P_MSC]` = match emission score at node k for residue x
+    /// `rsc[x][k * P7P_NR + P7P_ISC]` = insert emission score at node k for residue x
     pub rsc: Vec<Vec<f32>>,
-    /// Special state transitions [NECJ][LOOP,MOVE]
+    /// Special state transitions `[NECJ][LOOP,MOVE]`
     pub xsc: [[f32; P7P_NXTRANS]; P7P_NXSTATES],
 
     pub mode: i32,
@@ -106,7 +112,12 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Create a new empty profile for a model of up to `alloc_m` nodes.
+    /// Allocate a profile sized for an HMM of up to `alloc_m` nodes
+    /// (port of `p7_profile_Create`).
+    ///
+    /// All transition/emission scores are initialised to `-inf`; metadata
+    /// (name/acc/desc/annotation arrays) is empty. The caller is expected to
+    /// populate scores via [`profile_config`].
     pub fn new(alloc_m: usize, abc: &Alphabet) -> Self {
         let kp = abc.kp;
         let k = abc.k;
@@ -138,41 +149,51 @@ impl Profile {
         }
     }
 
-    /// Access a transition score: tsc(k, s)
+    /// Read transition score `tsc[k * P7P_NTRANS + s]` for node `k`,
+    /// transition class `s` (e.g. `P7P_MM`, `P7P_BM`).
     #[inline]
     pub fn tsc(&self, k: usize, s: usize) -> f32 {
         self.tsc[k * P7P_NTRANS + s]
     }
 
-    /// Set a transition score: tsc(k, s) = val
+    /// Write transition score `tsc[k * P7P_NTRANS + s] = val`.
     #[inline]
     pub fn set_tsc(&mut self, k: usize, s: usize, val: f32) {
         self.tsc[k * P7P_NTRANS + s] = val;
     }
 
-    /// Access a match emission score
+    /// Read the match emission score at node `k` for residue code `x`.
     #[inline]
     pub fn msc(&self, k: usize, x: usize) -> f32 {
         self.rsc[x][k * P7P_NR + P7P_MSC]
     }
 
-    /// Access an insert emission score
+    /// Read the insert emission score at node `k` for residue code `x`.
     #[inline]
     pub fn isc(&self, k: usize, x: usize) -> f32 {
         self.rsc[x][k * P7P_NR + P7P_ISC]
     }
 
+    /// True if the profile is in local (vs. glocal) alignment mode (port of
+    /// `p7_profile_IsLocal`).
     pub fn is_local(&self) -> bool {
         self.mode == P7_LOCAL || self.mode == P7_UNILOCAL
     }
 
+    /// True if the profile is configured for multihit alignment (port of
+    /// `p7_profile_IsMultihit`).
     pub fn is_multihit(&self) -> bool {
         self.mode == P7_LOCAL || self.mode == P7_GLOCAL
     }
 }
 
-/// Calculate match occupancy for an HMM.
-/// Returns occ[0..M] where occ[k] = probability of match state k being used.
+/// Compute per-node match-state occupancy `occ[0..=M]` for a core HMM
+/// (port of `p7_hmm_CalculateOccupancy`).
+///
+/// `occ[k]` is the probability that match state `Mk` is used at least once
+/// in a path through the model. Used by [`profile_config`] to set the local
+/// entry distribution (B→Mk) so that match states are entered in proportion
+/// to their occupancy.
 pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
     let mut mocc = vec![0.0_f32; hmm.m + 1];
     mocc[0] = 0.0;
@@ -186,7 +207,9 @@ pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
     mocc
 }
 
-/// Expected score for a degenerate residue, weighted by background frequencies.
+/// Expected score for a degenerate residue code `x`, weighting the canonical
+/// scores `sc[0..K-1]` by background frequencies `p`. Mirrors
+/// `esl_abc_FAvgScore` semantics for IUPAC degeneracies.
 fn f_expect_score(abc: &Alphabet, x: usize, sc: &[f32], p: &[f32]) -> f32 {
     if !abc.is_residue(x as u8) {
         return 0.0;
@@ -206,14 +229,22 @@ fn f_expect_score(abc: &Alphabet, x: usize, sc: &[f32], p: &[f32]) -> f32 {
     }
 }
 
-/// Fill in degenerate residue scores from canonical scores and background frequencies.
+/// Populate the degenerate-residue entries (`K+1..=Kp-3`) of an emission
+/// score vector from the canonical scores using [`f_expect_score`].
 fn f_expect_sc_vec(abc: &Alphabet, sc: &mut [f32], p: &[f32]) {
     for x in (abc.k + 1)..=(abc.kp - 3) {
         sc[x] = f_expect_score(abc, x, sc, p);
     }
 }
 
-/// Configure a profile from an HMM, background model, mode, and target length.
+/// Configure a search profile from an HMM, background, mode and target
+/// length (port of `p7_ProfileConfig`).
+///
+/// Computes lod-score transition and emission tables relative to `bg`,
+/// installs B→Mk entry scores (local mode uses occupancy ratios, glocal mode
+/// uses left-wing retraction), sets E-state multihit/unihit transitions, then
+/// finalises the length distribution via [`reconfig_length`]. Annotation
+/// (name/acc/desc/rf/mm/cs/cons/cutoff/compo/evparam) is copied across.
 pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
     let abc = Alphabet::new(hmm.abc_type);
 
@@ -333,7 +364,13 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
     reconfig_length(gm, l);
 }
 
-/// Reconfigure the target sequence length distribution of a profile.
+/// Reset the target-length component of a configured profile to mean `L`
+/// (port of `p7_ReconfigLength`).
+///
+/// Updates the N/J/C loop/move transitions so they bear `L/(2+nj)` of the
+/// unannotated length budget without recomputing the rest of the profile.
+/// Designed to be cheap because the search pipeline calls it once per target.
+/// The null model length must be reset separately via `Bg::set_length`.
 pub fn reconfig_length(gm: &mut Profile, l: i32) {
     let pmove = (2.0 + gm.nj) / (l as f32 + 2.0 + gm.nj);
     let ploop = 1.0 - pmove;
@@ -346,7 +383,12 @@ pub fn reconfig_length(gm: &mut Profile, l: i32) {
     gm.l = l;
 }
 
-/// Reconfigure into multihit mode for target length L.
+/// Flip an already-configured profile into multihit mode at target length `L`
+/// (port of `p7_ReconfigMultihit`).
+///
+/// Sets the E-state loop/move transitions to `log(0.5)` and `nj = 1`, then
+/// calls [`reconfig_length`] because the length model depends on `nj`. Used
+/// inside the domain-definition pipeline to flip in and out of unihit mode.
 pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
     gm.xsc[P7P_E][P7P_MOVE] = -(std::f64::consts::LN_2 as f32);
     gm.xsc[P7P_E][P7P_LOOP] = -(std::f64::consts::LN_2 as f32);
@@ -354,7 +396,11 @@ pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
     reconfig_length(gm, l);
 }
 
-/// Reconfigure into unihit mode for target length L.
+/// Flip a configured profile into unihit mode at target length `L`
+/// (port of `p7_ReconfigUnihit`).
+///
+/// Sets E→C to 0 and E→J to `-inf` (so J is unreachable), zeroes `nj`,
+/// then refreshes the length model via [`reconfig_length`].
 pub fn reconfig_unihit(gm: &mut Profile, l: i32) {
     gm.xsc[P7P_E][P7P_MOVE] = 0.0;
     gm.xsc[P7P_E][P7P_LOOP] = f32::NEG_INFINITY;
@@ -367,6 +413,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Test helper: load the first HMM from `testsuite/20aa.hmm`.
     fn load_test_hmm() -> Hmm {
         crate::hmmfile::read_hmm_file(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

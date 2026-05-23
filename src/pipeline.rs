@@ -11,6 +11,7 @@ use crate::simd::vit_filter::{viterbi_filter, VitResult};
 use crate::stats;
 use crate::tophits::*;
 
+/// Tracehash hook: record a single MSV/bias/Viterbi filter decision for cross-impl validation.
 #[cfg(feature = "tracehash")]
 fn trace_pipeline_decision(
     function: &'static str,
@@ -39,6 +40,7 @@ fn trace_pipeline_decision(
     th.finish();
 }
 
+/// Tracehash hook: dump the full-sequence bias correction inputs and result.
 #[cfg(feature = "tracehash")]
 fn trace_pipeline_full_seq_bias_detail(
     dsq: &[u8],
@@ -68,6 +70,7 @@ fn trace_pipeline_full_seq_bias_detail(
     th.finish();
 }
 
+/// Tracehash hook: dump intermediate per-sequence score components and emit per-field traces.
 #[cfg(feature = "tracehash")]
 #[allow(clippy::too_many_arguments)]
 fn trace_pipeline_score_components(
@@ -135,6 +138,7 @@ fn trace_pipeline_score_components(
     th.finish();
 }
 
+/// Tracehash helper: bucket a flogsum() input that should round to 0, for hash stability.
 #[cfg(feature = "tracehash")]
 fn flogsum_index_for_zero_arg(value: f32) -> u64 {
     if value == f32::NEG_INFINITY || value.abs() >= 15.7 {
@@ -144,6 +148,7 @@ fn flogsum_index_for_zero_arg(value: f32) -> u64 {
     }
 }
 
+/// Tracehash hook: dump one candidate domain's envelope and bias correction.
 #[cfg(feature = "tracehash")]
 fn trace_pipeline_domain_score_candidate(
     dsq: &[u8],
@@ -250,6 +255,9 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Create a new accelerated comparison pipeline with default thresholds.
+    /// Port of `p7_pipeline_Create()`: sets reporting/inclusion E-values, F1/F2/F3
+    /// filter thresholds, RNG seed, and bias/null2 flags to HMMER 3 defaults.
     pub fn new() -> Self {
         Pipeline {
             f1: 0.02,
@@ -294,9 +302,26 @@ impl Pipeline {
         }
     }
 
-    /// Configure the pipeline for a new model.
+    /// Configure the pipeline for a new query/target model.
+    /// Port of `p7_pli_NewModel()`: copies the model's E-value calibration
+    /// parameters into the pipeline so subsequent filter p-values use them.
     pub fn new_model(&mut self, gm: &Profile) {
         self.evparam = gm.evparam;
+    }
+
+    /// True when target ranking should follow bit score instead of P-value.
+    /// `TopHits` sorts ascending, so score-based sort keys are stored as
+    /// negative scores to keep higher-scoring hits first.
+    pub fn score_sort_active(&self) -> bool {
+        self.use_bit_cutoffs != BitCutoff::None || (!self.inc_by_e && self.inc_t.is_some())
+    }
+
+    pub fn hit_sortkey(&self, score: f32, lnp: f64) -> f64 {
+        if self.score_sort_active() {
+            -(score as f64)
+        } else {
+            lnp
+        }
     }
 
     /// Apply model-specific bit-score cutoffs (--cut_ga, --cut_nc, --cut_tc).
@@ -409,19 +434,14 @@ impl Pipeline {
                     #[cfg(feature = "tracehash")]
                     let msv_result = unsafe { crate::simd::msv_filter::msv_filter(&sq.dsq, l, om) };
                     #[cfg(not(feature = "tracehash"))]
-                    let msv_result =
-                        match unsafe { crate::simd::ssv_filter::ssv_filter_q17(&sq.dsq, l, om) } {
-                            crate::simd::ssv_filter::SsvResult::Ok(sc) => MsvResult::Ok(sc),
-                            crate::simd::ssv_filter::SsvResult::Overflow => MsvResult::Overflow,
-                            crate::simd::ssv_filter::SsvResult::NoResult => unsafe {
-                                crate::simd::msv_filter::msv_filter_with_scratch(
-                                    &sq.dsq,
-                                    l,
-                                    om,
-                                    &mut self.msv_dp,
-                                )
-                            },
-                        };
+                    let msv_result = unsafe {
+                        crate::simd::msv_filter::msv_filter_with_scratch(
+                            &sq.dsq,
+                            l,
+                            om,
+                            &mut self.msv_dp,
+                        )
+                    };
                     usc = match msv_result {
                         MsvResult::Ok(sc) => sc,
                         MsvResult::Overflow => f32::INFINITY,
@@ -802,7 +822,7 @@ impl Pipeline {
         } else {
             stats::exponential::logsurv(sum_score as f64, mu_f, lam_f)
         };
-        hit.sortkey = hit.lnp;
+        hit.sortkey = self.hit_sortkey(hit.score, hit.lnp);
         hit.nexpected = nexpected;
         hit.nregions = domain_stats.nregions;
         hit.nclustered = domain_stats.nclustered;
@@ -810,6 +830,52 @@ impl Pipeline {
         hit.nenvelopes = domain_stats.nenvelopes;
         hit.ndom = domains.len();
         hit.dcl = domains;
+
+        if self.use_bit_cutoffs != BitCutoff::None {
+            let target_reported = if self.by_e {
+                (self.z.max(1.0)) * hit.lnp.exp() <= self.e_value_threshold
+            } else if let Some(t) = self.t {
+                hit.score >= t
+            } else {
+                (self.z.max(1.0)) * hit.lnp.exp() <= self.e_value_threshold
+            };
+            if target_reported {
+                hit.flags |= P7_IS_REPORTED;
+                let target_included = if self.inc_by_e {
+                    (self.z.max(1.0)) * hit.lnp.exp() <= self.inc_e
+                } else if let Some(t) = self.inc_t {
+                    hit.score >= t
+                } else {
+                    (self.z.max(1.0)) * hit.lnp.exp() <= self.inc_e
+                };
+                if target_included {
+                    hit.flags |= P7_IS_INCLUDED;
+                }
+            }
+
+            for dom in &mut hit.dcl {
+                let dom_reported = if self.dom_by_e {
+                    (self.domz.max(1.0)) * dom.lnp.exp() <= self.dom_e_value_threshold
+                } else if let Some(t) = self.dom_t {
+                    dom.bitscore >= t
+                } else {
+                    (self.domz.max(1.0)) * dom.lnp.exp() <= self.dom_e_value_threshold
+                };
+                if dom_reported {
+                    dom.is_reported = true;
+                    let dom_included = if self.incdom_by_e {
+                        (self.domz.max(1.0)) * dom.lnp.exp() <= self.inc_dome
+                    } else if let Some(t) = self.inc_dom_t {
+                        dom.bitscore >= t
+                    } else {
+                        (self.domz.max(1.0)) * dom.lnp.exp() <= self.inc_dome
+                    };
+                    if dom_included {
+                        dom.is_included = true;
+                    }
+                }
+            }
+        }
 
         true
     }
@@ -839,11 +905,15 @@ fn forward_pvalue(fwd_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
     stats::exponential::surv(score as f64, tau, lambda)
 }
 
+/// Convert a raw score (nats, relative to `baseline`) into bits via division by ln(2).
 #[inline]
 fn nats_to_bits_from_scores(score: f32, baseline: f32) -> f32 {
     (((score - baseline) as f64) / std::f64::consts::LN_2) as f32
 }
 
+/// Sequence reconstruction score in nats: sum of envelope scores plus a
+/// length-correction term for residues not covered by any envelope. Used to
+/// build the alternative per-sequence score `sum_score` in `p7_Pipeline()`.
 #[inline]
 fn reconstruction_score_nats(sum_env: f32, l: usize, ld: usize) -> f32 {
     let len_ratio = l as f32 / (l as f32 + 3.0);
@@ -857,6 +927,7 @@ mod tests {
     use crate::alphabet::Alphabet;
     use std::path::Path;
 
+    /// Smoke test: pipeline produces at least one positive-score hit on a perfectly matching dsq.
     #[test]
     fn test_pipeline_finds_hit() {
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
@@ -897,6 +968,7 @@ mod tests {
         assert!(th.hits[0].score > 0.0);
     }
 
+    /// Regression test: ld > l (envelopes overlap or extend) must not produce NaN/+inf.
     #[test]
     fn reconstruction_score_allows_domain_coverage_to_exceed_sequence_length() {
         let score = reconstruction_score_nats(12.0, 100, 140);

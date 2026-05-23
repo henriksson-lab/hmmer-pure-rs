@@ -6,7 +6,7 @@ use std::arch::x86_64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
-/// Number of AVX2 float vectors: ceil(M/8), min 2.
+/// Number of AVX2 float vectors needed to stripe a model of length M: ceil(M/8), min 2.
 pub fn nqf_avx2(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 8) + 1)
 }
@@ -21,6 +21,8 @@ pub struct OProfileAvx2Fwd {
 }
 
 impl OProfileAvx2Fwd {
+    /// Build an AVX2 Forward profile by restriping the SSE2 `OProfile` float emission
+    /// and transition tables into 8-way striped vectors.
     pub fn from_oprofile(om: &OProfile) -> Self {
         let m = om.m;
         let nq = nqf_avx2(m);
@@ -97,7 +99,13 @@ impl OProfileAvx2Fwd {
     }
 }
 
-/// AVX2 Forward parser.
+/// AVX2 variant of the Forward parser (C: `p7_ForwardParser`).
+///
+/// Linear-memory O(M+L) Forward algorithm that keeps only enough state to do posterior
+/// decoding of high-probability domain regions; returns the Forward score in nats.
+/// The model must be configured in local alignment mode; the sparse-rescaling trick
+/// that keeps probability values within single-precision dynamic range cannot be
+/// safely applied in glocal or global modes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -> f32 {
@@ -239,6 +247,8 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
     totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
 }
 
+/// Cross-lane right-shift by one float lane for AVX2 (helper, Rust-only).
+/// Transforms `[a0,a1,...,a7]` into `[0,a0,a1,...,a6]`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn rightshift_ps_avx2(v: __m256) -> __m256 {
@@ -255,6 +265,7 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Verifies `rightshift_ps_avx2` produces a cross-lane right shift with zero fill.
     #[test]
     fn test_avx2_rightshift() {
         if !is_x86_feature_detected!("avx2") {
@@ -269,6 +280,7 @@ mod tests {
         }
     }
 
+    /// Verifies the AVX2 Forward parser agrees with the SSE2 reference within 1e-3.
     #[test]
     fn test_avx2_forward_matches_sse() {
         if !is_x86_feature_detected!("avx2") {

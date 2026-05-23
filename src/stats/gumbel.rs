@@ -5,31 +5,47 @@ use crate::errors::{HmmerError, HmmerResult};
 
 const SMALLX1: f64 = 5e-9;
 
-/// Probability density function P(X=x).
+/// Probability density at `x`: P(X = x) for a Gumbel with location `mu`, scale `lambda`.
+///
+/// Let y = lambda*(x-mu); returns lambda * exp(-y - exp(-y)).
+/// Useful dynamic range is roughly -6.5 <= y <= 710 for f64.
+/// Port of Easel `esl_gumbel_pdf`.
 pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     lambda * (-y - (-y).exp()).exp()
 }
 
-/// Log probability density function log P(X=x).
+/// Log probability density at `x`: log P(X = x) for the Gumbel.
+///
+/// Equals log(lambda) - y - exp(-y) where y = lambda*(x-mu).
+/// Port of Easel `esl_gumbel_logpdf`.
 pub fn logpdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     lambda.ln() - y - (-y).exp()
 }
 
-/// Cumulative distribution function P(X <= x).
+/// Cumulative distribution P(X <= x) for the Gumbel.
+///
+/// Returns exp(-exp(-y)) with y = lambda*(x-mu).
+/// Port of Easel `esl_gumbel_cdf`.
 pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     (-(-y).exp()).exp()
 }
 
-/// Log cumulative distribution function log P(X <= x).
+/// Log cumulative distribution log P(X <= x) for the Gumbel.
+///
+/// Equals -exp(-y) with y = lambda*(x-mu).
+/// Port of Easel `esl_gumbel_logcdf`.
 pub fn logcdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     -(-y).exp()
 }
 
-/// Survivor function P(X > x), i.e. 1 - CDF.
+/// Right tail mass P(X > x) = 1 - CDF for the Gumbel.
+///
+/// Uses the 1 - e^x ~ -x approximation when e^-y is tiny to avoid cancellation.
+/// Port of Easel `esl_gumbel_surv`.
 pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     let ey = -(-y).exp();
@@ -40,7 +56,11 @@ pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     }
 }
 
-/// Log survivor function log P(X > x).
+/// Log survival log P(X > x) for the Gumbel.
+///
+/// Real calculation is log(1 - exp(-exp(-y))); two limiting approximations
+/// are used at the small/large-y extremes for numerical stability.
+/// Port of Easel `esl_gumbel_logsurv`.
 pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
     let ey = -(-y).exp();
@@ -54,12 +74,17 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     }
 }
 
-/// Inverse CDF: returns x such that CDF(x) = p.
+/// Inverse CDF: return quantile x such that P(X <= x) = p.
+///
+/// Port of Easel `esl_gumbel_invcdf`.
 pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
     mu - ((-1.0 * p.ln()).ln() / lambda)
 }
 
-/// Inverse survivor: returns x such that P(X > x) = p.
+/// Inverse survivor: return quantile x at which the right tail mass equals `p`.
+///
+/// Uses log(1-p) ~ -p and log(p) ~ (p^p - 1)/p for small `p` to avoid
+/// the inf at p < ~1e-15. Port of Easel `esl_gumbel_invsurv`.
 pub fn invsurv(p: f64, mu: f64, lambda: f64) -> f64 {
     let log_part = if p < SMALLX1 {
         (p.powf(p) - 1.0) / p
@@ -69,7 +94,10 @@ pub fn invsurv(p: f64, mu: f64, lambda: f64) -> f64 {
     mu - (log_part / lambda)
 }
 
-/// Lawless equation 4.1.6 and its derivative for ML fitting.
+/// Evaluate Lawless equation 4.1.6 and its derivative at `lambda`.
+///
+/// Returns `(f, df)` where the ML estimate of lambda is the root of `f`.
+/// Used by Newton-Raphson and bisection inside `fit_complete`.
 fn lawless416(x: &[f64], lambda: f64) -> (f64, f64) {
     let n = x.len() as f64;
     let mut esum = 0.0_f64;
@@ -90,9 +118,13 @@ fn lawless416(x: &[f64], lambda: f64) -> (f64, f64) {
     (f, df)
 }
 
-/// Maximum likelihood fit of Gumbel parameters to complete data.
+/// Maximum likelihood fit of Gumbel parameters (mu, lambda) to complete data.
 ///
-/// Returns `(mu, lambda)` or error if the fit fails.
+/// Uses `Lawless82`: Newton-Raphson on equation 4.1.6 for lambda, then
+/// 4.1.5 to recover mu. Falls back to bisection if Newton-Raphson stalls.
+/// Needs ~1000+ samples for a reliable lambda estimate. Returns
+/// `HmmerError::NoResult` if the search cannot bracket/converge.
+/// Port of Easel `esl_gumbel_FitComplete`.
 pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     let n = x.len();
     if n <= 1 {
@@ -163,7 +195,10 @@ pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     Ok((mu, lambda))
 }
 
-/// ML estimate of mu given known lambda (complete data).
+/// ML estimate of `mu` given a known (or fixed) `lambda` for complete data.
+///
+/// Straight simplification of `fit_complete`: substitute lambda directly
+/// into Lawless 4.1.5. Errors if n <= 1. Port of `esl_gumbel_FitCompleteLoc`.
 pub fn fit_complete_loc(x: &[f64], lambda: f64) -> HmmerResult<f64> {
     let n = x.len();
     if n <= 1 {

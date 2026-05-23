@@ -6,12 +6,20 @@ use std::arch::aarch64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
+/// Result of the NEON Forward parser. Currently unused (the parser returns `f32`
+/// directly, with `-inf` signalling overflow / non-finite outputs).
 pub enum NeonFwdResult {
     Ok(f32),
     Error,
 }
 
-/// NEON Forward parser.
+/// NEON variant of the Forward parser (C: `p7_ForwardParser`), using 4x f32 vectors.
+///
+/// Linear-memory O(M+L) Forward algorithm that keeps only enough state to do posterior
+/// decoding of high-probability domain regions; returns the Forward score in nats, or
+/// `-inf` if the rescaled probability mass underflowed/blew up. The model must be
+/// configured in local alignment mode; the sparse-rescaling trick that keeps values
+/// within single-precision dynamic range cannot be safely applied in glocal/global.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
@@ -148,6 +156,7 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
 }
 
+/// Non-aarch64 stub for [`neon_forward_parser`]; always returns `-inf`.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn neon_forward_parser(_dsq: &[Dsq], _l: usize, _om: &OProfile) -> f32 {
     f32::NEG_INFINITY

@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-use crate::alphabet::AlphabetType;
+use crate::alphabet::{Alphabet, AlphabetType};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
 
@@ -12,14 +12,22 @@ unsafe extern "C" {
     fn logf(x: f32) -> f32;
 }
 
-/// Read all HMMs from an HMM file.
+/// Open an HMM save file and read every HMM contained in it.
+///
+/// Wrapper over [`read_hmms`] that opens `path` first. Returns all HMMs
+/// in the file as a `Vec`; errors propagate I/O and format failures.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     let file = std::fs::File::open(path).map_err(|e| HmmerError::Io(e))?;
     let reader = BufReader::new(file);
     read_hmms(reader)
 }
 
-/// Read HMMs from a reader.
+/// Read all HMMs from an open HMM save file stream (Rust port of `p7_hmmfile_Read`).
+///
+/// Loops calling `read_one_hmm` until the reader hits EOF, collecting each
+/// parsed `Hmm` into a vector. The C entry point reads one HMM at a time via
+/// a parser dispatch (`read_asc30hmm` / `read_bin30hmm`); here we expose the
+/// "read everything" idiom and a single ASCII parser.
 pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
     let mut lines = reader.lines();
@@ -34,7 +42,14 @@ pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     Ok(hmms)
 }
 
-/// Read a single HMM from a line iterator. Returns None at EOF.
+/// Parse one HMMER3 ASCII HMM record from a line iterator (port of `read_asc30hmm`).
+///
+/// Handles every header key/value pair (NAME, LENG, ALPH, RF, MM, CONS, CS, MAP,
+/// DATE, COM, NSEQ, EFFN, CKSUM, STATS, GA, TC, NC), then reads the alphabet
+/// header, an optional COMPO line, node-0 insert/transitions, and the M
+/// node blocks of match/insert/transition lines, terminated by `//`.
+/// File values are stored as `-ln(p)` and are exponentiated back into
+/// probabilities on the fly. Returns `Ok(None)` on clean EOF.
 fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option<Hmm>> {
     // Find the format header line
     let header = loop {
@@ -73,6 +88,11 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     } else {
         "3a" // Default
     };
+    if format_version == "3a" {
+        return Err(HmmerError::Format(
+            "Unsupported legacy HMMER3/a ASCII HMM format".to_string(),
+        ));
+    }
 
     // Parse header key-value pairs
     let mut name: Option<String> = None;
@@ -95,6 +115,9 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     let mut evparam = [EVPARAM_UNSET; NEVPARAM];
     let mut cutoff = [CUTOFF_UNSET; NCUTOFFS];
     let mut flags: u32 = 0;
+    let mut stat_msv = false;
+    let mut stat_viterbi = false;
+    let mut stat_forward = false;
 
     // Read header lines until "HMM" line
     loop {
@@ -105,6 +128,7 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
         let trimmed = line.trim();
 
         if trimmed.starts_with("HMM ") || trimmed == "HMM" {
+            validate_alphabet_header(trimmed, abc_type)?;
             break;
         }
 
@@ -195,27 +219,31 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
                         "MSV" => {
                             evparam[P7_MMU] = v1;
                             evparam[P7_MLAMBDA] = v2;
+                            stat_msv = true;
                         }
                         "VITERBI" => {
                             evparam[P7_VMU] = v1;
                             evparam[P7_VLAMBDA] = v2;
+                            stat_viterbi = true;
                         }
                         "FORWARD" => {
                             evparam[P7_FTAU] = v1;
                             evparam[P7_FLAMBDA] = v2;
+                            stat_forward = true;
                         }
                         _ => {}
                     }
-                    flags |= P7H_STATS;
                 }
             }
             "GA" => {
                 let parts: Vec<&str> = value.split_whitespace().collect();
                 if let Some(v) = parts.first() {
-                    cutoff[P7_GA1] = v.parse().unwrap_or(CUTOFF_UNSET);
+                    cutoff[P7_GA1] = parse_cutoff_value("GA", v)?;
+                } else {
+                    return Err(HmmerError::Format("Missing GA cutoff value".to_string()));
                 }
                 if let Some(v) = parts.get(1) {
-                    cutoff[P7_GA2] = v.parse().unwrap_or(cutoff[P7_GA1]);
+                    cutoff[P7_GA2] = parse_cutoff_value("GA", v)?;
                 } else {
                     cutoff[P7_GA2] = cutoff[P7_GA1];
                 }
@@ -224,10 +252,12 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
             "TC" => {
                 let parts: Vec<&str> = value.split_whitespace().collect();
                 if let Some(v) = parts.first() {
-                    cutoff[P7_TC1] = v.parse().unwrap_or(CUTOFF_UNSET);
+                    cutoff[P7_TC1] = parse_cutoff_value("TC", v)?;
+                } else {
+                    return Err(HmmerError::Format("Missing TC cutoff value".to_string()));
                 }
                 if let Some(v) = parts.get(1) {
-                    cutoff[P7_TC2] = v.parse().unwrap_or(cutoff[P7_TC1]);
+                    cutoff[P7_TC2] = parse_cutoff_value("TC", v)?;
                 } else {
                     cutoff[P7_TC2] = cutoff[P7_TC1];
                 }
@@ -236,10 +266,12 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
             "NC" => {
                 let parts: Vec<&str> = value.split_whitespace().collect();
                 if let Some(v) = parts.first() {
-                    cutoff[P7_NC1] = v.parse().unwrap_or(CUTOFF_UNSET);
+                    cutoff[P7_NC1] = parse_cutoff_value("NC", v)?;
+                } else {
+                    return Err(HmmerError::Format("Missing NC cutoff value".to_string()));
                 }
                 if let Some(v) = parts.get(1) {
-                    cutoff[P7_NC2] = v.parse().unwrap_or(cutoff[P7_NC1]);
+                    cutoff[P7_NC2] = parse_cutoff_value("NC", v)?;
                 } else {
                     cutoff[P7_NC2] = cutoff[P7_NC1];
                 }
@@ -255,6 +287,14 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     }
     if abc_type == AlphabetType::Unknown {
         return Err(HmmerError::Format("Missing ALPH in HMM".to_string()));
+    }
+    if stat_msv || stat_viterbi || stat_forward {
+        if !(stat_msv && stat_viterbi && stat_forward) {
+            return Err(HmmerError::Format(
+                "Incomplete STATS block in HMM header".to_string(),
+            ));
+        }
+        flags |= P7H_STATS;
     }
 
     let abc = crate::alphabet::Alphabet::new(abc_type);
@@ -322,10 +362,14 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     if compo_trimmed.starts_with("COMPO") {
         // Parse composition values
         let parts: Vec<&str> = compo_trimmed.split_whitespace().collect();
+        if parts.len() < k + 1 {
+            return Err(HmmerError::Format(format!(
+                "COMPO line has too few fields: expected {k}, got {}",
+                parts.len().saturating_sub(1)
+            )));
+        }
         for i in 0..k.min(MAXABET) {
-            if let Some(&val) = parts.get(i + 1) {
-                hmm.compo[i] = parse_hmm_value(val);
-            }
+            hmm.compo[i] = parse_hmm_value(parts[i + 1])?;
         }
         hmm.flags |= P7H_COMPO;
 
@@ -370,56 +414,70 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
         }
 
         // Parse K emission values
+        if parts.len() < k + 1 {
+            return Err(HmmerError::Format(format!(
+                "Node {} match emission line has too few fields",
+                node
+            )));
+        }
         for i in 0..k {
-            if let Some(&val) = parts.get(i + 1) {
-                hmm.mat[node][i] = parse_hmm_value(val);
+            hmm.mat[node][i] = parse_hmm_value(parts[i + 1])?;
+        }
+
+        let mut annot_idx = k + 1;
+        let map_val = parts.get(annot_idx).ok_or_else(|| {
+            HmmerError::Format(format!("Node {node} match line missing MAP column"))
+        })?;
+        annot_idx += 1;
+        if map_flag {
+            if let Some(map) = &mut hmm.map {
+                map[node] = map_val
+                    .parse()
+                    .map_err(|_| HmmerError::Format(format!("Bad MAP value: {map_val}")))?;
             }
         }
 
-        // Parse annotations after the K values
-        let annot_start = k + 1;
-        if map_flag {
-            if let Some(&val) = parts.get(annot_start) {
-                if let Some(map) = &mut hmm.map {
-                    map[node] = val.parse().unwrap_or(0);
-                }
-            }
-        }
-        if cons_flag {
-            if let Some(&val) = parts.get(annot_start + 1) {
+        let has_cons_column = matches!(format_version, "3e" | "3f");
+        if has_cons_column {
+            let cons_val = parts.get(annot_idx).ok_or_else(|| {
+                HmmerError::Format(format!("Node {node} match line missing CONS column"))
+            })?;
+            annot_idx += 1;
+            if cons_flag {
                 if let Some(cons) = &mut hmm.consensus {
-                    cons[node] = val.as_bytes().first().copied().unwrap_or(b'-');
+                    cons[node] = annotation_byte("CONS", cons_val)?;
                 }
             }
         }
+
+        let rf_val = parts.get(annot_idx).ok_or_else(|| {
+            HmmerError::Format(format!("Node {node} match line missing RF column"))
+        })?;
+        annot_idx += 1;
         if rf_flag {
-            if let Some(&val) = parts.get(annot_start + 2) {
-                if let Some(rf) = &mut hmm.rf {
-                    rf[node] = val.as_bytes().first().copied().unwrap_or(b'-');
-                }
+            if let Some(rf) = &mut hmm.rf {
+                rf[node] = annotation_byte("RF", rf_val)?;
             }
         }
-        // CS is always the LAST token on a match-state line in HMMER3 format
-        // (placeholders `-` are emitted even for disabled RF/MM). mm lives just
-        // before cs if both are enabled, otherwise at the last slot.
-        if cs_flag {
-            if let Some(&val) = parts.last() {
-                if let Some(cs) = &mut hmm.cs {
-                    cs[node] = val.as_bytes().first().copied().unwrap_or(b'-');
-                }
-            }
-        }
-        if mm_flag {
-            // mm sits at the position just before cs (or last if no cs).
-            let mm_idx = if cs_flag {
-                parts.len().saturating_sub(2)
-            } else {
-                parts.len().saturating_sub(1)
-            };
-            if let Some(&val) = parts.get(mm_idx) {
+
+        if format_version == "3f" {
+            let mm_val = parts.get(annot_idx).ok_or_else(|| {
+                HmmerError::Format(format!("Node {node} match line missing MM column"))
+            })?;
+            annot_idx += 1;
+            if mm_flag {
                 if let Some(mm) = &mut hmm.mm {
-                    mm[node] = val.as_bytes().first().copied().unwrap_or(b'-');
+                    mm[node] = annotation_byte("MM", mm_val)?;
                 }
+            }
+        }
+
+        let cs_val = parts.get(annot_idx).ok_or_else(|| {
+            HmmerError::Format(format!("Node {node} match line missing CS column"))
+        })?;
+        if cs_flag {
+            if let Some(cs) = &mut hmm.cs {
+                cs[node] = annotation_byte("CS", cs_val)?;
             }
         }
 
@@ -439,16 +497,28 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     }
 
     // Read end-of-record marker "//"
+    let mut saw_terminator = false;
     loop {
         match lines.next() {
             None => break,
             Some(Err(e)) => return Err(HmmerError::Io(e)),
             Some(Ok(line)) => {
-                if line.trim() == "//" {
+                let trimmed = line.trim();
+                if trimmed == "//" {
+                    saw_terminator = true;
                     break;
+                } else if !trimmed.is_empty() {
+                    return Err(HmmerError::Format(format!(
+                        "Expected end-of-record marker //, got: {trimmed}"
+                    )));
                 }
             }
         }
+    }
+    if !saw_terminator {
+        return Err(HmmerError::Format(
+            "Unexpected EOF before HMM end-of-record marker //".to_string(),
+        ));
     }
 
     // Convert from -ln(prob) to probability
@@ -477,42 +547,104 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     Ok(Some(hmm))
 }
 
-/// Parse an HMM value: either a float or "*" (which means 0 probability, stored as infinity).
-fn parse_hmm_value(s: &str) -> f32 {
+/// Parse one HMM value: a float, or `"*"` meaning zero probability (stored as `+inf` in -ln space).
+fn parse_hmm_value(s: &str) -> HmmerResult<f32> {
     if s == "*" {
-        f32::INFINITY
+        Ok(f32::INFINITY)
     } else {
-        s.parse().unwrap_or(0.0)
+        s.parse()
+            .map_err(|_| HmmerError::Format(format!("Bad HMM probability value: {s}")))
     }
 }
 
-/// Parse an emission line (K whitespace-separated values).
+fn parse_cutoff_value(key: &str, s: &str) -> HmmerResult<f32> {
+    s.trim_end_matches(';')
+        .parse()
+        .map_err(|_| HmmerError::Format(format!("Bad {key} cutoff value: {s}")))
+}
+
+fn validate_alphabet_header(line: &str, abc_type: AlphabetType) -> HmmerResult<()> {
+    if abc_type == AlphabetType::Unknown {
+        return Err(HmmerError::Format(
+            "HMM alphabet header appeared before ALPH".to_string(),
+        ));
+    }
+    let abc = Alphabet::new(abc_type);
+    let fields: Vec<&str> = line.split_whitespace().skip(1).collect();
+    if fields.len() != abc.k {
+        return Err(HmmerError::Format(format!(
+            "HMM alphabet header has {} symbols, expected {}",
+            fields.len(),
+            abc.k
+        )));
+    }
+    for (idx, (got, expected)) in fields.iter().zip(abc.sym.iter()).enumerate() {
+        if got.len() != 1 || got.as_bytes()[0] != *expected {
+            return Err(HmmerError::Format(format!(
+                "HMM alphabet header symbol {} is {}, expected {}",
+                idx + 1,
+                got,
+                *expected as char
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn annotation_byte(label: &str, s: &str) -> HmmerResult<u8> {
+    s.as_bytes()
+        .first()
+        .copied()
+        .ok_or_else(|| HmmerError::Format(format!("Empty {label} annotation")))
+}
+
+/// Parse an emission row of `K` whitespace-separated `-ln(p)` values into `values`.
 fn parse_emission_line(line: &str, k: usize, values: &mut [f32]) -> HmmerResult<()> {
     let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < k {
+        return Err(HmmerError::Format(format!(
+            "Emission line has too few fields: expected {k}, got {}",
+            parts.len()
+        )));
+    }
     for i in 0..k {
-        if let Some(&val) = parts.get(i) {
-            values[i] = parse_hmm_value(val);
-        }
+        values[i] = parse_hmm_value(parts[i])?;
     }
     Ok(())
 }
 
-/// Parse a transition line (7 whitespace-separated values).
+/// Parse a transition row of `NTRANSITIONS` whitespace-separated `-ln(p)` values.
 fn parse_transition_line(line: &str, values: &mut [f32; NTRANSITIONS]) -> HmmerResult<()> {
     let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < NTRANSITIONS {
+        return Err(HmmerError::Format(format!(
+            "Transition line has too few fields: expected {NTRANSITIONS}, got {}",
+            parts.len()
+        )));
+    }
     for i in 0..NTRANSITIONS {
-        if let Some(&val) = parts.get(i) {
-            values[i] = parse_hmm_value(val);
-        }
+        values[i] = parse_hmm_value(parts[i])?;
     }
     Ok(())
 }
 
-/// Write an HMM in HMMER3/e ASCII format.
+/// Write a profile HMM as a HMMER3 ASCII save file (port of `p7_hmmfile_WriteASCII`).
+///
+/// Emits the HMMER3 header block (NAME/ACC/DESC/LENG/MAXL/ALPH, annotation
+/// flag lines, DATE/NSEQ/EFFN/CKSUM, STATS LOCAL MSV/VITERBI/FORWARD), then
+/// the alphabet line, transition label legend, optional COMPO line, node-0
+/// insert/transition rows, and one match/insert/transition triplet per node
+/// 1..M, terminated by `//`. Probabilities are encoded as `-ln(p)` with `*`
+/// for zero, matching the C writer's `logf`-based output exactly.
 pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     let k = hmm.abc_k;
+    let write_3f = true;
 
-    writeln!(w, "HMMER3/e [3.0 | March 2010]").map_err(HmmerError::Io)?;
+    if write_3f {
+        writeln!(w, "HMMER3/f [3.4 | Aug 2023]").map_err(HmmerError::Io)?;
+    } else {
+        writeln!(w, "HMMER3/e [3.0 | March 2010]").map_err(HmmerError::Io)?;
+    }
     writeln!(w, "NAME  {}", hmm.name).map_err(HmmerError::Io)?;
     if let Some(ref acc) = hmm.acc {
         writeln!(w, "ACC   {}", acc).map_err(HmmerError::Io)?;
@@ -651,30 +783,24 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         for i in 0..k {
             write!(w, " {}", fmt_prob(hmm.mat[node][i])).map_err(HmmerError::Io)?;
         }
-        // Annotations
         if let Some(ref map) = hmm.map {
             write!(w, " {:>6}", map[node]).map_err(HmmerError::Io)?;
-
-            let cons_ch = hmm
-                .consensus
-                .as_ref()
-                .map(|cons| cons[node] as char)
-                .unwrap_or('-');
-            let rf_ch = hmm.rf.as_ref().map(|rf| rf[node] as char).unwrap_or('-');
-            let mm_ch = hmm.mm.as_ref().map(|mm| mm[node] as char).unwrap_or('-');
-            let cs_ch = hmm.cs.as_ref().map(|cs| cs[node] as char).unwrap_or('-');
-            write!(w, " {} {} {} {}", cons_ch, rf_ch, mm_ch, cs_ch).map_err(HmmerError::Io)?;
         } else {
-            if let Some(ref cons) = hmm.consensus {
-                write!(w, " {}", cons[node] as char).map_err(HmmerError::Io)?;
-            }
-            if let Some(ref rf) = hmm.rf {
-                write!(w, " {}", rf[node] as char).map_err(HmmerError::Io)?;
-            }
-            if let Some(ref cs) = hmm.cs {
-                write!(w, " {}", cs[node] as char).map_err(HmmerError::Io)?;
-            }
+            write!(w, " {:>6}", "-").map_err(HmmerError::Io)?;
         }
+        let cons_ch = hmm
+            .consensus
+            .as_ref()
+            .map(|cons| cons[node] as char)
+            .unwrap_or('-');
+        let rf_ch = hmm.rf.as_ref().map(|rf| rf[node] as char).unwrap_or('-');
+        let mm_ch = hmm.mm.as_ref().map(|mm| mm[node] as char).unwrap_or('-');
+        let cs_ch = hmm.cs.as_ref().map(|cs| cs[node] as char).unwrap_or('-');
+        write!(w, " {} {}", cons_ch, rf_ch).map_err(HmmerError::Io)?;
+        if write_3f {
+            write!(w, " {}", mm_ch).map_err(HmmerError::Io)?;
+        }
+        write!(w, " {}", cs_ch).map_err(HmmerError::Io)?;
         writeln!(w).map_err(HmmerError::Io)?;
 
         // Insert emission line
@@ -696,7 +822,8 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     Ok(())
 }
 
-/// Format a probability as -ln(p) for HMM file output.
+/// Format a probability `p` as `-ln(p)` (or `*` if zero) using single-precision
+/// `logf`, matching the C HMMER ASCII writer's field width and digits.
 fn fmt_prob(p: f32) -> String {
     if p <= 0.0 {
         "      *".to_string()
@@ -711,7 +838,12 @@ fn fmt_prob(p: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufReader, Cursor};
     use std::path::Path;
+
+    fn read_hmms_from_str(s: &str) -> HmmerResult<Vec<Hmm>> {
+        read_hmms(BufReader::new(Cursor::new(s.as_bytes())))
+    }
 
     #[test]
     fn test_read_20aa_hmm() {
@@ -756,6 +888,65 @@ mod tests {
     }
 
     #[test]
+    fn rejects_hmm_alphabet_header_that_disagrees_with_alph() {
+        let mut text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        ))
+        .unwrap();
+        text = text.replacen("HMM          A        C", "HMM          C        A", 1);
+
+        let err = read_hmms_from_str(&text).unwrap_err();
+        assert!(err.to_string().contains("HMM alphabet header symbol 1"));
+    }
+
+    #[test]
+    fn writer_uses_hmmer3f_for_match_mask_annotation() {
+        let mut hmm = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        hmm.flags |= P7H_MMASK;
+
+        let mut buf = Vec::new();
+        write_hmm(&mut buf, &hmm).unwrap();
+        assert!(String::from_utf8(buf).unwrap().starts_with("HMMER3/f "));
+    }
+
+    #[test]
+    fn parses_hmmer3e_map_annotations_without_mm_column() {
+        let hmms = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/RRM_1.hmm"
+        )))
+        .unwrap();
+        let hmm = &hmms[0];
+        assert_eq!(hmm.name, "RRM_1");
+        assert_eq!(hmm.map.as_ref().unwrap()[1], 1);
+        assert_eq!(hmm.consensus.as_ref().unwrap()[1], b'l');
+        assert!(hmm.rf.is_none());
+        assert_eq!(hmm.cs.as_ref().unwrap()[1], b'E');
+    }
+
+    #[test]
+    fn parses_hmmer3f_map_annotations_with_mm_placeholder() {
+        let hmms = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/gecco_cluster1_hmms.hmm"
+        )))
+        .unwrap();
+        let hmm = &hmms[0];
+        assert_eq!(hmm.name, "Alpha-amylase");
+        assert_eq!(hmm.map.as_ref().unwrap()[1], 1);
+        assert_eq!(hmm.consensus.as_ref().unwrap()[1], b'G');
+        assert!(hmm.rf.is_none());
+        assert!(hmm.mm.is_none());
+        assert_eq!(hmm.cs.as_ref().unwrap()[1], b'-');
+    }
+
+    #[test]
     fn test_read_multiple_hmms() {
         // minipfam has multiple HMMs
         let hmms = read_hmm_file(Path::new(concat!(
@@ -764,5 +955,61 @@ mod tests {
         )))
         .unwrap();
         assert!(hmms.len() > 1, "Expected multiple HMMs in minipfam");
+    }
+
+    #[test]
+    fn rejects_bad_ga_cutoff_instead_of_defaulting() {
+        let err = read_hmms_from_str(
+            "HMMER3/f [3.4 | Aug 2023]\nNAME  x\nLENG  1\nALPH  amino\nGA    nope\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, HmmerError::Format(msg) if msg.contains("Bad GA cutoff")));
+    }
+
+    #[test]
+    fn parses_pfam_semicolon_terminated_cutoffs() {
+        assert_eq!(parse_cutoff_value("GA", "22;").unwrap(), 22.0);
+        assert_eq!(parse_cutoff_value("TC", "20.7;").unwrap(), 20.7);
+        assert_eq!(parse_cutoff_value("NC", "29.6").unwrap(), 29.6);
+
+        let text = include_str!("../hmmer/tutorial/fn3.hmm")
+            .replace("GA    8.00 7.20", "GA    22;")
+            .replace("TC    8.00 7.20", "TC    23.5;")
+            .replace("NC    7.90 7.90", "NC    -1.25;");
+
+        let hmms = read_hmms_from_str(&text).unwrap();
+        let hmm = &hmms[0];
+        assert_eq!(hmm.cutoff[P7_GA1], 22.0);
+        assert_eq!(hmm.cutoff[P7_GA2], 22.0);
+        assert_eq!(hmm.cutoff[P7_TC1], 23.5);
+        assert_eq!(hmm.cutoff[P7_TC2], 23.5);
+        assert_eq!(hmm.cutoff[P7_NC1], -1.25);
+        assert_eq!(hmm.cutoff[P7_NC2], -1.25);
+        assert!(hmm.flags & P7H_GA != 0);
+        assert!(hmm.flags & P7H_TC != 0);
+        assert!(hmm.flags & P7H_NC != 0);
+    }
+
+    #[test]
+    fn rejects_truncated_compo_line() {
+        let text = "\
+HMMER3/f [3.4 | Aug 2023]
+NAME  x
+LENG  1
+ALPH  DNA
+HMM          A        C        G        T
+            m->m     m->i     m->d     i->m     i->i     d->m     d->d
+COMPO   1.38629  1.38629
+        1.38629  1.38629  1.38629  1.38629
+        0.00000        *        *  0.00000        *        *        *
+     1  1.38629  1.38629  1.38629  1.38629
+        1.38629  1.38629  1.38629  1.38629
+              *        *        *  0.00000        *        *        *
+//
+";
+        let err = read_hmms_from_str(text).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("COMPO line has too few fields"))
+        );
     }
 }

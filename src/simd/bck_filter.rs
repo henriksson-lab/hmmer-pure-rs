@@ -8,6 +8,11 @@ use std::arch::x86_64::*;
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
 
+/// Tracehash helper: sum one DP state (M/D/I) across stripes and emit a quantized hash.
+///
+/// Iterates lanes [`q_start`, `q_end`) of the striped row, accumulating the per-lane
+/// values for the chosen state, then dispatches to the correct tracehash label.
+/// Used only under `feature = "tracehash"` to compare against the C reference.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 fn trace_engine_sum_q1e5(
     name: &'static str,
@@ -103,6 +108,10 @@ fn trace_engine_sum_q1e5(
     th.finish();
 }
 
+/// Tracehash helper: hash the fully populated M/D/I state sums for a labeled row.
+///
+/// Unpacks the SSE row into scalar lanes, then calls [`trace_engine_sum_q1e5`] three
+/// times (once per state) with row-specific tracehash labels (`rowl`, `rowlmN`, `rowN`).
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_engine_row_final_q1e5(
     row_label: &'static str,
@@ -201,6 +210,10 @@ unsafe fn trace_engine_row_final_q1e5(
     }
 }
 
+/// Tracehash helper: hash row 1 with extra coarse partitions over the model length.
+///
+/// Emits the standard M/D/I sums plus stripe-window sums (`q0_8`, `q8_16`, `q16_32`,
+/// `q32_end`) so tracehash regressions can localize divergences along the profile.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_engine_row1_q1e5(
     dsq: &[Dsq],
@@ -225,6 +238,10 @@ unsafe fn trace_engine_row1_q1e5(
     trace_engine_sum_q1e5("m_q32_end", dsq, dsq_offset, l, m, q, &row, 0, 32, q);
 }
 
+/// Tracehash helper: hash row 1 at a mid-recursion phase checkpoint.
+///
+/// Phases `phase1`/`phase3`/`phase4`/`phase5` correspond to the M/I-init, E->M+DD,
+/// post-DD, and M->D stages inside the Backward inner loop.
 #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
 unsafe fn trace_engine_row1_checkpoint_q1e5(
     label: &'static str,
@@ -261,8 +278,23 @@ unsafe fn trace_engine_row1_checkpoint_q1e5(
     }
 }
 
-/// SSE Backward parser that stores per-position specials and scale into a ProbMx.
-/// Adapted from the proven hmmer-pure-rs bck_engine() implementation.
+/// The Backward algorithm, linear-memory parsing version (SSE, probability space).
+///
+/// Variant of C `p7_BackwardParser` — same as `p7_Backward` except the full DP
+/// matrix is not kept; only the special (BENCJ) state values per row are stored,
+/// in $O(M+L)$ memory. These are sufficient for posterior decoding to locate
+/// high-probability domain regions. Requires a previously filled Forward parser
+/// matrix because the same sparse scale factors must be re-applied.
+///
+/// # Args
+/// - `dsq` digital target sequence, indices 1..L
+/// - `l` sequence length
+/// - `om` optimized profile (must be in local alignment mode)
+/// - `_fwd_sc` Forward score (unused; kept for API symmetry)
+/// - `pmx` Backward probability matrix to fill (specials + optional DP)
+///
+/// # Returns
+/// Backward score in nats.
 ///
 /// # Safety
 /// Requires SSE2 support.
@@ -278,6 +310,15 @@ pub unsafe fn backward_parser_pmx(
     backward_parser_pmx_offset(dsq, 0, l, om, _fwd_sc, pmx)
 }
 
+/// Backward parser over a `dsq` slice with an explicit base offset (variant of
+/// C `p7_BackwardParser`).
+///
+/// Identical to [`backward_parser_pmx`] but indexes residues at `dsq[dsq_offset+1..]`,
+/// letting callers process windows of a larger digital sequence without copying.
+/// Allocates per-call scratch SSE buffers; see `_with_scratch` for reuse.
+///
+/// # Safety
+/// Requires SSE2 support.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn backward_parser_pmx_offset(
@@ -303,6 +344,15 @@ pub unsafe fn backward_parser_pmx_offset(
     )
 }
 
+/// Backward parser using sparse scale factors carried over from a paired Forward run.
+///
+/// Variant of C `p7_Backward`: passes the Forward per-row sparse rescaling values
+/// (`fwd_row_scales`) so Backward divides by the same factors instead of choosing
+/// its own. This is required when a full Backward matrix will later be combined
+/// with Forward (e.g. for posterior decoding) so scale factors cancel exactly.
+///
+/// # Safety
+/// Requires SSE2 support.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn backward_parser_pmx_offset_with_fwd_scales(
@@ -329,6 +379,22 @@ pub unsafe fn backward_parser_pmx_offset_with_fwd_scales(
     )
 }
 
+/// Core Backward engine with caller-supplied scratch buffers (variant of C
+/// `backward_engine`).
+///
+/// Mirrors the fused `backward_engine` in `impl_sse/fwdback.c` that backs both
+/// `p7_Backward` and `p7_BackwardParser`. Two SSE row buffers (`dpp_buf`, `dpc_buf`)
+/// roll backward from row L to row 0, computing M/D/I per stripe with D->D wing
+/// unfolding and sparse rescaling. When `pmx.has_dp` is set and the sequence is
+/// fully canonical, dispatches to `backward_parser_pmx_offset_direct` for the
+/// in-place full-matrix path; otherwise fills only the special states. If
+/// `fwd_row_scales` is `Some`, those scales are reused for cancellation against
+/// a paired Forward; if `None`, Backward picks its own when xB grows large.
+///
+/// Returns the Backward score (nats).
+///
+/// # Safety
+/// Requires SSE2 support.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn backward_parser_pmx_offset_with_scratch(
@@ -750,6 +816,15 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     (totscale + (x_n as f64).ln()) as f32
 }
 
+/// Backward full-matrix fill assuming a canonical (no degenerate residues) sequence.
+///
+/// Variant of C `backward_engine`: the caller asserts `pmx.has_dp` and that all
+/// residues are within the canonical alphabet, allowing the routine to skip the
+/// degenerate-residue branch and write directly into the striped DP matrix via
+/// `backward_parser_pmx_offset_direct`.
+///
+/// # Safety
+/// Requires SSE2 support and `pmx.has_dp` must be true.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn backward_parser_pmx_offset_canonical(
@@ -764,6 +839,21 @@ pub unsafe fn backward_parser_pmx_offset_canonical(
     backward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx, fwd_row_scales)
 }
 
+/// Backward full-matrix fill, writing directly into the striped ProbMx (variant of
+/// C `p7_Backward`).
+///
+/// Direct counterpart to `p7_Backward` (full $O(ML)$ memory/time): no rolling row
+/// buffers — every row is computed in-place inside `pmx.striped_dp`. Caller must
+/// pre-allocate `pmx.has_dp == true`. Per-row sparse rescaling matches Forward
+/// when `fwd_row_scales` is `Some`, or is chosen locally when xB exceeds 1e4.
+/// Assumes all residues are canonical; the dispatcher
+/// [`backward_parser_pmx_offset_with_scratch`] checks this precondition.
+///
+/// Returns the Backward score (nats).
+///
+/// # Safety
+/// Requires SSE2 support; `pmx` must have its striped DP storage allocated and
+/// `dsq_offset+l` must be in bounds.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn backward_parser_pmx_offset_direct(
@@ -1056,6 +1146,11 @@ unsafe fn backward_parser_pmx_offset_direct(
     (totscale + (x_n as f64).ln()) as f32
 }
 
+/// Returns `true` iff every residue in `dsq[dsq_offset+1..=dsq_offset+l]` is a
+/// canonical alphabet symbol (`< abc_kp`).
+///
+/// Used to decide whether the Backward engine can take the fast in-place path.
+/// Returns `false` on empty windows or out-of-bounds spans.
 #[inline(always)]
 fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> bool {
     if l == 0 {

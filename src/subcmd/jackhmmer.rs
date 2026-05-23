@@ -27,26 +27,94 @@ const TARGET_BATCH_SIZE: usize = 256;
     about = "Iteratively search a protein sequence against a protein database"
 )]
 struct Args {
+    /// Direct output to file <f>, not stdout
+    #[arg(short = 'o')]
+    output: Option<PathBuf>,
+
     /// Query sequence file (FASTA)
     seqfile: PathBuf,
     /// Target sequence database (FASTA)
     seqdb: PathBuf,
 
     /// Maximum number of iterations
-    #[arg(short = 'N', default_value = "5")]
+    #[arg(short = 'N', default_value = "5", value_parser = parse_nonzero_usize)]
     max_iterations: usize,
 
     /// Report sequences <= this E-value threshold
-    #[arg(short = 'E', default_value = "10.0")]
+    #[arg(
+        short = 'E',
+        default_value = "10.0",
+        value_parser = parse_positive_f64,
+        conflicts_with = "score_threshold"
+    )]
     e_value: f64,
 
+    /// Report sequences >= this score threshold
+    #[arg(short = 'T', conflicts_with = "e_value")]
+    score_threshold: Option<f32>,
+
+    /// Report domains <= this E-value threshold
+    #[arg(
+        long = "domE",
+        default_value = "10.0",
+        value_parser = parse_positive_f64,
+        conflicts_with = "dom_t"
+    )]
+    dom_e: f64,
+
+    /// Report domains >= this score threshold
+    #[arg(long = "domT", conflicts_with = "dom_e")]
+    dom_t: Option<f32>,
+
     /// Include sequences <= this E-value threshold
-    #[arg(long = "incE", default_value = "0.001")]
+    #[arg(
+        long = "incE",
+        default_value = "0.001",
+        value_parser = parse_positive_f64,
+        conflicts_with = "inc_t"
+    )]
     inc_e: f64,
 
+    /// Include sequences >= this score threshold
+    #[arg(long = "incT", conflicts_with = "inc_e")]
+    inc_t: Option<f32>,
+
     /// Include domains <= this E-value threshold
-    #[arg(long = "incdomE", default_value = "0.001")]
+    #[arg(
+        long = "incdomE",
+        default_value = "0.001",
+        value_parser = parse_positive_f64,
+        conflicts_with = "incdom_t"
+    )]
     incdom_e: f64,
+
+    /// Include domains >= this score threshold
+    #[arg(long = "incdomT", conflicts_with = "incdom_e")]
+    incdom_t: Option<f32>,
+
+    /// Turn all heuristic filters off
+    #[arg(long = "max", conflicts_with_all = ["f1", "f2", "f3", "nobias"])]
+    max: bool,
+
+    /// MSV filter threshold
+    #[arg(long = "F1", default_value = "0.02")]
+    f1: f64,
+
+    /// Viterbi filter threshold
+    #[arg(long = "F2", default_value = "0.001")]
+    f2: f64,
+
+    /// Forward filter threshold
+    #[arg(long = "F3", default_value = "1e-5")]
+    f3: f64,
+
+    /// Gap open probability for the single-sequence query model
+    #[arg(long = "popen", default_value = "0.02", value_parser = parse_popen)]
+    popen: f32,
+
+    /// Gap extend probability for the single-sequence query model
+    #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
+    pextend: f32,
 
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
@@ -59,6 +127,18 @@ struct Args {
     /// Turn off biased composition score corrections
     #[arg(long = "nonull2")]
     nonull2: bool,
+
+    /// Set number of comparisons for E-value calculation
+    #[arg(short = 'Z', value_parser = parse_positive_f64)]
+    z_value: Option<f64>,
+
+    /// Set number of significant seqs for domain E-value calculation
+    #[arg(long = "domZ", value_parser = parse_positive_f64)]
+    domz_value: Option<f64>,
+
+    /// Random number seed
+    #[arg(long = "seed", default_value = "42")]
+    seed: u32,
 
     /// Save per-sequence hits to tabular file
     #[arg(long = "tblout")]
@@ -77,8 +157,87 @@ struct Args {
     chkali: Option<PathBuf>,
 }
 
+fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid positive integer: {e}"))?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0".to_string())
+    }
+}
+
+fn parse_positive_f64(s: &str) -> Result<f64, String> {
+    let value = s
+        .parse::<f64>()
+        .map_err(|e| format!("invalid positive number: {e}"))?;
+    if value > 0.0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0".to_string())
+    }
+}
+
+fn parse_popen(s: &str) -> Result<f32, String> {
+    let value = s
+        .parse::<f32>()
+        .map_err(|e| format!("invalid gap open probability: {e}"))?;
+    if (0.0..0.5).contains(&value) {
+        Ok(value)
+    } else {
+        Err("--popen must be >= 0 and < 0.5".to_string())
+    }
+}
+
+fn parse_pextend(s: &str) -> Result<f32, String> {
+    let value = s
+        .parse::<f32>()
+        .map_err(|e| format!("invalid gap extend probability: {e}"))?;
+    if (0.0..1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("--pextend must be >= 0 and < 1".to_string())
+    }
+}
+
+fn count_query_sequences(path: &std::path::Path, abc: &Alphabet) -> usize {
+    let mut sqf = sequence::open_seq_file(path, abc).unwrap_or_else(|e| {
+        eprintln!("Error opening query file: {}", e);
+        std::process::exit(1);
+    });
+    let mut sq = Sequence::new();
+    let mut count = 0usize;
+    while sqf.read(&mut sq).unwrap_or_else(|e| {
+        eprintln!("Error reading query file: {}", e);
+        std::process::exit(1);
+    }) {
+        count += 1;
+        if count > 1 {
+            break;
+        }
+        sq.reuse();
+    }
+    count
+}
+
+/// Entry point for `jackhmmer`: iteratively search a protein query against a
+/// protein database, rebuilding the HMM each round from included hits until
+/// convergence or `-N` iterations.
+///
+/// Round 1 builds a single-sequence HMM (phmmer-style); subsequent rounds
+/// reuse the previous round's included-hit MSA augmented with the original
+/// query to rebuild the model. Each round runs the standard pipeline against
+/// the target DB in bounded parallel batches, applies E/incE thresholds,
+/// reports the canonical per-sequence tabular block, and optionally writes
+/// `--chkhmm`/`--chkali`/`--tblout`/`--domtblout` checkpoints. Corresponds to
+/// `serial_master()` in hmmer/src/jackhmmer.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
+    if args.seqdb == PathBuf::from("-") {
+        eprintln!("Error: target sequence database may not be '-' for jackhmmer");
+        std::process::exit(1);
+    }
 
     logsum::p7_flogsuminit();
 
@@ -90,9 +249,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
+    if args.seqfile != PathBuf::from("-") && count_query_sequences(&args.seqfile, &abc) > 1 {
+        eprintln!(
+            "Error: jackhmmer multi-query sequence input is not implemented yet; split the query FASTA or use C jackhmmer"
+        );
+        std::process::exit(1);
+    }
 
+    let mut output_file = args.output.as_ref().map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("Error creating output file: {}", e);
+            std::process::exit(1);
+        })
+    });
     let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    let mut stdout_lock = stdout.lock();
+    let out: &mut dyn Write = match output_file {
+        Some(ref mut file) => file,
+        None => &mut stdout_lock,
+    };
     let mut tblout_file = args.tblout.as_ref().map(|p| {
         std::fs::File::create(p).unwrap_or_else(|e| {
             eprintln!("Error creating tblout file: {}", e);
@@ -157,6 +332,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         )
         .unwrap();
     }
+    if args.max {
+        writeln!(
+            out,
+            "# Max sensitivity mode:            on [all heuristic filters off]"
+        )
+        .unwrap();
+    }
+    if args.seed != 42 {
+        if args.seed == 0 {
+            writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
+        } else {
+            writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
+        }
+    }
     writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
     writeln!(
         out,
@@ -171,7 +360,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
     let mut query_sq = Sequence::new();
-    if !query_sqf.read(&mut query_sq).unwrap() {
+    if !query_sqf.read(&mut query_sq).unwrap_or_else(|e| {
+        eprintln!("Error reading query file: {}", e);
+        std::process::exit(1);
+    }) {
         eprintln!("Error: no query sequence found");
         std::process::exit(1);
     }
@@ -205,8 +397,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 query_sq.n,
                 &abc,
                 &bg,
-                0.02,
-                0.4,
+                args.popen,
+                args.pextend,
             )
         } else {
             let prev_hmm = prev_hmm
@@ -303,8 +495,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         let mut lgm = gm.clone();
                         let mut lom = om.clone();
                         let mut lpli = Pipeline::new();
+                        configure_pipeline(&mut lpli, &args);
                         lpli.do_biasfilter = !args.nobias;
                         lpli.do_null2 = !args.nonull2;
+                        lpli.seed = args.seed;
                         lpli.new_model(&lgm);
 
                         lb.set_length(sq.n);
@@ -324,18 +518,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         let mut th = TopHits::new();
         th.hits = all_hits;
-        let z = z as f64;
+        let z = args.z_value.unwrap_or(z as f64);
         final_z = Some(z);
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
+            configure_pipeline(&mut tmp_pli, &args);
             tmp_pli.do_biasfilter = !args.nobias;
             tmp_pli.do_null2 = !args.nonull2;
-            tmp_pli.e_value_threshold = args.e_value;
-            tmp_pli.inc_e = args.inc_e;
-            tmp_pli.inc_dome = args.incdom_e;
+            tmp_pli.seed = args.seed;
             th.threshold(&tmp_pli, z, z);
-            let domz = th.nreported.max(1) as f64;
+            let domz = args.domz_value.unwrap_or(th.nreported.max(1) as f64);
             if domz != z {
                 th.threshold(&tmp_pli, z, domz);
             }
@@ -374,12 +567,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         .unwrap();
 
         let mut new_included_names = Vec::new();
+        let mut have_printed_incthresh = false;
         for hit in &th.hits {
             if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
                 continue;
             }
+            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 && !have_printed_incthresh {
+                writeln!(out, "  ------ inclusion threshold ------").unwrap();
+                have_printed_incthresh = true;
+            }
             let evalue = z * hit.lnp.exp();
-            let best_dom = hit.dcl.iter().min_by(|a, b| a.lnp.total_cmp(&b.lnp));
+            let best_dom = crate::subcmd::hmmsearch::best_domain(hit);
             let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
             let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
             let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
@@ -466,7 +664,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     if let Some(ref mut f) = tblout_file {
         if let (Some(ref th), Some(z)) = (&final_hits, final_z) {
-            crate::subcmd::hmmsearch::write_tblout(f, &query_sq.name, None, th, z);
+            crate::subcmd::hmmsearch::write_tblout(
+                f,
+                &query_sq.name,
+                Some(&query_sq.acc),
+                th,
+                z,
+                true,
+            );
         }
         f.flush().unwrap();
     }
@@ -474,7 +679,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         if let (Some(ref th), Some(z), Some(domz), Some(qlen)) =
             (&final_hits, final_z, final_domz, final_model_len)
         {
-            crate::subcmd::hmmsearch::write_domtblout(f, &query_sq.name, None, qlen, th, z, domz);
+            crate::subcmd::hmmsearch::write_domtblout(
+                f,
+                &query_sq.name,
+                Some(&query_sq.acc),
+                qlen,
+                th,
+                z,
+                domz,
+                true,
+            );
         }
         f.flush().unwrap();
     }
@@ -484,6 +698,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// Build a degenerate trace for the round-1 single-sequence query that simply
+/// walks B -> M1..Mn -> E. Used so the query can be re-included verbatim when
+/// constructing the included-hit MSA for the next round.
 fn exact_match_query_trace(model_len: usize) -> Trace {
     let mut tr = Trace::new();
     tr.append(State::B, 0, 0);
@@ -496,6 +713,7 @@ fn exact_match_query_trace(model_len: usize) -> Trace {
     tr
 }
 
+/// Write the HMM produced at `iteration` to `<prefix>-<iteration>.hmm`.
 fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs::hmm::Hmm) {
     let path = checkpoint_path(prefix, iteration, "hmm");
     let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
@@ -508,6 +726,7 @@ fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs:
     });
 }
 
+/// Write the included-hit alignment for `iteration` to `<prefix>-<iteration>.sto`.
 fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
     let path = checkpoint_path(prefix, iteration, "sto");
     let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
@@ -521,12 +740,16 @@ fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
     write_stockholm_msa(&mut file, msa);
 }
 
+/// Compose a checkpoint filename of the form `<prefix>-<iteration>.<ext>`.
 fn checkpoint_path(prefix: &PathBuf, iteration: usize, ext: &str) -> PathBuf {
     let mut os = prefix.as_os_str().to_os_string();
     os.push(format!("-{}.{}", iteration, ext));
     PathBuf::from(os)
 }
 
+/// Render an in-memory `Msa` as a Stockholm 1.0 file, emitting `#=GF`,
+/// per-sequence `#=GS` descriptions, residue rows, per-row `#=GR ... PP`,
+/// and `#=GC PP_cons`/`#=GC RF` consensus annotation.
 fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
     let name_width = msa
         .sqname
@@ -621,4 +844,93 @@ fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
         .unwrap();
     }
     writeln!(out, "//").unwrap();
+}
+
+fn configure_pipeline(pli: &mut Pipeline, args: &Args) {
+    pli.e_value_threshold = args.e_value;
+    pli.dom_e_value_threshold = args.dom_e;
+    pli.inc_e = args.inc_e;
+    pli.inc_dome = args.incdom_e;
+    pli.do_max = args.max;
+    pli.f1 = args.f1;
+    pli.f2 = args.f2;
+    pli.f3 = args.f3;
+
+    if let Some(t) = args.score_threshold {
+        pli.t = Some(t);
+        pli.by_e = false;
+    }
+    if let Some(t) = args.dom_t {
+        pli.dom_t = Some(t);
+        pli.dom_by_e = false;
+    }
+    if let Some(t) = args.inc_t {
+        pli.inc_t = Some(t);
+        pli.inc_by_e = false;
+    }
+    if let Some(t) = args.incdom_t {
+        pli.inc_dom_t = Some(t);
+        pli.incdom_by_e = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jackhmmer_parses_c_output_file_option() {
+        let args =
+            Args::try_parse_from(["jackhmmer", "-o", "out.txt", "query.fa", "targets.fa"]).unwrap();
+        assert_eq!(args.output, Some(PathBuf::from("out.txt")));
+        assert_eq!(args.seqfile, PathBuf::from("query.fa"));
+        assert_eq!(args.seqdb, PathBuf::from("targets.fa"));
+    }
+
+    #[test]
+    fn jackhmmer_parses_c_threshold_and_acceleration_options() {
+        let args = Args::try_parse_from([
+            "jackhmmer",
+            "-T",
+            "25",
+            "--domT",
+            "3",
+            "--incT",
+            "20",
+            "--incdomT",
+            "4",
+            "-Z",
+            "99",
+            "--domZ",
+            "7",
+            "--seed",
+            "5",
+            "query.fa",
+            "targets.fa",
+        ])
+        .unwrap();
+        assert_eq!(args.score_threshold, Some(25.0));
+        assert_eq!(args.dom_t, Some(3.0));
+        assert_eq!(args.inc_t, Some(20.0));
+        assert_eq!(args.incdom_t, Some(4.0));
+        assert_eq!(args.z_value, Some(99.0));
+        assert_eq!(args.domz_value, Some(7.0));
+        assert_eq!(args.seed, 5);
+
+        let args = Args::try_parse_from([
+            "jackhmmer",
+            "--F1",
+            "0.1",
+            "--F2",
+            "0.2",
+            "--F3",
+            "0.3",
+            "query.fa",
+            "targets.fa",
+        ])
+        .unwrap();
+        assert_eq!(args.f1, 0.1);
+        assert_eq!(args.f2, 0.2);
+        assert_eq!(args.f3, 0.3);
+    }
 }

@@ -15,10 +15,19 @@ pub enum VitResult {
     Overflow,
 }
 
-/// SSE2-optimized Viterbi filter using int16 precision.
+/// Calculates the Viterbi score, vewy vewy fast, in limited precision.
+///
+/// Striped SIMD Viterbi (Farrar) in reduced precision (signed 16-bit words).
+/// Computes an approximation of the Viterbi score for `dsq[1..=l]` against
+/// the optimized profile `om`, returning the score in nats.
+///
+/// The score may overflow on high-scoring sequences (returned as
+/// `VitResult::Overflow`) but will not underflow. The profile must be in
+/// local or unilocal alignment mode; that's what guarantees limited dynamic
+/// range so the int16 arithmetic doesn't underflow.
 ///
 /// # Safety
-/// Requires SSE2 support.
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult {
@@ -182,20 +191,22 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
     }
 }
 
-/// Viterbi-longtarget filter: scans the sequence for stretches where the E
-/// state score exceeds a P-value threshold, producing one window per peak.
-/// Port of p7_ViterbiFilter_longtarget (hmmer/src/impl_sse/vitfilter.c:292).
+/// Finds windows within potentially long sequence blocks with Viterbi scores
+/// above threshold (vewy vewy fast, in limited precision).
 ///
-/// After a row's E-state peak crosses the threshold, we emit a window at that
-/// position (start=i-1, length=1, peak model position k) and reset the M/D/I
-/// state vectors so the search can restart for the next peak.
+/// Port of `p7_ViterbiFilter_longtarget` (hmmer/src/impl_sse/vitfilter.c:292).
+/// Computes the striped 16-bit Viterbi DP across `dsq[1..=l]` and captures
+/// the positions at which the E-state score exceeds the threshold required
+/// for the supplied P-value (usually p=0.001). The model must be in local or
+/// unilocal mode (limited-dynamic-range guarantee).
 ///
-/// `filtersc` is the combined (nullsc + bias-scaled) filter score in nats.
-/// `p_thresh` is the F2 P-value threshold.
+/// After a row's E-state peak crosses the threshold, a window is emitted at
+/// that position (peak model position k, length=1) and the M/D/I vectors are
+/// reset so the search restarts for the next peak. `filtersc` is the combined
+/// (nullsc + bias-scaled) filter score in nats; `p_thresh` is the F2 P-value.
 ///
 /// # Safety
-/// Requires SSE2. `om` must be in local or unilocal mode (needed for bounded
-/// dynamic range of int16 arithmetic).
+/// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn viterbi_filter_longtarget(
@@ -391,7 +402,8 @@ pub unsafe fn viterbi_filter_longtarget(
     windows
 }
 
-/// Horizontal max of 8 int16 elements in an SSE2 vector.
+/// Horizontal max of 8 signed int16 elements in an SSE2 vector
+/// (Easel `esl_sse_hmax_epi16` equivalent: log2(8)=3 reduction steps).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn hmax_epi16(a: __m128i) -> i16 {
@@ -407,13 +419,16 @@ unsafe fn hmax_epi16(a: __m128i) -> i16 {
     _mm_cvtsi128_si32(a) as i16
 }
 
-/// Check if any element of a > b.
+/// Check if any signed int16 lane of `a` is greater than the corresponding
+/// lane of `b`. Used by the lazy-F termination test in Viterbi.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn any_gt_epi16(a: __m128i, b: __m128i) -> bool {
     _mm_movemask_epi8(_mm_cmpgt_epi16(a, b)) != 0
 }
 
+/// Saturating-style i16 addition done via i32 intermediates: matches the
+/// wraparound behavior of the C scalar special-state updates.
 #[inline(always)]
 fn add_i16(a: i16, b: i16) -> i16 {
     (a as i32 + b as i32) as i16
@@ -427,6 +442,8 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Smoke test: run `viterbi_filter` on a short non-matching sequence and
+    /// confirm a finite score or a clean overflow result.
     #[test]
     fn test_viterbi_filter_basic() {
         if !is_x86_feature_detected!("sse2") {

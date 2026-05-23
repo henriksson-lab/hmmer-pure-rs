@@ -7,7 +7,8 @@ use crate::alphabet::Dsq;
 use crate::profile::*;
 use crate::simd::oprofile::*;
 
-/// Number of AVX2 vectors for Viterbi: ceil(M/16), min 2.
+/// Number of AVX2 16-bit-word vectors needed to stripe a model of length M:
+/// ceil(M/16), min 2.
 pub fn nqw_avx2(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 16) + 1)
 }
@@ -25,7 +26,8 @@ pub struct OProfileAvx2Vit {
 }
 
 impl OProfileAvx2Vit {
-    /// Build AVX2 Viterbi profile by restriping from SSE2 OProfile.
+    /// Build an AVX2 Viterbi profile by restriping the SSE2 `OProfile` word-score and
+    /// transition tables into 16-way striped vectors.
     pub fn from_oprofile(om: &OProfile) -> Self {
         let m = om.m;
         let nq = nqw_avx2(m);
@@ -113,12 +115,21 @@ impl OProfileAvx2Vit {
     }
 }
 
+/// Result of the AVX2 Viterbi filter: either a finite score or a saturating overflow.
 pub enum Avx2VitResult {
     Ok(f32),
     Overflow,
 }
 
-/// AVX2 Viterbi filter using 16x int16 vectors.
+/// AVX2 variant of the Viterbi filter (C: `p7_ViterbiFilter`), using 16x int16 vectors.
+///
+/// Calculates an approximation of the Viterbi score in nats for digital sequence `dsq`
+/// of length `l` using optimized profile `om`. Score may overflow on extremely
+/// high-scoring sequences but will not underflow. The model must be in a local
+/// alignment mode (the only mode that guarantees the limited dynamic range needed for
+/// reduced-precision signed-word arithmetic).
+///
+/// Striped SIMD Viterbi after Farrar (2007), in 16-bit signed-word precision.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -> Avx2VitResult {
@@ -273,8 +284,9 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
     }
 }
 
-/// Cross-lane right-shift by 1 word (2 bytes) for AVX2.
-/// [a0,a1,...,a15] → [-inf,a0,a1,...,a14]
+/// Cross-lane right-shift by 1 16-bit word for AVX2 (helper, Rust-only).
+/// Transforms `[a0,a1,...,a15]` into `[-inf,a0,a1,...,a14]`; needed because
+/// `_mm256_slli_si256` only shifts within 128-bit lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn cross_lane_shift_epi16(v: __m256i) -> __m256i {
@@ -285,7 +297,7 @@ unsafe fn cross_lane_shift_epi16(v: __m256i) -> __m256i {
     _mm256_insert_epi16::<0>(shifted, -32768)
 }
 
-/// Horizontal max of 16x i16 in AVX2 register.
+/// Horizontal maximum of the 16 signed 16-bit words in an AVX2 register (helper).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn hmax_epi16_avx2(v: __m256i) -> i16 {

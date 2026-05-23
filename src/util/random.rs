@@ -11,7 +11,11 @@ pub struct MersenneTwister {
 }
 
 impl MersenneTwister {
-    /// Create a new RNG with the same stream as Easel's esl_randomness_CreateFast().
+    /// Create a new fast LCG RNG seeded identically to `esl_randomness_CreateFast`.
+    ///
+    /// Mirrors Easel's deprecated fast path: seed=0 is replaced with 42, then
+    /// the state is dispersed through `esl_mix3` and forced non-zero so
+    /// downstream sequences exactly match the C reference.
     pub fn new(seed: u32) -> Self {
         let seed = if seed == 0 { 42 } else { seed };
         let mut x = esl_mix3(seed, 87_654_321, 12_345_678);
@@ -21,24 +25,33 @@ impl MersenneTwister {
         MersenneTwister { x, seed }
     }
 
-    /// Generate a random u32 using Easel's `(a=69069, c=1)` LCG.
+    /// Advance the LCG one step and return a uniform u32 on [0, 2^32).
+    ///
+    /// Mirrors Easel's internal `knuth()` helper used by the fast RNG.
     pub fn next_u32(&mut self) -> u32 {
         self.x = self.x.wrapping_mul(69_069).wrapping_add(1);
         self.x
     }
 
-    /// Generate a uniform random double in [0, 1).
+    /// Uniform random deviate on [0.0, 1.0) as a double.
+    ///
+    /// Divides the next u32 by 2^32, exactly matching Easel's `esl_random()`.
     pub fn next_f64(&mut self) -> f64 {
         self.next_u32() as f64 / 4294967296.0 // 2^32
     }
 
-    /// Generate a uniform random float in [0, 1).
+    /// Uniform random deviate on [0.0, 1.0) as a float, computed in f64 first.
+    ///
+    /// Casting to f32 only after sampling preserves the half-open range.
     pub fn next_f32(&mut self) -> f32 {
         self.next_f64() as f32
     }
 
-    /// Sample from a discrete probability distribution.
-    /// Returns index 0..n-1 according to probabilities p[0..n-1].
+    /// Sample an index from a normalized discrete distribution `p[0..n-1]`.
+    ///
+    /// Returns the index `i` selected with probability `p[i]`. Caller must
+    /// pass a normalized (sum-to-one) vector; behavior on unnormalized input
+    /// is the last index. Port of Easel `esl_rnd_FChoose` (simplified).
     pub fn sample_discrete(&mut self, p: &[f32]) -> usize {
         let r = self.next_f64() as f32;
         let mut cumsum = 0.0_f32;
@@ -51,12 +64,31 @@ impl MersenneTwister {
         p.len() - 1
     }
 
-    /// Generate a random digital residue according to background frequencies.
+    /// Sample a digital residue (0..K-1) drawn from background frequencies.
+    ///
+    /// Thin wrapper around `sample_discrete` that returns a `u8` suitable
+    /// for a digital sequence alphabet.
     pub fn sample_residue(&mut self, bg_f: &[f32]) -> u8 {
         self.sample_discrete(bg_f) as u8
     }
+
+    /// Uniform random integer on `0..n`, matching Easel `esl_rnd_Roll()`.
+    pub fn roll(&mut self, n: usize) -> usize {
+        assert!(n > 0);
+        let factor = u32::MAX / n as u32;
+        loop {
+            let u = self.next_u32() / factor;
+            if (u as usize) < n {
+                return u as usize;
+            }
+        }
+    }
 }
 
+/// Bob Jenkins' 3-word mixing function used by Easel to disperse seeds.
+///
+/// Direct port of `esl_mix3` from Easel; the bit-rotations have no fitness
+/// claims but produce well-decorrelated seeds for similar inputs.
 fn esl_mix3(mut a: u32, mut b: u32, mut c: u32) -> u32 {
     a = a.wrapping_sub(b);
     a = a.wrapping_sub(c);

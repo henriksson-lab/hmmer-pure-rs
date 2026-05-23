@@ -4,6 +4,8 @@ use std::process::ExitCode;
 
 mod subcmd;
 
+/// Unified CLI entry point: initializes SIMD env, parses the subcommand,
+/// and dispatches to the matching `subcmd::*::run` module.
 fn main() -> ExitCode {
     hmmer_pure_rs::util::simd_env::init();
 
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print the top-level usage banner listing every supported HMMER subcommand.
 fn print_usage() {
     eprintln!(
         "hmmer-pure-rs {} — biological sequence analysis using profile HMMs",
@@ -74,7 +77,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Build commands:");
     eprintln!("  build       Build HMM(s) from multiple sequence alignment(s)");
-    eprintln!("  press       Prepare HMM database (binary format)");
+    eprintln!("  press       Prepare an HMM database for hmmscan");
     eprintln!("  makehmmerdb Create FM-index database for nhmmer");
     eprintln!();
     eprintln!("Utility commands:");

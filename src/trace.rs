@@ -42,6 +42,9 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// Allocate a new empty (growable, reusable) traceback.
+    /// Port of `p7_trace_Create()`; PP storage is allocated lazily on the first
+    /// `append_with_pp()` call (matching `p7_trace_CreateWithPP()`).
     pub fn new() -> Self {
         Trace {
             st: Vec::new(),
@@ -54,6 +57,8 @@ impl Trace {
         }
     }
 
+    /// Reinitialize the trace, retaining allocations for reuse.
+    /// Port of `p7_trace_Reuse()`.
     #[inline(always)]
     pub fn clear(&mut self) {
         self.st.clear();
@@ -65,16 +70,24 @@ impl Trace {
         self.n = 0;
     }
 
+    /// Append one state (no PP) to a left-to-right-growing trace.
+    /// Port of `p7_trace_Append()`. For emit-on-transition states (N/C/J), the
+    /// first state in a run is recorded with i=0; subsequent ones carry `i`.
     #[inline(always)]
     pub fn append(&mut self, state: State, k: usize, i: usize) {
         self.append_internal(state, k, i, None);
     }
 
+    /// Append one state with an associated posterior probability for emitted
+    /// residues. Port of `p7_trace_AppendWithPP()`; lazily allocates `self.pp`.
+    /// `pp` is silently ignored for nonemitting states (recorded as 0.0).
     #[inline(always)]
     pub fn append_with_pp(&mut self, state: State, k: usize, i: usize, pp: f32) {
         self.append_internal(state, k, i, Some(pp));
     }
 
+    /// Shared implementation backing both `append` and `append_with_pp`.
+    /// Encodes the state-specific rules for which of (k, i, pp) get stored.
     #[inline(always)]
     fn append_internal(&mut self, state: State, k: usize, i: usize, pp: Option<f32>) {
         self.st.push(state);
@@ -112,7 +125,9 @@ impl Trace {
         self.n += 1;
     }
 
-    /// Find domain boundaries: returns (hmmfrom, hmmto, sqfrom, sqto) for first domain.
+    /// Return the (hmmfrom, hmmto, sqfrom, sqto) bounds of the first domain
+    /// (states between the first B and the next E). Port of
+    /// `p7_trace_GetDomainCoords()` restricted to the first domain.
     pub fn domain_coords(&self) -> Option<(usize, usize, usize, usize)> {
         let mut hmmfrom = 0;
         let mut hmmto = 0;
@@ -145,8 +160,10 @@ impl Trace {
     }
 }
 
-/// Viterbi traceback: reconstruct the optimal path through a filled DP matrix.
-/// Returns a Trace with the state path.
+/// Viterbi traceback: walk a filled generic Viterbi DP matrix `gx` backwards
+/// from T to S to recover the optimal state path. Port of `p7_GTrace()`
+/// in `hmmer/src/generic_vtrace.c`. Reconstructs an M+I+D path plus the
+/// surrounding S/N/B/E/C/J/T scaffold and returns it forward-ordered.
 pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
     let m = gm.m;
     let mut tr = Trace::new();
@@ -344,8 +361,9 @@ pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
     tr
 }
 
-/// Generate alignment display strings from a trace.
-/// If `pp` (posterior probability matrix) is provided, use real PP values.
+/// Build the printable alignment-display strings (model, mline, aseq, ppline,
+/// rfline) for the first domain in `tr`. Equivalent to a minimal
+/// `p7_alidisplay_Create()` call. Use `alignment_display_with_pp` for real PPs.
 pub fn alignment_display(
     tr: &Trace,
     dsq: &[Dsq],
@@ -355,7 +373,8 @@ pub fn alignment_display(
     alignment_display_with_pp(tr, dsq, hmm, abc, None)
 }
 
-/// Generate alignment display with optional posterior probabilities.
+/// Like `alignment_display`, but uses the supplied posterior-probability
+/// matrix to emit a real ppline. Port of `p7_alidisplay_Create()` with PPs.
 pub fn alignment_display_with_pp(
     tr: &Trace,
     dsq: &[Dsq],
@@ -623,6 +642,8 @@ mod tests {
     use crate::dp::gmx::Gmx;
     use std::path::Path;
 
+    /// Sanity check: a Viterbi traceback over the 20aa toy HMM produces a
+    /// well-formed S...T trace covering plausible model and sequence coords.
     #[test]
     fn test_traceback_basic() {
         crate::logsum::p7_flogsuminit();
@@ -660,6 +681,8 @@ mod tests {
         assert!(sf >= 1 && st <= 20);
     }
 
+    /// `alignment_display` produces nonempty model/aseq strings of equal length
+    /// for a basic 20aa Viterbi traceback.
     #[test]
     fn test_alignment_display() {
         crate::logsum::p7_flogsuminit();

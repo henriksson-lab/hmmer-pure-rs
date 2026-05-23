@@ -3,17 +3,20 @@
 
 use crate::profile::*;
 
-/// Number of __m128i vectors needed for byte-precision (MSV): ceil(M/16), min 2
+/// Striped segment length for byte-precision (MSV) vectors: ceil(M/16), min 2.
+/// Mirrors C macro `p7O_NQB`.
 pub fn nqb(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 16) + 1)
 }
 
-/// Number of __m128i vectors needed for word-precision (Viterbi): ceil(M/8), min 2
+/// Striped segment length for word-precision (Viterbi) vectors: ceil(M/8), min 2.
+/// Mirrors C macro `p7O_NQW`.
 pub fn nqw(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 8) + 1)
 }
 
-/// Number of __m128 vectors needed for float-precision (Forward): ceil(M/4), min 2
+/// Striped segment length for float-precision (Forward) vectors: ceil(M/4), min 2.
+/// Mirrors C macro `p7O_NQF`.
 pub fn nqf(m: usize) -> usize {
     2.max(((m.max(1) - 1) / 4) + 1)
 }
@@ -38,6 +41,8 @@ pub const P7O_MOVE: usize = 0;
 pub const P7O_LOOP: usize = 1;
 pub const P7O_NXTRANS: usize = 2;
 
+/// Emit a tracehash record of the Forward-space rfv/tfv/xf vectors of `om`,
+/// for cross-implementation diff debugging. Gated on `tracehash` feature.
 #[cfg(feature = "tracehash")]
 fn trace_oprofile_fwd_vectors(om: &OProfile) {
     for x in 0..om.abc_kp {
@@ -76,6 +81,7 @@ fn trace_oprofile_fwd_vectors(om: &OProfile) {
     }
 }
 
+/// Emit a tracehash record of the raw log-space tfv lanes before exp() lifting.
 #[cfg(feature = "tracehash")]
 fn trace_oprofile_tfv_source(m: usize, idx: usize, lanes: &[f32; 4]) {
     let mut th = tracehash::th_call!("oprofile_tfv_source_bits");
@@ -87,6 +93,7 @@ fn trace_oprofile_tfv_source(m: usize, idx: usize, lanes: &[f32; 4]) {
     th.finish();
 }
 
+/// 16-byte aligned wrapper around `[f32; 4]` for use with SSE `_mm_load_ps`.
 #[cfg(target_arch = "x86_64")]
 #[repr(align(16))]
 #[derive(Debug, Clone, Copy)]
@@ -94,11 +101,13 @@ pub struct AlignedF32x4(pub [f32; 4]);
 
 #[cfg(target_arch = "x86_64")]
 impl AlignedF32x4 {
+    /// Wrap a `[f32; 4]` into an aligned lane container.
     #[inline]
     pub fn from_array(v: [f32; 4]) -> Self {
         Self(v)
     }
 
+    /// Return a `*const f32` to the first lane (16-byte aligned).
     #[inline]
     pub fn as_ptr(&self) -> *const f32 {
         self.0.as_ptr()
@@ -109,7 +118,7 @@ impl AlignedF32x4 {
 #[derive(Debug, Clone)]
 pub struct OProfile {
     // === MSV byte-precision fields ===
-    /// MSV byte-precision match scores: rbv[residue_code][q_vector][16 bytes]
+    /// MSV byte-precision match scores: `rbv[residue_code][q_vector][16 bytes]`
     pub rbv: Vec<Vec<[u8; 16]>>,
     /// SSV signed-byte match scores, with extra wrapped vectors for band code.
     pub sbv: Vec<Vec<[u8; 16]>>,
@@ -121,12 +130,12 @@ pub struct OProfile {
     pub bias_b: u8,
 
     // === Viterbi word-precision fields ===
-    /// Word-precision match emission scores: rwv[residue_code][q_vector][8 words]
+    /// Word-precision match emission scores: `rwv[residue_code][q_vector][8 words]`
     pub rwv: Vec<Vec<[i16; 8]>>,
     /// Word-precision transition scores: twv[j][8 words]
     /// Layout: for each q, 7 transitions (BM,MM,IM,DM,MD,MI,II), then DD at end
     pub twv: Vec<[i16; 8]>,
-    /// Special state word scores: xw[state][transition]
+    /// Special state word scores: `xw[state][transition]`
     pub xw: [[i16; P7O_NXTRANS]; P7O_NXSTATES],
     pub scale_w: f32,
     pub base_w: i16,
@@ -134,7 +143,7 @@ pub struct OProfile {
     pub ncj_roundoff: f32,
 
     // === Forward/Backward float-precision fields ===
-    /// Float-precision emission scores (probability ratios): rfv[residue][q_vector][4 floats]
+    /// Float-precision emission scores (probability ratios): `rfv[residue][q_vector][4 floats]`
     pub rfv: Vec<Vec<[f32; 4]>>,
     /// Float-precision transition scores: tfv[j][4 floats]
     pub tfv: Vec<[f32; 4]>,
@@ -142,7 +151,7 @@ pub struct OProfile {
     pub rfv_a: Vec<Vec<AlignedF32x4>>,
     #[cfg(target_arch = "x86_64")]
     pub tfv_a: Vec<AlignedF32x4>,
-    /// Special state float scores: xf[state][transition]
+    /// Special state float scores: `xf[state][transition]`
     pub xf: [[f32; P7O_NXTRANS]; P7O_NXSTATES],
 
     // === Common fields ===
@@ -158,10 +167,11 @@ pub struct OProfile {
     pub abc_kp: usize,
 }
 
-/// Convert a float log-odds score to biased byte representation.
-/// Matches C behavior: result = (uint8_t)(-round(scale * sc)) + bias
-/// For positive scores, -round(scale * sc) is negative, and the unsigned wrapping
-/// produces the correct value.
+/// Convert a float log-odds score to a biased MSV byte (`u8`).
+///
+/// Matches C `biased_byteify`: `result = (uint8_t)(-round(scale_b * sc)) + bias_b`.
+/// For positive `sc` the negated rounded value is negative; unsigned wrapping
+/// then yields the correct offset byte. Saturates to 255.
 fn biased_byteify(scale_b: f32, bias_b: u8, sc: f32) -> u8 {
     let negated = -1.0 * (scale_b * sc).round();
     if negated > (255 - bias_b) as f32 {
@@ -173,7 +183,8 @@ fn biased_byteify(scale_b: f32, bias_b: u8, sc: f32) -> u8 {
     }
 }
 
-/// Convert a float score to word (int16) representation.
+/// Convert a float log-odds score to a Viterbi-precision signed word (`i16`).
+/// Mirrors C `wordify`: rounds `scale_w * sc` and saturates to `[-32768, 32767]`.
 fn wordify(scale_w: f32, sc: f32) -> i16 {
     let sc = (scale_w * sc).round();
     if sc >= 32767.0 {
@@ -185,7 +196,8 @@ fn wordify(scale_w: f32, sc: f32) -> i16 {
     }
 }
 
-/// Convert a float log-odds score to unbiased byte representation.
+/// Convert a float log-odds score to an unbiased MSV byte cost.
+/// Mirrors C `unbiased_byteify`: negates and rounds, saturating to 255.
 fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
     let negated = -1.0 * (scale_b * sc).round();
     if negated > 255.0 {
@@ -195,6 +207,13 @@ fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
     }
 }
 
+/// Vectorized 4-lane `expf` port of Easel's `esl_sse_expf`, used to lift log
+/// scores into probability space when building the Forward/Backward profile.
+/// Uses the Cephes minimax polynomial; falls back to `f32::INFINITY` / `0.0`
+/// on over/underflow.
+///
+/// # Safety
+/// Requires SSE2 to be available at runtime.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
@@ -261,12 +280,14 @@ unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
     out
 }
 
+/// Scalar fallback for `esl_sse_expf4` on non-x86 builds.
 #[cfg(not(target_arch = "x86_64"))]
 fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
     x.map(esl_sse_expf_lane)
 }
 
-/// Scalar fallback for Easel's `esl_sse_expf()` lane calculation.
+/// Scalar fallback for one lane of Easel's `esl_sse_expf()`. Uses the same
+/// Cephes minimax polynomial as the SSE version for bitwise parity.
 #[cfg(not(target_arch = "x86_64"))]
 #[inline]
 fn esl_sse_expf_lane(mut x: f32) -> f32 {
@@ -326,7 +347,12 @@ fn esl_sse_expf_lane(mut x: f32) -> f32 {
 }
 
 impl OProfile {
-    /// Convert a generic Profile to an optimized OProfile for SSE2.
+    /// Convert a standard `Profile` into the SSE-striped optimized profile.
+    ///
+    /// Ports C `p7_oprofile_Convert()`: runs the MSV (byte), Viterbi (word),
+    /// and Forward/Backward (float) striping conversions in one pass.
+    /// Requires `gm.m <= allocM` and matching alphabet. Sets `mode`, `L`, `M`,
+    /// `nj`, `evparam`, `cutoff`, `compo`, and copies the model name.
     pub fn convert(gm: &Profile) -> Self {
         let m = gm.m;
         let nq = nqb(m);
@@ -639,16 +665,23 @@ impl OProfile {
         om
     }
 
-    /// Reconfigure for a new target sequence length.
-    /// Reconfigure only the MSV filter length model (i.e. `tjb_b`) for a new
-    /// expected target length, matching C `p7_oprofile_ReconfigMSVLength`.
-    /// Used by nhmmer's long_target pipeline, which sets tjb_b to
-    /// max_length for the SSV scan (independent of the actual sequence
-    /// length).
+    /// Set the target sequence length of the MSVFilter part of the model.
+    ///
+    /// Ports `p7_oprofile_ReconfigMSVLength`: recomputes only `tjb_b` for a
+    /// new mean target length `l`. The acceleration pipeline (and nhmmer's
+    /// long-target SSV scan) uses this to defer reconfiguring the rest of the
+    /// length model until after the MSV stage.
     pub fn reconfig_msv_length(&mut self, l: i32) {
         self.tjb_b = unbiased_byteify(self.scale_b, (3.0_f32 / (l as f32 + 3.0)).ln());
     }
 
+    /// Set the target sequence length of the optimized model.
+    ///
+    /// Ports `p7_oprofile_ReconfigLength` (combines MSV + "rest" length
+    /// reconfigs): updates `tjb_b`, N/C/J transition floats `xf` and words
+    /// `xw` for a new mean target length `l`. Does not touch the null model
+    /// (caller must also `p7_bg_SetLength`). Must be fast — sits in the hot
+    /// path, called once per target sequence.
     pub fn reconfig_length(&mut self, l: i32) {
         self.l = l;
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
@@ -668,8 +701,12 @@ impl OProfile {
     }
 
     /// Reconfigure the optimized profile into multihit mode for target length `l`.
-    /// Mirrors `p7_oprofile_ReconfigMultihit()` so callers do not rebuild via
-    /// generic log-space scores and lose low-bit parity.
+    ///
+    /// Ports `p7_oprofile_ReconfigMultihit`: sets E->{move,loop}=0.5 and
+    /// `nj=1`, mirroring the unihit/multihit flip done during domain
+    /// definition. Calls `reconfig_length(l)` to refresh the length model.
+    /// Avoids rebuilding through generic log-space scores so low-bit parity
+    /// with the original is preserved.
     pub fn reconfig_multihit(&mut self, l: i32) {
         self.xf[P7O_E][P7O_MOVE] = 0.5;
         self.xf[P7O_E][P7O_LOOP] = 0.5;
@@ -683,7 +720,10 @@ impl OProfile {
     }
 
     /// Reconfigure the optimized profile into unihit mode for target length `l`.
-    /// Mirrors `p7_oprofile_ReconfigUnihit()`.
+    ///
+    /// Ports `p7_oprofile_ReconfigUnihit`: sets E->move=1, E->loop=0, `nj=0`,
+    /// and refreshes the length model via `reconfig_length(l)`. Used by domain
+    /// definition to score isolated single-domain envelopes.
     pub fn reconfig_unihit(&mut self, l: i32) {
         self.xf[P7O_E][P7O_MOVE] = 1.0;
         self.xf[P7O_E][P7O_LOOP] = 0.0;
@@ -695,13 +735,14 @@ impl OProfile {
         self.reconfig_length(l);
     }
 
-    /// Gather the Forward-space match emission probabilities from the striped
-    /// `rfv` table into a flat `(M+1) * Kp` array, mirroring C
-    /// `p7_oprofile_GetFwdEmissionArray` (hmmer/src/impl_sse/p7_oprofile.c:1428).
+    /// Retrieve Forward (float) residue emission values into a flat array.
     ///
-    /// Canonical residues: `arr[k * Kp + x] = rfv[x][q][z] * bg.f[x]`.
-    /// Degenerate / ambiguity codes are filled via `f_expect_sc_vec`-style
-    /// expectation over canonical residues weighted by `bg.f`.
+    /// Ports `p7_oprofile_GetFwdEmissionArray`: extracts an implicit 2D
+    /// `(M+1) * Kp` table from the striped/interleaved `rfv`, converting back
+    /// to emission values weighted by background. Canonical residues:
+    /// `arr[k * Kp + x] = rfv[x][q][z] * bg.f[x]`. Degenerate / ambiguity
+    /// codes are filled via `esl_abc_FExpectScVec`-style expectation over
+    /// canonical residues weighted by `bg.f`.
     pub fn get_fwd_emissions(
         &self,
         bg: &crate::bg::Bg,
@@ -751,10 +792,12 @@ impl OProfile {
         arr
     }
 
-    /// Rewrite the Forward match-emission log-odds in place given a new bg
-    /// distribution and the precomputed raw Forward emissions from
-    /// `get_fwd_emissions`, mirroring C `p7_oprofile_UpdateFwdEmissionScores`
-    /// (hmmer/src/impl_sse/p7_oprofile.c:502). Used by nhmmer long_target
+    /// Update the Forward/Backward match emissions for a new bg distribution.
+    ///
+    /// Ports `p7_oprofile_UpdateFwdEmissionScores`: rewrites the striped `rfv`
+    /// (and its aligned mirror `rfv_a`) in place using precomputed raw
+    /// Forward emissions from `get_fwd_emissions`. Reorders the loops over
+    /// `(q, x, z)` to minimize working scratch. Used by nhmmer long_target
     /// per-envelope reparameterization.
     #[cfg(target_arch = "x86_64")]
     pub fn update_fwd_emission_scores(
@@ -833,7 +876,11 @@ impl OProfile {
         }
     }
 
-    /// Access a transition score from the underlying profile data.
+    /// Recover a profile transition log-odds score from the striped Viterbi `twv`.
+    ///
+    /// Rust-only helper used by AVX2/NEON restripers when only the SSE-built
+    /// `OProfile` is available. Maps `(node, tsc_type)` back to the striped
+    /// layout and de-scales by `scale_w`; returns `NEG_INFINITY` out of range.
     pub fn tsc_at(&self, node: usize, tsc_type: usize) -> f32 {
         // Look up from the generic profile's transition score
         // This requires the profile data stored in word-precision twv
@@ -856,7 +903,8 @@ impl OProfile {
     }
 }
 
-/// Public wordify for use by AVX2/NEON restriping.
+/// Public re-export of `wordify` for use by AVX2/NEON restriping.
+/// Mirrors C `wordify`: rounds `scale_w * sc` and saturates to i16 range.
 pub fn wordify_pub(scale_w: f32, sc: f32) -> i16 {
     let sc = (scale_w * sc).round();
     if sc >= 32767.0 {
@@ -875,6 +923,7 @@ mod tests {
     use crate::bg::Bg;
     use std::path::Path;
 
+    /// Smoke test: build an OProfile from a real test HMM and check basic invariants.
     #[test]
     fn test_oprofile_convert() {
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
@@ -897,6 +946,7 @@ mod tests {
         assert!(om.bias_b > 0);
     }
 
+    /// Validate the striped segment-length macro for byte-precision vectors.
     #[test]
     fn test_nqb() {
         assert_eq!(nqb(20), 2);

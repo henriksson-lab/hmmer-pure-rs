@@ -32,7 +32,9 @@ pub struct Gmx {
 }
 
 impl Gmx {
-    /// Create a new DP matrix for model of size M and sequence of length L.
+    /// Allocate a new generic DP matrix sized for a model up to `alloc_m` and
+    /// a sequence up to `alloc_l`. Reusable and resizable via [`Gmx::grow_to`].
+    /// Counterpart of `p7_gmx_Create`.
     pub fn new(alloc_m: usize, alloc_l: usize) -> Self {
         let alloc_w = alloc_m + 1;
         let alloc_r = alloc_l + 1;
@@ -56,7 +58,9 @@ impl Gmx {
         }
     }
 
-    /// Grow matrix to fit model M and sequence L.
+    /// Ensure the matrix is large enough for a model of size `m` and sequence of
+    /// length `l`; reallocates with `-INFINITY` fill if needed. Any prior data is
+    /// invalidated. Counterpart of `p7_gmx_GrowTo`.
     pub fn grow_to(&mut self, m: usize, l: usize) {
         let new_w = m + 1;
         let new_r = l + 1;
@@ -77,7 +81,8 @@ impl Gmx {
         self.l = 0;
     }
 
-    /// Grow matrix storage for callers that overwrite all active cells before reading.
+    /// Like [`Gmx::grow_to`] but reallocations are zero-filled instead of
+    /// `-INFINITY`. For callers that overwrite all active cells before reading.
     pub fn grow_to_zeroed(&mut self, m: usize, l: usize) {
         let new_w = m + 1;
         let new_r = l + 1;
@@ -98,63 +103,65 @@ impl Gmx {
         self.l = 0;
     }
 
-    /// Access MMX(i,k) - Match state score at position i, node k
+    /// Match score `MMX(i, k)` at sequence position `i`, model node `k`.
     #[inline]
     pub fn mmx(&self, i: usize, k: usize) -> f32 {
         self.dp_mem[self.row_offsets[i] + k * P7G_NSCELLS + P7G_M]
     }
 
-    /// Access IMX(i,k) - Insert state score
+    /// Insert score `IMX(i, k)`.
     #[inline]
     pub fn imx(&self, i: usize, k: usize) -> f32 {
         self.dp_mem[self.row_offsets[i] + k * P7G_NSCELLS + P7G_I]
     }
 
-    /// Access DMX(i,k) - Delete state score
+    /// Delete score `DMX(i, k)`.
     #[inline]
     pub fn dmx(&self, i: usize, k: usize) -> f32 {
         self.dp_mem[self.row_offsets[i] + k * P7G_NSCELLS + P7G_D]
     }
 
-    /// Access XMX(i,s) - Special state score
+    /// Special-state score `XMX(i, s)` (s in `{E, N, J, B, C}`).
     #[inline]
     pub fn xmx(&self, i: usize, s: usize) -> f32 {
         self.xmx[i * P7G_NXCELLS + s]
     }
 
-    /// Set MMX(i,k)
+    /// Store `MMX(i, k) = val`.
     #[inline]
     pub fn set_mmx(&mut self, i: usize, k: usize, val: f32) {
         let idx = self.row_offsets[i] + k * P7G_NSCELLS + P7G_M;
         self.dp_mem[idx] = val;
     }
 
-    /// Set IMX(i,k)
+    /// Store `IMX(i, k) = val`.
     #[inline]
     pub fn set_imx(&mut self, i: usize, k: usize, val: f32) {
         let idx = self.row_offsets[i] + k * P7G_NSCELLS + P7G_I;
         self.dp_mem[idx] = val;
     }
 
-    /// Set DMX(i,k)
+    /// Store `DMX(i, k) = val`.
     #[inline]
     pub fn set_dmx(&mut self, i: usize, k: usize, val: f32) {
         let idx = self.row_offsets[i] + k * P7G_NSCELLS + P7G_D;
         self.dp_mem[idx] = val;
     }
 
-    /// Set XMX(i,s)
+    /// Store `XMX(i, s) = val`.
     #[inline]
     pub fn set_xmx(&mut self, i: usize, s: usize, val: f32) {
         self.xmx[i * P7G_NXCELLS + s] = val;
     }
 
-    /// Reuse the matrix for a new calculation.
+    /// Reset bookkeeping so the matrix can be reused for a new calculation
+    /// (allocation is preserved). Counterpart of `p7_gmx_Reuse`.
     pub fn reuse(&mut self) {
         self.m = 0;
         self.l = 0;
     }
 
+    /// Row width in matrix columns (= `alloc_m + 1`).
     #[inline]
     pub fn row_width(&self) -> usize {
         self.alloc_w

@@ -11,8 +11,9 @@ const LOGSUM_TBL: usize = 16000;
 static INIT: Once = Once::new();
 static mut FLOGSUM_LOOKUP: [f32; LOGSUM_TBL] = [0.0; LOGSUM_TBL];
 
-/// Initialize the lookup table. Must be called before `p7_flogsum()`.
-/// Safe to call multiple times; only initializes once.
+/// Initialize the `p7_flogsum()` lookup table. Must be called once before any
+/// call to `p7_flogsum()`. Safe to call repeatedly; only the first call
+/// populates the table. Counterpart to C's `p7_FLogsumInit()`.
 pub fn p7_flogsuminit() {
     crate::util::simd_env::init();
 
@@ -27,10 +28,11 @@ pub fn p7_flogsuminit() {
     });
 }
 
-/// Fast approximation of `log(exp(a) + exp(b))` using a lookup table.
+/// Fast table-driven approximation of `log(exp(a) + exp(b))`.
 ///
-/// Either `a` or `b` (or both) may be `-INFINITY`, but neither may be
-/// `+INFINITY` or `NaN`.
+/// Inner-loop primitive of the generic Forward algorithm. Either input may be
+/// `-INFINITY`, but neither may be `+INFINITY` or `NaN`. Counterpart to C's
+/// `p7_FLogsum()`.
 #[inline]
 pub fn p7_flogsum(a: f32, b: f32) -> f32 {
     let max = a.max(b);
@@ -45,7 +47,8 @@ pub fn p7_flogsum(a: f32, b: f32) -> f32 {
     }
 }
 
-/// Compute the absolute error in probability space from the table lookup approximation.
+/// Absolute error in probability space introduced by `p7_flogsum()`'s table
+/// lookup: `exp(approx) - exp(exact)`. Counterpart to C's `p7_FLogsumError()`.
 pub fn p7_flogsum_error(a: f32, b: f32) -> f32 {
     let approx = p7_flogsum(a, b);
     let exact = ((a as f64).exp() + (b as f64).exp()).ln() as f32;

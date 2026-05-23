@@ -1,9 +1,9 @@
 //! Processor-specific floating point setup matching HMMER's `impl_Init()`.
 
-/// Enable the SSE floating point mode used by C HMMER.
+/// Enable the SSE floating point mode used by C HMMER (`impl_Init`).
 ///
-/// HMMER's SSE implementation enables flush-to-zero and denormals-are-zero so
-/// tiny subnormal values do not affect either performance or bit-level output.
+/// On x86/x86_64, sets MXCSR flush-to-zero (FTZ) and denormals-are-zero (DAZ)
+/// so subnormals are treated as zero. No-op on non-x86 targets.
 pub fn init() {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe {
@@ -11,6 +11,7 @@ pub fn init() {
     }
 }
 
+/// Set the MXCSR FTZ+DAZ bits on x86_64 via inline assembly.
 #[cfg(target_arch = "x86_64")]
 unsafe fn set_x86_flush_zero() {
     const MXCSR_DAZ: u32 = 1 << 6;
@@ -24,6 +25,7 @@ unsafe fn set_x86_flush_zero() {
     unsafe { std::arch::asm!("ldmxcsr [{}]", in(reg) &new_csr, options(nostack, preserves_flags)) };
 }
 
+/// Set the MXCSR FTZ+DAZ bits on 32-bit x86 via inline assembly.
 #[cfg(target_arch = "x86")]
 unsafe fn set_x86_flush_zero() {
     const MXCSR_DAZ: u32 = 1 << 6;

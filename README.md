@@ -4,7 +4,8 @@ A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis u
 
 Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
 
-* 2026-04-27: The code has passed current methods of testing and **careful use on real data is possible**. Up to 4x faster in some cases (see benchmarks; sounds too good to be true)
+* 2026-05-23: **New audit strategy has uncovered a large number of problems, being fixed.**
+* 2026-04-27: The code has passed current methods of testing and **careful use on real data is possible**. Treat performance claims as workload-specific and rerun the real-world benchmark harness before relying on them.
 
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
@@ -33,53 +34,67 @@ This blurb might be out of date. Go to [this page](https://github.com/henriksson
 
 ## Benchmarks
 
-These benchmarks are here to document the current translation state, not to
-promise performance on every machine or workload. All runs below were taken in
-the same workspace with `--cpu 1` or `--cpu 4` as shown.
+Do not treat static README timing numbers as portable evidence. Benchmarks are
+faithful only when they are rerun against realistic fixtures, compared with the
+bundled C HMMER snapshot, and checked for output agreement.
 
-### Swiss-Prot 2k Fixture
+The reproducible benchmark entry point is:
 
-Dataset:
+```bash
+scripts/benchmark_real_world.sh
+```
 
-- `test_data/human_swissprot_2k.fasta`
-- 20,431 human Swiss-Prot sequences, 11,415,371 residues
+The script:
 
-Queries:
+- builds `target/release/hmmer` unless `SKIP_BUILD=1` is set
+- runs Rust and bundled C HMMER on medium/large UniProt fixtures under
+  `external/`
+- benchmarks representative `hmmsearch`, `phmmer`, and `jackhmmer` workloads
+- records command lines, dataset sizes, wall/user/system time, max RSS, table
+  row counts, top-hit ordering, git commit, and host metadata
+- fails by default if Rust and C disagree on `tblout`/`domtblout` row counts,
+  normalized core table rows, or top `tblout` target ordering
+- writes artifacts to `reports/benchmarks/<timestamp>/`
 
-- `hmmsearch`: `test_data/Pkinase_pfam.hmm`
+Useful controls:
 
-Results:
+```bash
+THREADS=4 ROUNDS=3 scripts/benchmark_real_world.sh
+CASES=hmmsearch_human_pkinase SKIP_BUILD=1 scripts/benchmark_real_world.sh
+SKIP_BUILD=1 OUT_DIR=reports/benchmarks/manual scripts/benchmark_real_world.sh
+```
 
-| Command | Threads | Rust | C | Speedup | Notes |
-|-------|-------:|-------|-------|-------:|-------|
-| `search --noali` | 1 | `1.34s` user / `1.36s` wall / `12.4 MB` RSS | `6.31s` user / `6.04s` wall / `15.9 MB` RSS | `4.44x` | `483` non-comment `tblout` rows both |
-| `search --noali` | 4 | `1.70s` user / `0.58s` wall / `32.2 MB` RSS | `6.52s` user / `1.64s` wall / `30.6 MB` RSS | `2.83x` | `483` non-comment `tblout` rows both |
+See `REAL_WORLD_FIXTURES.md` for dataset sources and fixture layout. Small
+checked-in fixtures remain useful for parity tests and smoke tests, but they
+are not representative performance evidence.
 
-### GECCO Selected Binary HMM Fixture
+### Fresh Local Real-World Run
 
-Dataset:
+These numbers are from one local run on one dirty worktree. Treat them as
+current evidence for this checkout and machine only; rerun
+`scripts/benchmark_real_world.sh` before relying on them elsewhere.
 
-- `test_data/gecco_full_pfam_selected_proteins.faa`
+- Artifact directory: `reports/benchmarks/20260523T183346Z`
+- Command: `THREADS=1 ROUNDS=1 ALLOW_MISMATCH=1 scripts/benchmark_real_world.sh`
+- Rust: `target/release/hmmer`, `hmmer-pure-rs 0.7.1`
+- C: bundled `hmmer/src`, HMMER 3.4
+- Host: `Linux beagle 6.8.0-58-generic`, `x86_64`
+- Rust commit: `dab1b65630f901301c74d6d76d799c6f4d07052c`
+- Worktree status hash: `ea6e7355ce88c1d133e7f7fd9b4eacc276861570c70524d9c55ed739dd7ea296`
 
-Queries:
+Speedup is `C wall / Rust wall`; RSS ratio is `Rust max RSS / C max RSS`.
 
-- `hmmsearch`: `test_data/gecco_full_pfam_selected_hmms.h3m`
+| Case | Target | Rows Checked | Agreement | Rust Wall | C Wall | Speedup | Rust RSS | C RSS | RSS Ratio |
+|------|--------|--------------|-----------|----------:|-------:|--------:|---------:|------:|----------:|
+| `hmmsearch_human_pkinase` | human proteome, 20,659 seqs / 11,456,702 residues | `484` tblout / `526` domtblout | row counts, top-20 targets, and core rows match | `1.87s` | `6.08s` | `3.25x` | `13.8 MB` | `14.9 MB` | `0.92x` |
+| `hmmsearch_sprot_pkinase` | Swiss-Prot, 574,627 seqs / 208,482,574 residues | `4543` tblout / `4898` domtblout | row counts and top-20 targets match; core-row diffs are small E-value rounding differences | `19.82s` | `64.00s` | `3.23x` | `21.6 MB` | `37.9 MB` | `0.57x` |
+| `phmmer_human_cyh3` | human proteome, 20,659 seqs / 11,456,702 residues | `86` tblout | row counts, top-20 targets, and core rows match | `1.62s` | `3.13s` | `1.93x` | `32.3 MB` | `12.5 MB` | `2.59x` |
+| `jackhmmer_human_cyh3_N2` | human proteome, 20,659 seqs / 11,456,702 residues | `162` tblout / `235` domtblout | row counts, top-20 targets, and core rows match | `4.26s` | `8.22s` | `1.93x` | `16.7 MB` | `14.7 MB` | `1.14x` |
 
-Results:
-
-| Command | Threads | Rust | C | Speedup | Notes |
-|-------|-------:|-------|-------|-------:|-------|
-| `search --noali` | 1 | `0.03s` user / `0.07s` wall / `7.6 MB` RSS | `0.14s` user / `0.20s` wall / `7.0 MB` RSS | `2.86x` | `6` non-comment `tblout` rows both |
-
-Interpretation:
-
-- `hmmsearch` is faster than bundled C on these measured fixtures
-- the Swiss-Prot 2k single-thread run is `4.44x` faster by wall time, with
-  lower RSS
-- the Swiss-Prot 2k four-thread run is `2.83x` faster by wall time, with
-  similar RSS
-- the selected binary `.h3m` fixture is tiny, so the `2.86x` wall-time ratio is
-  useful mainly as a smoke benchmark for the binary HMM loading path
+The `jackhmmer` case uses the uncompressed human proteome because bundled C
+`jackhmmer -N 2` requires a rewindable target database. The Swiss-Prot
+`hmmsearch` core-row diffs are recorded in
+`reports/benchmarks/20260523T183346Z/hmmsearch_sprot_pkinase.*.core.diff`.
 
 ## Features
 
@@ -89,10 +104,13 @@ Interpretation:
 - Stochastic traceback clustering for multi-domain sequences
 - Null2 bias correction with omega weighting
 - Composition bias filter matching C HMMER
-- Reads HMMER3 format HMM files (versions 3a-3f)
+- Reads modern HMMER3 ASCII HMM files and C `.h3m` binary model records
 - Reads FASTA and gzipped FASTA (.fasta.gz) sequence databases
-- All C HMMER hmmsearch flags supported (--cut_ga, -Z, --nobias, --acc, etc.)
-- Tabular output (`--tblout`, `--domtblout`, `--pfamtblout`) compatible with HMMER3
+- Core C HMMER `hmmsearch` flags are implemented (`--cut_ga`, `-Z`,
+  `--nobias`, `--acc`, etc.); unsupported options are rejected rather than
+  silently ignored
+- Search tabular outputs (`--tblout`, `--domtblout`, `--pfamtblout`) are
+  covered by parity tests on representative fixtures
 - Library API for programmatic use without file I/O
 
 ## Build
@@ -262,6 +280,10 @@ not yet fully C-identical, or still need broader validation:
   `hmmsearch`; the current remaining performance gap is mostly multi-thread
   scaling and other workload breadth, not the earlier whole-database memory
   retention issue.
+- `hmmpress` is intentionally disabled until all C-compatible pressed sidecars
+  can be written together. `hmmscan`/`nhmmscan` can read C `.h3m` binary model
+  records when sidecars already exist, but the Rust CLI does not yet generate
+  full `.h3f/.h3p/.h3i` pressed databases.
 
 Currently supported programs:
 - `hmmsearch` - Search HMM(s) against a sequence database (FASTA/UniProt/gzipped)
@@ -277,7 +299,8 @@ Currently supported programs:
 - `hmmlogo` - Generate HMM sequence logo data
 - `hmmscan` - Search sequence(s) against a profile HMM database
 - `nhmmscan` - Search nucleotide sequence(s) against DNA HMM database
-- `hmmpress` - Prepare HMM database (binary pressed format)
+- `hmmpress` - Parsed for CLI compatibility, but currently refuses to write
+  incomplete pressed sidecars
 - `alimask` - Add mask annotation to Stockholm alignment
 - `makehmmerdb` - Create FM-index database for nhmmer
 

@@ -1,14 +1,15 @@
 //! hmmstat — display summary statistics for each HMM in a file.
 
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::hmm;
+use hmmer_pure_rs::hmm::{DM, IM, MI, MM};
 use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::profile;
 
 #[derive(Parser)]
 #[command(name = "hmmstat", about = "Display summary statistics for each HMM")]
@@ -17,10 +18,16 @@ struct Args {
     hmmfile: PathBuf,
 }
 
+/// Entry point for `hmmstat`: print one summary row per HMM in the input file.
+///
+/// Columns: idx, name, accession, nseq, eff_nseq, M (model length), mean match
+/// relative entropy, mean information content, mean position-wise relative
+/// entropy, and composition-vs-background KL divergence. Mirrors the default
+/// (`-h` aside) tabular path of `main()` in hmmer/src/hmmstat.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 
-    let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
+    let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
         std::process::exit(1);
     });
@@ -28,7 +35,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "# hmmstat :: display summary statistics for each HMM").unwrap();
+    writeln!(
+        out,
+        "# hmmstat :: display summary statistics for a profile file"
+    )
+    .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
     writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
     writeln!(
@@ -41,26 +52,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
     )
     .unwrap();
+    writeln!(out, "#").unwrap();
 
     writeln!(
         out,
-        "# {:>3} {:<20} {:<12} {:>8} {:>8} {:>5} {:>8} {:>8} {:>8} {:>8}",
-        "idx", "name", "accession", "nseq", "eff_nseq", "M", "relent", "info", "p relE", "compKL"
+        "# idx  name                 accession        nseq eff_nseq      M relent   info p relE compKL"
     )
     .unwrap();
     writeln!(
         out,
-        "# {:>3} {:<20} {:<12} {:>8} {:>8} {:>5} {:>8} {:>8} {:>8} {:>8}",
-        "---",
-        "--------------------",
-        "------------",
-        "--------",
-        "--------",
-        "-----",
-        "--------",
-        "--------",
-        "--------",
-        "--------"
+        "# ---- -------------------- ------------ -------- -------- ------ ------ ------ ------ ------"
     )
     .unwrap();
 
@@ -74,11 +75,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let p_rele = mean_position_relative_entropy(h, &bg);
         let comp_kl = composition_kld(h, &bg);
 
-        writeln!(
-            out,
-            "  {:>3} {:<20} {:<12} {:>8} {:>8.2} {:>5} {:>8.4} {:>8.4} {:>8.4} {:>8.4}",
+        write_stat_row(
+            &mut out,
             idx + 1,
-            h.name,
+            &h.name,
             h.acc.as_deref().unwrap_or("-"),
             h.nseq,
             h.eff_nseq,
@@ -87,13 +87,42 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             info,
             p_rele,
             comp_kl,
-        )
-        .unwrap();
+        );
     }
 
-    writeln!(out, "#").unwrap();
-    writeln!(out, "# [ok]").unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+fn read_hmms_maybe_stdin(
+    path: &std::path::Path,
+) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
+    if path == std::path::Path::new("-") {
+        let stdin = std::io::stdin();
+        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+    } else {
+        hmmfile::read_hmm_file(path)
+    }
+}
+
+fn write_stat_row<W: Write>(
+    out: &mut W,
+    idx: usize,
+    name: &str,
+    acc: &str,
+    nseq: i32,
+    eff_nseq: f32,
+    m: usize,
+    relent: f32,
+    info: f32,
+    p_rele: f32,
+    comp_kl: f32,
+) {
+    writeln!(
+        out,
+        "{:<4}   {:<20} {:<12} {:>8} {:>8.2} {:>6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
+        idx, name, acc, nseq, eff_nseq, m, relent, info, p_rele, comp_kl
+    )
+    .unwrap();
 }
 
 /// Mean relative entropy per match emission.
@@ -136,21 +165,173 @@ fn mean_match_info(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
 
 /// Mean position-wise relative entropy.
 fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
-    mean_match_relative_entropy(h, bg) // simplified: same as relent for now
+    let mocc = profile::hmm_calculate_occupancy(h);
+    let occ_sum: f32 = mocc[1..=h.m].iter().sum();
+    if occ_sum <= 0.0 {
+        return 0.0;
+    }
+
+    let mut mre = 0.0_f64;
+    for node in 1..=h.m {
+        mre += (mocc[node] as f64) * rel_entropy(&h.mat[node][..h.abc_k], &bg.f[..h.abc_k]);
+    }
+    mre /= occ_sum as f64;
+
+    if h.m < 2 {
+        return mre as f32;
+    }
+
+    let trans_occ_sum: f32 = mocc[2..=h.m].iter().sum();
+    if trans_occ_sum <= 0.0 {
+        return mre as f32;
+    }
+
+    let mut tre = 0.0_f64;
+    for node in 2..=h.m {
+        let prev_occ = mocc[node - 1] as f64;
+        let p1 = bg.p1 as f64;
+        let mm = h.t[node - 1][MM] as f64;
+        let mi = h.t[node - 1][MI] as f64;
+        let im = h.t[node - 1][IM] as f64;
+        let dm = h.t[node - 1][DM] as f64;
+
+        let xm = prev_occ * log_ratio_term(mm, p1);
+        let xi = prev_occ * mi * (safe_ln_ratio(mm, p1) + safe_ln_ratio(im, p1));
+        let xd = (1.0 - prev_occ) * log_ratio_term(dm, p1);
+        tre += (xm + xi + xd) / std::f64::consts::LN_2;
+    }
+    tre /= trans_occ_sum as f64;
+
+    (mre + tre) as f32
 }
 
 /// KL divergence between model composition and background.
 fn composition_kld(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
-    let k = h.abc_k;
-    if h.flags & hmm::P7H_COMPO == 0 {
-        return 0.0;
-    }
-    let mut kl = 0.0_f32;
-    for x in 0..k {
-        let p = h.compo[x];
-        if p > 0.0 && bg.f[x] > 0.0 {
-            kl += p * (p / bg.f[x]).log2();
+    let mocc = profile::hmm_calculate_occupancy(h);
+    let mut avg = vec![0.0_f32; h.abc_k];
+    for node in 1..=h.m {
+        for x in 0..h.abc_k {
+            avg[x] += h.mat[node][x] * mocc[node];
         }
     }
-    kl
+
+    let sum: f32 = avg.iter().sum();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    for p in &mut avg {
+        *p /= sum;
+    }
+
+    rel_entropy(&avg, &bg.f[..h.abc_k]) as f32
+}
+
+fn rel_entropy(p: &[f32], q: &[f32]) -> f64 {
+    p.iter()
+        .zip(q.iter())
+        .filter_map(|(&px, &qx)| {
+            if px > 0.0 && qx > 0.0 {
+                Some((px as f64) * ((px as f64) / (qx as f64)).log2())
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn log_ratio_term(p: f64, q: f64) -> f64 {
+    if p > 0.0 && q > 0.0 {
+        p * (p / q).ln()
+    } else {
+        0.0
+    }
+}
+
+fn safe_ln_ratio(p: f64, q: f64) -> f64 {
+    if p > 0.0 && q > 0.0 {
+        (p / q).ln()
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hmmer_pure_rs::alphabet::AlphabetType;
+    use hmmer_pure_rs::hmm::{DD, II, MD};
+    use hmmer_pure_rs::Hmm;
+
+    fn two_node_hmm() -> Hmm {
+        let mut h = Hmm::new(2, AlphabetType::Amino, 20);
+        h.name = "toy".to_string();
+        h.nseq = 2;
+        h.eff_nseq = 2.0;
+        h.t[0][MM] = 0.8;
+        h.t[0][MI] = 0.0;
+        h.t[0][MD] = 0.2;
+        h.t[1][MM] = 0.7;
+        h.t[1][MI] = 0.1;
+        h.t[1][MD] = 0.2;
+        h.t[1][IM] = 0.6;
+        h.t[1][II] = 0.4;
+        h.t[1][DM] = 0.5;
+        h.t[1][DD] = 0.5;
+
+        for node in 1..=2 {
+            for x in 0..20 {
+                h.mat[node][x] = 0.01;
+                h.ins[node][x] = 0.05;
+            }
+        }
+        h.mat[1][0] = 0.81;
+        h.mat[2][1] = 0.81;
+        h
+    }
+
+    #[test]
+    fn position_relative_entropy_is_not_plain_match_average_when_transitions_matter() {
+        let abc = Alphabet::new(AlphabetType::Amino);
+        let bg = Bg::new(&abc);
+        let h = two_node_hmm();
+
+        let match_re = mean_match_relative_entropy(&h, &bg);
+        let pos_re = mean_position_relative_entropy(&h, &bg);
+
+        assert!((pos_re - match_re).abs() > 0.001);
+    }
+
+    #[test]
+    fn composition_kld_recomputes_occupancy_weighted_match_composition() {
+        let abc = Alphabet::new(AlphabetType::Amino);
+        let bg = Bg::new(&abc);
+        let h = two_node_hmm();
+
+        let kld = composition_kld(&h, &bg);
+
+        assert!(kld > 0.0);
+    }
+
+    #[test]
+    fn stat_row_uses_c_hmmstat_spacing_and_precision() {
+        let mut out = Vec::new();
+        write_stat_row(
+            &mut out,
+            1,
+            "fn3",
+            "PF00041.13",
+            106,
+            11.42,
+            86,
+            0.6613,
+            0.6341,
+            0.5718,
+            0.0392,
+        );
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "1      fn3                  PF00041.13        106    11.42     86   0.66   0.63   0.57   0.04\n"
+        );
+    }
 }
