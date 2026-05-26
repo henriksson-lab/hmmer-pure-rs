@@ -4,7 +4,7 @@ A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis u
 
 Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
 
-* 2026-05-26: Features now appears to be in. Initial testing suggests parity but further audit is likely needed
+* 2026-05-26: Features now appears to be in. Initial testing suggests parity but **further audit is likely needed**
 * 2026-05-23: **New audit strategy has uncovered a large number of problems, being fixed.**
 * 2026-04-27: The code has passed current methods of testing and **careful use on real data is possible**. Treat performance claims as workload-specific and rerun the real-world benchmark harness before relying on them.
 

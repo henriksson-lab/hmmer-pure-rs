@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-mod subcmd;
+use hmmer_pure_rs::subcmd;
 
 /// Unified CLI entry point: initializes SIMD env, parses the subcommand,
 /// and dispatches to the matching `subcmd::*::run` module.

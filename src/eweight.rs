@@ -6,8 +6,10 @@ use crate::hmm::Hmm;
 use crate::util::cmath::{c_log_f64, ESL_CONST_LOG2R};
 
 /// Target relative entropy per match position (bits).
+/// (p7_config.h:61-63: `p7_ETARGET_{AMINO,DNA,OTHER}`)
 const ETARGET_AMINO: f64 = 0.59;
 const ETARGET_DNA: f64 = 0.62;
+const ETARGET_OTHER: f64 = 1.0;
 const ESIGMA_DEFAULT: f64 = 45.0;
 const LOG2_INV: f64 = ESL_CONST_LOG2R;
 
@@ -37,24 +39,58 @@ pub fn entropy_weight(
         return nseq as f32;
     }
 
-    let mut lo = 0.0_f64;
-    let mut hi = nseq;
-    for _ in 0..60 {
-        let mid = (lo + hi) / 2.0;
-        let fx = relative_entropy_fx(hmm, bg, mid, etarget);
-        if fx > 0.0 {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-        if (hi - lo).abs() < 0.01 {
-            break;
-        }
-    }
-
-    let neff = ((lo + hi) / 2.0) as f32;
+    // esl_root_Bisection (esl_rootfinder.c:244) with abs_tol=0.01 (eweight.c:82),
+    // rel_tol=1e-12, residual_tol=0, max_iter=100 (rootfinder Create defaults).
+    let neff = bisection(0.0, nseq, 0.01, |x| relative_entropy_fx(hmm, bg, x, etarget)) as f32;
     hmm.eff_nseq = neff;
     neff
+}
+
+/// Faithful port of Easel `esl_root_Bisection` (esl_rootfinder.c:244) plus
+/// `esl_rootfinder_SetBrackets` (esl_rootfinder.c:153). Returns the last
+/// evaluated midpoint `R->x`, testing convergence after each function
+/// evaluation but before narrowing the bracket, exactly as C does.
+/// `rel_tolerance = 1e-12`, `residual_tol = 0`, `max_iter = 100`.
+fn bisection<F: FnMut(f64) -> f64>(mut xl: f64, mut xr: f64, abs_tol: f64, mut func: F) -> f64 {
+    const REL_TOL: f64 = 1e-12;
+    const MAX_ITER: u32 = 100;
+
+    let mut fl = func(xl);
+    let _fr = func(xr);
+
+    let mut x = (xl + xr) / 2.0;
+    let mut iter = 0u32;
+    loop {
+        iter += 1;
+        if iter > MAX_ITER {
+            break; // C raises eslENOHALT; we return the last midpoint instead.
+        }
+        x = (xl + xr) / 2.0;
+        let fx = func(x);
+
+        let xmag = if xl < 0.0 && xr > 0.0 { 0.0 } else { x };
+        if fx == 0.0 {
+            break;
+        }
+        if (xr - xl) < abs_tol + REL_TOL * xmag {
+            break;
+        }
+
+        if fl > 0.0 {
+            if fx > 0.0 {
+                xl = x;
+                fl = fx;
+            } else {
+                xr = x;
+            }
+        } else if fx < 0.0 {
+            xl = x;
+            fl = fx;
+        } else {
+            xr = x;
+        }
+    }
+    x
 }
 
 /// Determine exponential column-count scaling for entropy weighting.
@@ -72,21 +108,10 @@ pub fn entropy_weight_exp(
 
     let fx_full = relative_entropy_exp_fx(hmm, bg, 1.0, etarget);
     let exp = if fx_full > 0.0 {
-        let mut lo = 0.0_f64;
-        let mut hi = 1.0_f64;
-        for _ in 0..60 {
-            let mid = (lo + hi) / 2.0;
-            let fx = relative_entropy_exp_fx(hmm, bg, mid, etarget);
-            if fx > 0.0 {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-            if (hi - lo).abs() < 0.001 {
-                break;
-            }
-        }
-        (lo + hi) / 2.0
+        // esl_root_Bisection over [0,1] with abs_tol=0.001 (eweight.c:164).
+        bisection(0.0, 1.0, 0.001, |x| {
+            relative_entropy_exp_fx(hmm, bg, x, etarget)
+        })
     } else {
         1.0
     };
@@ -97,12 +122,15 @@ pub fn entropy_weight_exp(
     neff
 }
 
-/// Pick the default relative-entropy target by alphabet (amino vs nucleic).
+/// Pick the default relative-entropy target by alphabet *type*, matching the
+/// C builder's switch (p7_builder.c:99-104): amino -> 0.59, DNA/RNA -> 0.62,
+/// anything else (custom/unknown) -> 1.0.
 fn default_re_target(hmm: &Hmm) -> f64 {
-    if hmm.abc_k == 20 {
-        ETARGET_AMINO
-    } else {
-        ETARGET_DNA
+    use crate::alphabet::AlphabetType;
+    match hmm.abc_type {
+        AlphabetType::Amino => ETARGET_AMINO,
+        AlphabetType::Dna | AlphabetType::Rna => ETARGET_DNA,
+        AlphabetType::Unknown => ETARGET_OTHER,
     }
 }
 
@@ -176,18 +204,33 @@ fn mean_match_count(hmm: &Hmm) -> f64 {
 }
 
 /// Mean per-position KL divergence (bits) between match emissions and background.
+///
+/// Faithful to `p7_MeanMatchRelativeEntropy` (modelstats.c:80) +
+/// `esl_vec_FRelEntropy` (esl_vectorops.c:1438): each match state's KL is
+/// summed in **f32** using `log2`, with float-precision `p/q`; a state whose
+/// background prob `q==0` while `p>0` yields +inf. Those f32 per-state values
+/// are then summed into an f64 and divided by M.
 fn mean_match_relative_entropy(hmm: &Hmm, bg: &Bg) -> f64 {
-    let mut kl = 0.0_f64;
+    let mut kl_sum = 0.0_f64;
     for k in 1..=hmm.m {
+        // esl_vec_FRelEntropy: accumulate this state's KL in f32.
+        let mut kl = 0.0_f32;
         for x in 0..hmm.abc_k {
-            let p = hmm.mat[k][x] as f64;
-            let q = bg.f[x] as f64;
-            if p > 0.0 && q > 0.0 {
-                kl += p * c_log_f64(p / q) * ESL_CONST_LOG2R;
+            let p = hmm.mat[k][x];
+            let q = bg.f[x];
+            if p > 0.0 {
+                if q == 0.0 {
+                    kl = f32::INFINITY;
+                    break;
+                }
+                // C: p/q in float, log2() in double, product in double, then
+                // accumulated into the f32 kl (truncating each iteration).
+                kl += (p as f64 * ((p / q) as f64).log2()) as f32;
             }
         }
+        kl_sum += kl as f64;
     }
-    kl / hmm.m as f64
+    kl_sum / hmm.m as f64
 }
 
 #[cfg(test)]

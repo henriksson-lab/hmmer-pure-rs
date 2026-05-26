@@ -1068,13 +1068,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                             }
                             s
                         });
-                        hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                        hmmer_pure_rs::tophits::print_alidisplay_blocks_acc(
                             &mut out,
                             &hmm.name,
+                            hmm.acc.as_deref().unwrap_or(""),
                             &hit.name,
+                            &hit.acc,
                             ad,
                             cs_line.as_deref(),
                             textw,
+                            show_acc,
                         );
                     }
                     writeln!(out).unwrap();
@@ -1587,9 +1590,13 @@ pub fn write_tblout<W: Write>(
 }
 
 pub fn best_domain(hit: &Hit) -> Option<&Domain> {
-    hit.dcl
-        .iter()
-        .max_by(|a, b| a.bitscore.total_cmp(&b.bitscore))
+    // C p7_pipeline.c:1110 uses a strict `>` scan, so the FIRST domain with the
+    // maximum bitscore wins on a tie. `Iterator::max_by` keeps the LAST max, so
+    // fold manually replacing only on a strict increase.
+    hit.dcl.iter().fold(None, |best: Option<&Domain>, d| match best {
+        Some(b) if b.bitscore >= d.bitscore => Some(b),
+        _ => Some(d),
+    })
 }
 
 #[inline]
@@ -1616,6 +1623,7 @@ pub fn write_standard_stdout_tables<W: Write>(
     out: &mut W,
     th: &TopHits,
     model_name: &str,
+    model_acc: &str,
     model_len: usize,
     model_cs: Option<&[u8]>,
     z: f64,
@@ -1839,13 +1847,20 @@ pub fn write_standard_stdout_tables<W: Write>(
                         }
                         s
                     });
-                    hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                    // Honor --acc on both the model and sequence sides
+                    // (C p7_alidisplay.c:1176-1180): each side shows its
+                    // accession when --acc is set and the accession is non-empty,
+                    // else falls back to the name.
+                    hmmer_pure_rs::tophits::print_alidisplay_blocks_acc(
                         out,
                         model_name,
+                        model_acc,
                         &hit.name,
+                        &hit.acc,
                         &ad_for_print,
                         cs_line.as_deref(),
                         textw,
+                        show_acc,
                     );
                 }
                 writeln!(out).unwrap();
@@ -2141,20 +2156,27 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
     )
     .unwrap();
 
+    // Build one pseudo-hit per *reported* domain, recording `ndom_reported`:
+    // the 1-based ordinal of this domain among the reported domains of its
+    // parent hit (C p7_tophits.c:1897-1906, `domhit->ndom = ndomReported`).
+    // This is the value printed in the `hit` column — NOT the absolute dcl
+    // index (which would skip over any unreported intervening domains).
     let mut reported_domains = Vec::new();
     for (hit_idx, hit) in th.hits.iter().enumerate() {
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
-        for (dom_idx, dom) in hit.dcl.iter().enumerate() {
+        let mut ndom_reported = 0usize;
+        for (_dom_idx, dom) in hit.dcl.iter().enumerate() {
             if dom.is_reported {
-                reported_domains.push((hit_idx, dom_idx, hit, dom));
+                ndom_reported += 1;
+                reported_domains.push((hit_idx, ndom_reported, hit, dom));
             }
         }
     }
     reported_domains.sort_by(|a, b| compare_pfamtblout_domain_pseudo_hits(a, b, pli));
 
-    for (_hit_idx, dom_idx, hit, dom) in reported_domains {
+    for (_hit_idx, ndom_reported, hit, dom) in reported_domains {
         let i_evalue = evalue_from_lnp(z, dom.lnp);
         let (hmmfrom, hmmto) = if let Some(ref ad) = dom.ad {
             (ad.hmmfrom, ad.hmmto)
@@ -2167,7 +2189,7 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
             hit.name,
             hmmer_pure_rs::output::fmt_score(dom.bitscore),
             hmmer_pure_rs::output::fmt_evalue(i_evalue),
-            dom_idx + 1,
+            ndom_reported,
             hmmer_pure_rs::output::fmt_bias(dom.dombias),
             dom.ienv,
             dom.jenv,
@@ -2186,8 +2208,22 @@ fn compare_pfamtblout_domain_pseudo_hits(
     b: &(usize, usize, &Hit, &Domain),
     pli: &Pipeline,
 ) -> std::cmp::Ordering {
-    let a_key = pli.hit_sortkey(a.3.bitscore, a.3.lnp);
-    let b_key = pli.hit_sortkey(b.3.bitscore, b.3.lnp);
+    // C p7_tophits.c:1910 keys the pfamtblout domain pseudo-hits purely on
+    // pli->inc_by_E: `sortkey = inc_by_E ? -lnP : bitscore`, sorted descending.
+    // Expressed as an ascending key (matching this module's convention): use
+    // `lnp` when inc_by_e (asc lnp == desc -lnP) else `-bitscore` (asc -bits ==
+    // desc bits). This differs from the shared `pli.hit_sortkey`, which keys on
+    // the broader `score_sort_active()` predicate; we key locally on inc_by_e to
+    // avoid touching pipeline.rs.
+    let pfam_key = |bitscore: f32, lnp: f64| -> f64 {
+        if pli.inc_by_e {
+            lnp
+        } else {
+            -(bitscore as f64)
+        }
+    };
+    let a_key = pfam_key(a.3.bitscore, a.3.lnp);
+    let b_key = pfam_key(b.3.bitscore, b.3.lnp);
     a_key
         .partial_cmp(&b_key)
         .unwrap_or(std::cmp::Ordering::Equal)

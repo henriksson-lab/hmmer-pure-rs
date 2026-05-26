@@ -55,14 +55,28 @@ impl MersenneTwister {
     /// pass a normalized (sum-to-one) vector; behavior on unnormalized input
     /// is the last index. Port of Easel `esl_rnd_FChoose` (simplified).
     pub fn sample_discrete(&mut self, p: &[f32]) -> usize {
-        let r = self.next_f64() as f32;
-        let mut cumsum = 0.0_f32;
+        // Mirror Easel `esl_rnd_FChoose` exactly. Computing in double
+        // precision is important: casting `roll` to f32 would give a [0,1]
+        // number instead of [0,1). Keep `roll` as f64, accumulate the
+        // cumulative sum in f64, normalize by the f64 sum of the weights,
+        // and compare `roll < sum / norm`.
+        let roll = self.next_f64();
+        let mut norm = 0.0_f64;
+        for &pi in p.iter() {
+            norm += pi as f64;
+        }
+        debug_assert!(norm > 0.99 && norm < 1.01);
+
+        let mut sum = 0.0_f64;
         for (i, &pi) in p.iter().enumerate() {
-            cumsum += pi;
-            if r < cumsum {
+            sum += pi as f64;
+            if roll < sum / norm {
                 return i;
             }
         }
+        // C reaches `esl_fatal("unreached code...")` here; in practice the
+        // loop always returns. Fall back to the last index to keep a total
+        // function for callers.
         p.len() - 1
     }
 
@@ -75,12 +89,19 @@ impl MersenneTwister {
     }
 
     /// Uniform random integer on `0..n`, matching Easel `esl_rnd_Roll()`.
+    ///
+    /// Mirrors C exactly: `factor = UINT32_MAX / n`, then rejection-sample
+    /// `u = esl_random_uint32(r) / factor` until `u < n`. The rejection bound
+    /// is the raw u32 comparison `u >= n` (with `n` treated as a u32), so the
+    /// RNG stream is consumed identically to the reference.
     pub fn roll(&mut self, n: usize) -> usize {
         assert!(n > 0);
-        let factor = u32::MAX / n as u32;
+        let n = n as u32;
+        let factor = u32::MAX / n;
         loop {
             let u = self.next_u32() / factor;
-            if (u as usize) < n {
+            // C: `while (u >= n)` -> accept on `u < n`.
+            if u < n {
                 return u as usize;
             }
         }
@@ -152,9 +173,231 @@ fn esl_mix3(mut a: u32, mut b: u32, mut c: u32) -> u32 {
     c
 }
 
+/// Easel's 64-bit Mersenne Twister (MT19937-64), a faithful port of the
+/// `ESL_RAND64` object in `esl_rand64.c`. This is a distinct generator from the
+/// legacy 32-bit [`MersenneTwister`] (`esl_randomness`); `consensus_by_sample`
+/// sequence weighting requires this exact stream for bit-faithful sampling.
+pub struct Rand64 {
+    mt: [u64; 312],
+    mti: usize,
+}
+
+impl Rand64 {
+    /// `esl_rand64_Create` / `esl_rand64_Init` with a nonzero seed
+    /// (esl_rand64.c:92,126; seed 0 is never used here).
+    pub fn new(seed: u64) -> Self {
+        let mut rng = Rand64 {
+            mt: [0u64; 312],
+            mti: 0,
+        };
+        // mt64_seed_table (esl_rand64.c:442).
+        rng.mt[0] = seed;
+        for z in 1..312 {
+            rng.mt[z] = 6_364_136_223_846_793_005u64
+                .wrapping_mul(rng.mt[z - 1] ^ (rng.mt[z - 1] >> 62))
+                .wrapping_add(z as u64);
+        }
+        rng.fill_table();
+        rng
+    }
+
+    /// mt64_fill_table (esl_rand64.c:455).
+    fn fill_table(&mut self) {
+        const MAG01: [u64; 2] = [0u64, 0xB502_6F5A_A966_19E9u64];
+        const UPPER: u64 = 0xFFFF_FFFF_8000_0000u64;
+        const LOWER: u64 = 0x7FFF_FFFFu64;
+        for z in 0..156 {
+            let x = (self.mt[z] & UPPER) | (self.mt[z + 1] & LOWER);
+            self.mt[z] = self.mt[z + 156] ^ (x >> 1) ^ MAG01[(x & 1) as usize];
+        }
+        for z in 156..311 {
+            let x = (self.mt[z] & UPPER) | (self.mt[z + 1] & LOWER);
+            self.mt[z] = self.mt[z - 156] ^ (x >> 1) ^ MAG01[(x & 1) as usize];
+        }
+        let x = (self.mt[311] & UPPER) | (self.mt[0] & LOWER);
+        self.mt[311] = self.mt[155] ^ (x >> 1) ^ MAG01[(x & 1) as usize];
+        self.mti = 0;
+    }
+
+    /// `esl_rand64`: tempered 64-bit deviate on [0, 2^64-1] (esl_rand64.c:174).
+    pub fn next_u64(&mut self) -> u64 {
+        if self.mti >= 312 {
+            self.fill_table();
+        }
+        let mut x = self.mt[self.mti];
+        self.mti += 1;
+        x ^= (x >> 29) & 0x5555_5555_5555_5555u64;
+        x ^= (x << 17) & 0x71D6_7FFF_EDA6_0000u64;
+        x ^= (x << 37) & 0xFFF7_EEE0_0000_0000u64;
+        x ^= x >> 43;
+        x
+    }
+
+    /// `esl_rand64_double`: uniform double on [0,1) (esl_rand64.c:230).
+    pub fn double(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
+    }
+
+    /// `esl_rand64_double_open`: uniform double on (0,1) (esl_rand64.c:258).
+    pub fn double_open(&mut self) -> f64 {
+        ((self.next_u64() >> 12) as f64 + 0.5) * (1.0 / 4_503_599_627_370_496.0)
+    }
+}
+
+/// `esl_rand64_Deal` (esl_rand64.c:359): sample `m` integers without
+/// replacement from `0..n-1`, returned in ascending order, via Vitter's
+/// sequential sampling "Method D". Direct port; bit-faithful to the C.
+pub fn esl_rand64_deal(rng: &mut Rand64, m_in: i64, n_in: i64) -> Vec<i64> {
+    let mut m = m_in;
+    let mut n = n_in;
+    let mut deal = vec![0i64; m_in as usize];
+    let mut i: usize = 0;
+    let mut j: i64 = -1;
+    let mut s: i64;
+    let mut qu1 = n - m + 1;
+    let negalphainv: i64 = -13;
+    let mut threshold = -negalphainv * m;
+    let mut mreal = m as f64;
+    let mut nreal = n as f64;
+    let mut minv = 1.0 / m as f64;
+    #[allow(unused_assignments)]
+    let mut mmin1inv = 1.0 / (m - 1) as f64;
+    let mut vprime = (minv * rng.double().ln()).exp();
+    let mut qu1real = nreal - mreal + 1.0;
+
+    while m > 1 && n > threshold {
+        mmin1inv = 1.0 / (-1.0 + mreal);
+        let mut x: f64;
+        loop {
+            loop {
+                x = nreal * (-vprime + 1.0);
+                s = x.floor() as i64;
+                if s < qu1 {
+                    break;
+                }
+                vprime = (minv * rng.double_open().ln()).exp();
+            }
+            let u = rng.double_open();
+            let negsreal = -s as f64;
+            let y1 = (mmin1inv * (u * nreal / qu1real).ln()).exp();
+            vprime = y1 * (-x / nreal + 1.0) * (qu1real / (negsreal + qu1real));
+            if vprime <= 1.0 {
+                break;
+            }
+
+            let mut y2 = 1.0f64;
+            let mut top = nreal - 1.0;
+            let bottom;
+            let limit;
+            if n - 1 > s {
+                bottom = nreal - mreal;
+                limit = n - s;
+            } else {
+                bottom = nreal + negsreal - 1.0;
+                limit = qu1;
+            }
+
+            let mut bottom = bottom;
+            let mut t = n - 1;
+            while t >= limit {
+                y2 = (y2 * top) / bottom;
+                top -= 1.0;
+                bottom -= 1.0;
+                t -= 1;
+            }
+
+            if nreal / (nreal - x) >= y1 * (mmin1inv * y2.ln()).exp() {
+                vprime = (mmin1inv * rng.double_open().ln()).exp();
+                break;
+            }
+            vprime = (minv * rng.double_open().ln()).exp();
+        }
+        j += s + 1;
+        deal[i] = j;
+        i += 1;
+        n = n - s - 1;
+        nreal = nreal + (-s as f64) - 1.0;
+        m -= 1;
+        mreal -= 1.0;
+        minv = mmin1inv;
+        qu1 -= s;
+        qu1real += -s as f64;
+        threshold += negalphainv;
+    }
+
+    if m > 1 {
+        vitter_a(rng, m, n, j, &mut deal[i..]);
+    } else {
+        s = (n as f64 * vprime).floor() as i64;
+        j += s + 1;
+        deal[i] = j;
+    }
+    deal
+}
+
+/// `vitter_a` (esl_rand64.c:289): Vitter "Method A", finishing a sample in
+/// progress (sampling the remaining `m` from `n`, last sampled index `j`).
+fn vitter_a(rng: &mut Rand64, m_in: i64, n_in: i64, j_in: i64, deal: &mut [i64]) {
+    let mut m = m_in;
+    let mut j = j_in;
+    let mut i: usize = 0;
+    let mut s: i64;
+    let mut top = (n_in - m_in) as f64;
+    let mut nreal = n_in as f64;
+
+    while m >= 2 {
+        let u = rng.double_open();
+        s = 0;
+        let mut quot = top / nreal;
+        while quot > u {
+            s += 1;
+            top -= 1.0;
+            nreal -= 1.0;
+            quot = (quot * top) / nreal;
+        }
+        j += s + 1;
+        deal[i] = j;
+        i += 1;
+        nreal -= 1.0;
+        m -= 1;
+    }
+    s = (nreal.round() * rng.double()).floor() as i64;
+    j += s + 1;
+    deal[i] = j;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rand64_stream_matches_c_seed42() {
+        // Reference values from esl_rand64.c (MT19937-64) seeded with 42.
+        let mut rng = Rand64::new(42);
+        assert_eq!(rng.next_u64(), 13_930_160_852_258_120_406);
+        assert_eq!(rng.next_u64(), 11_788_048_577_503_494_824);
+        assert_eq!(rng.next_u64(), 13_874_630_024_467_741_450);
+        assert_eq!(rng.next_u64(), 2_513_787_319_205_155_662);
+        assert_eq!(rng.next_u64(), 16_662_371_453_428_439_381);
+    }
+
+    #[test]
+    fn rand64_deal_matches_c() {
+        let mut rng = Rand64::new(42);
+        assert_eq!(
+            esl_rand64_deal(&mut rng, 10, 100),
+            vec![4, 7, 27, 28, 51, 56, 66, 78, 86, 87]
+        );
+        // Larger range exercises Method D's main loop before Method A finishes.
+        let mut rng = Rand64::new(42);
+        assert_eq!(
+            esl_rand64_deal(&mut rng, 20, 1_000_000),
+            vec![
+                13943, 36911, 52030, 156903, 162245, 284384, 312154, 362418, 427644, 474566,
+                661311, 684796, 699340, 718078, 726888, 729921, 748393, 807346, 958321, 961014
+            ]
+        );
+    }
 
     #[test]
     fn test_fast_rng_deterministic() {

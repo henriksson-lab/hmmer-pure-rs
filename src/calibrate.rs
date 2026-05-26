@@ -3,10 +3,6 @@
 
 use crate::alphabet::{Alphabet, Dsq, DSQ_SENTINEL};
 use crate::bg::Bg;
-use crate::dp::generic_fwdback::g_forward;
-use crate::dp::generic_msv::g_msv;
-use crate::dp::generic_viterbi::g_viterbi;
-use crate::dp::gmx::Gmx;
 use crate::hmm::*;
 use crate::profile::*;
 use crate::simd::oprofile::OProfile;
@@ -62,6 +58,94 @@ fn msv_overflow_maxsc(base_b: u8, scale_b: f32) -> f32 {
 
 fn viterbi_overflow_maxsc(base_w: i16, scale_w: f32) -> f32 {
     (32767.0 - base_w as f32) / scale_w
+}
+
+/// Score a simulated sequence with the optimized (quantized) MSV filter, mirroring
+/// C's `p7_MSVMu`, which always calls `p7_MSVFilter`. Dispatches to the SSE2 filter
+/// on x86_64 and the NEON filter on aarch64 (both baseline-available); `maxsc` is the
+/// quantized overflow cap `(255 - base_b)/scale_b`. There is intentionally no generic
+/// DP fallback, so the byte-quantized scores match C on every supported target.
+fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(
+            is_x86_feature_detected!("sse2"),
+            "calibration requires SSE2 (baseline on x86_64) to match C's quantized MSV filter"
+        );
+        match unsafe { crate::simd::msv_filter::msv_filter(dsq, l, om) } {
+            crate::simd::msv_filter::MsvResult::Ok(s) => s,
+            crate::simd::msv_filter::MsvResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        match unsafe { crate::simd::neon_msv::neon_msv_filter(dsq, l, om) } {
+            crate::simd::neon_msv::NeonMsvResult::Ok(s) => s,
+            crate::simd::neon_msv::NeonMsvResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (dsq, l, om, maxsc);
+        compile_error!(
+            "calibration has no optimized MSV filter for this target; C always uses p7_MSVFilter"
+        );
+    }
+}
+
+/// Score a simulated sequence with the optimized (quantized) Viterbi filter, mirroring
+/// C's `p7_ViterbiMu`, which always calls `p7_ViterbiFilter`. `maxsc` is the quantized
+/// overflow cap `(32767 - base_w)/scale_w`.
+fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(
+            is_x86_feature_detected!("sse2"),
+            "calibration requires SSE2 (baseline on x86_64) to match C's quantized Viterbi filter"
+        );
+        match unsafe { crate::simd::vit_filter::viterbi_filter(dsq, l, om) } {
+            crate::simd::vit_filter::VitResult::Ok(s) => s,
+            crate::simd::vit_filter::VitResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        match unsafe { crate::simd::neon_vit::neon_viterbi_filter(dsq, l, om) } {
+            crate::simd::neon_vit::NeonVitResult::Ok(s) => s,
+            crate::simd::neon_vit::NeonVitResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (dsq, l, om, maxsc);
+        compile_error!(
+            "calibration has no optimized Viterbi filter for this target; C always uses p7_ViterbiFilter"
+        );
+    }
+}
+
+/// Score a simulated sequence with the optimized Forward parser, mirroring C's
+/// `p7_Tau`, which always calls `p7_ForwardParser`.
+fn forward_filter_score(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(
+            is_x86_feature_detected!("sse2"),
+            "calibration requires SSE2 (baseline on x86_64) to match C's Forward parser"
+        );
+        unsafe { crate::simd::fwd_filter::forward_parser(dsq, l, om) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { crate::simd::neon_fwd::neon_forward_parser(dsq, l, om) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (dsq, l, om);
+        compile_error!(
+            "calibration has no optimized Forward parser for this target; C always uses p7_ForwardParser"
+        );
+    }
 }
 
 /// Determine the length-corrected local lambda for an HMM.
@@ -171,26 +255,10 @@ fn calibrate_msv(
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
+        // Match C p7_MSVMu loop order: xfIID, then NullOne, then MSVFilter.
         let dsq = random_seq(rng, l, &bg.f);
-        let sc;
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("sse2") {
-                sc = match unsafe { crate::simd::msv_filter::msv_filter(&dsq, l, &om) } {
-                    crate::simd::msv_filter::MsvResult::Ok(s) => s,
-                    crate::simd::msv_filter::MsvResult::Overflow => maxsc,
-                };
-            } else {
-                let mut gx = Gmx::new(hmm.m, l);
-                sc = g_msv(&dsq, l, &gm, &mut gx, 2.0);
-            }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let mut gx = Gmx::new(hmm.m, l);
-            sc = g_msv(&dsq, l, &gm, &mut gx, 2.0);
-        }
         let null_sc = bg.null_one(l);
+        let sc = msv_filter_score(&dsq, l, &om, maxsc);
         let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
@@ -227,26 +295,10 @@ fn calibrate_viterbi(
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
+        // Match C p7_ViterbiMu loop order: xfIID, then NullOne, then ViterbiFilter.
         let dsq = random_seq(rng, l, &bg.f);
-        let sc;
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("sse2") {
-                sc = match unsafe { crate::simd::vit_filter::viterbi_filter(&dsq, l, &om) } {
-                    crate::simd::vit_filter::VitResult::Ok(s) => s,
-                    crate::simd::vit_filter::VitResult::Overflow => maxsc,
-                };
-            } else {
-                let mut gx = Gmx::new(hmm.m, l);
-                sc = g_viterbi(&dsq, l, &gm, &mut gx);
-            }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let mut gx = Gmx::new(hmm.m, l);
-            sc = g_viterbi(&dsq, l, &gm, &mut gx);
-        }
         let null_sc = bg.null_one(l);
+        let sc = viterbi_filter_score(&dsq, l, &om, maxsc);
         let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
@@ -284,23 +336,9 @@ fn calibrate_forward(
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
+        // Match C p7_Tau loop order: xfIID, then ForwardParser, then NullOne.
         let dsq = random_seq(rng, l, &bg.f);
-        // Use SIMD Forward when available for speed
-        let sc;
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("sse2") {
-                sc = unsafe { crate::simd::fwd_filter::forward_parser(&dsq, l, &om) };
-            } else {
-                let mut gx = Gmx::new(hmm.m, l);
-                sc = g_forward(&dsq, l, &gm, &mut gx);
-            }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let mut gx = Gmx::new(hmm.m, l);
-            sc = g_forward(&dsq, l, &gm, &mut gx);
-        }
+        let sc = forward_filter_score(&dsq, l, &om);
         let null_sc = bg.null_one(l);
         let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);

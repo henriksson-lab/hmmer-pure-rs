@@ -39,19 +39,24 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
         exp_c += pp.xmx(i, P7G_C);
     }
 
-    // Convert expected counts to frequencies.
-    let norm = 1.0 / ld as f32;
+    // Convert expected counts to log frequencies (the log posterior weights),
+    // exactly as C does: FLog(count) then FIncrement(-log((float)Ld)). C uses
+    // logf for the per-element log and a double log() for the -log(Ld) term, so
+    // mirror that: logf(count) + (float)(-log((double)Ld)).
+    // (generic_null2.c:91-95)
+    let neg_log_ld = -crate::util::cmath::c_log_f32_to_f32(ld as f32);
     for node in 1..=m {
-        exp_m[node] *= norm;
-        exp_i[node] *= norm;
+        exp_m[node] = c_logf_to_f32(exp_m[node]) + neg_log_ld;
+        exp_i[node] = c_logf_to_f32(exp_i[node]) + neg_log_ld;
     }
-    exp_n *= norm;
-    exp_c *= norm;
-    exp_j *= norm;
+    exp_n = c_logf_to_f32(exp_n) + neg_log_ld;
+    exp_c = c_logf_to_f32(exp_c) + neg_log_ld;
+    exp_j = c_logf_to_f32(exp_j) + neg_log_ld;
 
+    // xfactor = FLogsum(N, C, J) over the log frequencies (generic_null2.c:102-104).
     let xfactor = crate::logsum::p7_flogsum(
-        crate::logsum::p7_flogsum(c_logf_to_f32(exp_n), c_logf_to_f32(exp_c)),
-        c_logf_to_f32(exp_j),
+        crate::logsum::p7_flogsum(exp_n, exp_c),
+        exp_j,
     );
 
     // C generic_null2.c forms the weighted emission odds in log-space,
@@ -59,12 +64,10 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
     let mut null2 = vec![f32::NEG_INFINITY; k];
     for x in 0..k {
         for node in 1..m {
-            null2[x] =
-                crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_m[node]) + gm.msc(node, x));
-            null2[x] =
-                crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_i[node]) + gm.isc(node, x));
+            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[node] + gm.msc(node, x));
+            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_i[node] + gm.isc(node, x));
         }
-        null2[x] = crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_m[m]) + gm.msc(m, x));
+        null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[m] + gm.msc(m, x));
         null2[x] = crate::logsum::p7_flogsum(null2[x], xfactor);
         null2[x] = c_expf_to_f32(null2[x]);
     }

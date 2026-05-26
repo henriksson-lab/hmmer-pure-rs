@@ -2447,7 +2447,10 @@ fn score_domain_envelope(
         // exactly. Keep the inner ratios in f32 where C uses `(float)` casts,
         // then promote to f64 for log and the running bitscore accumulator.
         let env_len_i = env_len as i32;
-        let ali_len_i = (jali - iali + 1).max(1) as i32;
+        // C uses the raw `dom->jali - dom->iali + 1` (p7_pipeline.c:1383), with
+        // no clamp; its `if (ali_len < 8) continue` guard (p7_pipeline.c:1387)
+        // ensures ali_len >= 8 by the time it reaches this rescaling.
+        let ali_len_i = (jali - iali + 1) as i32;
         let max_length_i = if hmm.max_length > 0 {
             hmm.max_length as i32
         } else {
@@ -2504,7 +2507,9 @@ fn score_domain_envelope(
         jenv: jenv as i64,
         bitscore: dom_bitscore,
         lnp: dom_lnp,
-        dombias: domain_dombias.max(0.0),
+        // C prints dombias unclamped (p7_tophits.c:1680/1764), so keep the raw
+        // (possibly slightly negative) value rather than flooring at 0.0.
+        dombias: domain_dombias,
         oasc,
         envsc: env_fwd_sc,
         domcorrection: dom_correction,
@@ -2814,7 +2819,7 @@ pub(crate) fn define_domains(
     #[cfg(feature = "tracehash")]
     trace_domain_decoding_summary(dsq, l, gm.m, &btot, &etot, &mocc);
 
-    let nexpected = btot[l].max(0.01);
+    let nexpected = btot[l];
 
     // Region detection using C's state machine
     let regions = find_domain_regions(&btot, &etot, &mocc, l);
@@ -2857,35 +2862,8 @@ pub(crate) fn define_domains(
     let env_om: Option<crate::simd::oprofile::OProfile> = None;
 
     if regions.is_empty() {
-        // No regions found — if nexpected > 0, return single domain covering sequence
-        if nexpected >= 0.5 {
-            let dom = score_domain_envelope(
-                dsq,
-                l,
-                gm,
-                &env_gm,
-                env_om.as_ref(),
-                hmm,
-                1,
-                l,
-                null_sc,
-                bg,
-                Some(&mut n2sc),
-                false,
-                simd_match_odds.as_deref(),
-                &optacc_deltas,
-                &mut *simd_scratch,
-                make_alignment,
-                make_alignment_display,
-                long_target,
-            );
-            stats.nenvelopes += 1;
-            let seq_bias = c_fsum(&n2sc);
-            let seq_bias_fsum = esl_vec_fsum(&n2sc);
-            #[cfg(feature = "tracehash")]
-            trace_define_domains_summary(l, gm.m, 1, nexpected, seq_bias, stats);
-            return (vec![dom], nexpected, seq_bias, seq_bias_fsum, stats);
-        }
+        // No regions found — matches C: the region state machine never triggers,
+        // so nregions/nenvelopes/ndom stay 0 and no domain is created.
         #[cfg(feature = "tracehash")]
         trace_define_domains_summary(l, gm.m, 0, nexpected, 0.0, stats);
         return (Vec::new(), nexpected, 0.0, 0.0, stats);

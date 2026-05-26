@@ -735,10 +735,13 @@ pub unsafe fn forward_parser_offset(
     }
 
     for i in 1..=l {
+        // C indexes `om->rfv[dsq[i]]` unconditionally (fwdback.c:952-1176): rfv is
+        // filled for all Kp codes (oprofile.rs builds it `for x in 0..kp`,
+        // including degenerate X/*/~), and every valid digital code is < Kp, so the
+        // row always exists and the recurrence (with its special-state updates)
+        // must advance. Matches the unconditional indexing in the MSV/Viterbi
+        // filters and the pmx Forward variant.
         let xi = dsq[dsq_offset + i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
 
         // Save previous row (parser: same memory, but we swap via registers)
         // In parser mode, dpp == dpc (same row). We use mpv/dpv/ipv registers.
@@ -1006,6 +1009,10 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
 
     for i in 1..=l {
         let xi = dsq[dsq_offset + i] as usize;
+        // Defensive branch for out-of-range codes (>= Kp), which never occur in a
+        // well-formed dsq (all valid codes, including degenerate X/*/~, are < Kp
+        // and have filled rfv rows). C has no such branch and would read OOB here;
+        // for valid input this is a no-op and the normal recurrence below runs.
         if xi >= om.abc_kp {
             if pmx.has_dp {
                 pmx.zero_simd_row(i);

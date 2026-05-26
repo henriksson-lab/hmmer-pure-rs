@@ -385,12 +385,11 @@ pub fn g_stochastic_trace(
                 }
             }
             State::D => {
+                // D connects from M,D at i,k-1 (generic_stotrace.c:120-129).
+                // No k<=1 short-circuit in C: D_1 is reachable as an intermediate;
+                // its predecessor scores are -inf so it normalizes away, but C still
+                // consumes the RNG draw and appends the chosen state at k-1.
                 let k = *tr.k.last().unwrap();
-                if k <= 1 {
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                    continue;
-                }
                 let md = gx.mmx(i, k - 1) + gm.tsc(k - 1, P7P_MD);
                 let dd = gx.dmx(i, k - 1) + gm.tsc(k - 1, P7P_DD);
                 if sample_two(rng, md, dd) == 0 {
@@ -466,40 +465,82 @@ pub fn g_stochastic_trace(
     tr
 }
 
-/// Sample 0 or 1 from two log-space scores via stabilized softmax.
-fn sample_two(rng: &mut MersenneTwister, a: f32, b: f32) -> usize {
-    let max = a.max(b);
-    let pa = c_expf_to_f32(a - max);
-    let pb = c_expf_to_f32(b - max);
-    let total = pa + pb;
-    if total <= 0.0 {
-        return 0;
+/// Kahan-summed max of a slice. Port of `esl_vec_FMax`.
+fn f_max(vec: &[f32]) -> f32 {
+    let mut best = vec[0];
+    for &v in &vec[1..] {
+        if v > best {
+            best = v;
+        }
     }
-    if rng.next_f32() * total < pa {
-        0
+    best
+}
+
+/// Log-sum-exp over a vector. Faithful port of `esl_vec_FLogSum`
+/// (hmmer/easel/esl_vectorops.c), including the `> max - 50.` cutoff.
+fn f_log_sum(vec: &[f32]) -> f32 {
+    let max = f_max(vec);
+    if max == f32::INFINITY {
+        return f32::INFINITY;
+    }
+    let mut sum = 0.0_f32;
+    for &v in vec {
+        if v > max - 50.0 {
+            sum += c_expf_to_f32(v - max);
+        }
+    }
+    crate::util::cmath::c_logf_to_f32(sum) + max
+}
+
+/// Kahan-summed total. Port of `esl_vec_FSum`.
+fn f_sum(vec: &[f32]) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut c = 0.0_f32;
+    for &v in vec {
+        let y = v - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
+/// In-place log-space normalization to a probability vector. Faithful port of
+/// `esl_vec_FLogNorm` = FLogSum -> FIncrement(-denom) -> FExp -> FNorm.
+fn f_log_norm(vec: &mut [f32]) {
+    let denom = f_log_sum(vec);
+    for v in vec.iter_mut() {
+        *v += -1.0 * denom;
+    }
+    for v in vec.iter_mut() {
+        *v = c_expf_to_f32(*v);
+    }
+    let sum = f_sum(vec);
+    if sum != 0.0 {
+        for v in vec.iter_mut() {
+            *v /= sum;
+        }
     } else {
-        1
+        let n = vec.len() as f32;
+        for v in vec.iter_mut() {
+            *v = 1.0 / n;
+        }
     }
 }
 
-/// Sample an index from a vector of log-space scores via stabilized softmax.
+/// Normalize two log-space scores with `esl_vec_FLogNorm` and draw 0/1 with
+/// `esl_rnd_FChoose` (= `sample_discrete`). Mirrors C's
+/// `esl_vec_FLogNorm(sc,2); esl_rnd_FChoose(r, sc, 2)`.
+fn sample_two(rng: &mut MersenneTwister, a: f32, b: f32) -> usize {
+    let mut sc = [a, b];
+    f_log_norm(&mut sc);
+    rng.sample_discrete(&sc)
+}
+
+/// Normalize a log-space score vector with `esl_vec_FLogNorm` and draw an index
+/// with `esl_rnd_FChoose` (= `sample_discrete`).
 fn sample_from(rng: &mut MersenneTwister, scores: &[f32]) -> usize {
-    if scores.is_empty() {
-        return 0;
-    }
-    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let probs: Vec<f32> = scores.iter().map(|&s| c_expf_to_f32(s - max)).collect();
-    let total: f32 = probs.iter().sum();
-    if total <= 0.0 {
-        return 0;
-    }
-    let r = rng.next_f32() * total;
-    let mut cumsum = 0.0;
-    for (i, &p) in probs.iter().enumerate() {
-        cumsum += p;
-        if r < cumsum {
-            return i;
-        }
-    }
-    scores.len() - 1
+    let mut sc = scores.to_vec();
+    f_log_norm(&mut sc);
+    rng.sample_discrete(&sc)
 }

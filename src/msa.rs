@@ -41,6 +41,12 @@ pub struct Msa {
     pub alen: usize,
     /// Reference annotation (#=GC RF)
     pub rf: Option<Vec<u8>>,
+    /// Model mask annotation (#=GC MM)
+    pub mm: Option<Vec<u8>>,
+    /// Consensus secondary structure annotation (#=GC SS_cons)
+    pub ss_cons: Option<Vec<u8>>,
+    /// Consensus surface accessibility annotation (#=GC SA_cons)
+    pub sa_cons: Option<Vec<u8>>,
     /// Consensus posterior probability annotation (#=GC PP_cons)
     pub pp_cons: Option<Vec<u8>>,
 }
@@ -365,6 +371,9 @@ fn parse_afa_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
         nseq,
         alen,
         rf: None,
+        mm: None,
+        ss_cons: None,
+        sa_cons: None,
         pp_cons: None,
     })
 }
@@ -494,6 +503,9 @@ fn parse_a2m_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
         nseq,
         alen,
         rf: Some(rf),
+        mm: None,
+        ss_cons: None,
+        sa_cons: None,
         pp_cons: None,
     })
 }
@@ -832,6 +844,9 @@ fn msa_from_rows(
         nseq,
         alen,
         rf: None,
+        mm: None,
+        ss_cons: None,
+        sa_cons: None,
         pp_cons: None,
     })
 }
@@ -981,6 +996,9 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
     let mut weights: HashMap<String, f64> = HashMap::new();
     let mut pp: HashMap<String, Vec<u8>> = HashMap::new();
     let mut rf: Option<Vec<u8>> = None;
+    let mut mm: Option<Vec<u8>> = None;
+    let mut ss_cons: Option<Vec<u8>> = None;
+    let mut sa_cons: Option<Vec<u8>> = None;
     let mut pp_cons: Option<Vec<u8>> = None;
     let mut body_lines = Vec::new();
     let mut expected_block_order: Option<Vec<BlockLineKey>> = None;
@@ -1117,6 +1135,39 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
                 Some(existing) => existing.extend_from_slice(rf_str.as_bytes()),
                 None => rf = Some(rf_str.as_bytes().to_vec()),
             }
+        } else if trimmed.starts_with("#=GC MM") {
+            record_block_line(
+                &expected_block_order,
+                &mut current_block_order,
+                BlockLineKey::Gc("MM".to_string()),
+            )?;
+            let mm_str = trimmed[7..].trim();
+            match &mut mm {
+                Some(existing) => existing.extend_from_slice(mm_str.as_bytes()),
+                None => mm = Some(mm_str.as_bytes().to_vec()),
+            }
+        } else if trimmed.starts_with("#=GC SS_cons") {
+            record_block_line(
+                &expected_block_order,
+                &mut current_block_order,
+                BlockLineKey::Gc("SS_cons".to_string()),
+            )?;
+            let ss_str = trimmed[12..].trim();
+            match &mut ss_cons {
+                Some(existing) => existing.extend_from_slice(ss_str.as_bytes()),
+                None => ss_cons = Some(ss_str.as_bytes().to_vec()),
+            }
+        } else if trimmed.starts_with("#=GC SA_cons") {
+            record_block_line(
+                &expected_block_order,
+                &mut current_block_order,
+                BlockLineKey::Gc("SA_cons".to_string()),
+            )?;
+            let sa_str = trimmed[12..].trim();
+            match &mut sa_cons {
+                Some(existing) => existing.extend_from_slice(sa_str.as_bytes()),
+                None => sa_cons = Some(sa_str.as_bytes().to_vec()),
+            }
         } else if trimmed.starts_with("#=GC PP_cons") {
             record_block_line(
                 &expected_block_order,
@@ -1250,6 +1301,33 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
             )));
         }
     }
+    if let Some(ref mm) = mm {
+        if mm.len() != alen {
+            return Err(HmmerError::Format(format!(
+                "Stockholm #=GC MM annotation has length {}, expected {}",
+                mm.len(),
+                alen
+            )));
+        }
+    }
+    if let Some(ref ss_cons) = ss_cons {
+        if ss_cons.len() != alen {
+            return Err(HmmerError::Format(format!(
+                "Stockholm #=GC SS_cons annotation has length {}, expected {}",
+                ss_cons.len(),
+                alen
+            )));
+        }
+    }
+    if let Some(ref sa_cons) = sa_cons {
+        if sa_cons.len() != alen {
+            return Err(HmmerError::Format(format!(
+                "Stockholm #=GC SA_cons annotation has length {}, expected {}",
+                sa_cons.len(),
+                alen
+            )));
+        }
+    }
     if let Some(ref pp_cons) = pp_cons {
         if pp_cons.len() != alen {
             return Err(HmmerError::Format(format!(
@@ -1339,6 +1417,9 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
             nseq,
             alen,
             rf,
+            mm,
+            ss_cons,
+            sa_cons,
             pp_cons,
         },
         cutoffs,

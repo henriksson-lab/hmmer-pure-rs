@@ -91,34 +91,46 @@ impl Trace {
     #[inline(always)]
     fn append_internal(&mut self, state: State, k: usize, i: usize, pp: Option<f32>) {
         self.st.push(state);
+        // Per-state stored pp (C zeroes pp for all nonemitting states, and for
+        // the first N/C/J in a run; see p7_trace_AppendWithPP, p7_trace.c:1056-1085).
+        let mut stored_pp = pp.unwrap_or(0.0);
         match state {
             State::N | State::C | State::J => {
                 let emitted = self.st.len() > 1 && self.st[self.st.len() - 2] == state;
                 self.k.push(0);
-                self.i.push(if emitted { i } else { 0 });
+                if emitted {
+                    self.i.push(i);
+                } else {
+                    // First N/C/J in a run is non-emitting: i=0, pp=0.0.
+                    self.i.push(0);
+                    stored_pp = 0.0;
+                }
             }
             State::S | State::B | State::E | State::T => {
                 self.k.push(0);
                 self.i.push(0);
+                stored_pp = 0.0;
             }
             State::X => {
                 self.k.push(k);
                 self.i.push(i);
+                stored_pp = 0.0;
             }
             State::D => {
                 self.k.push(k);
                 self.i.push(0);
+                stored_pp = 0.0;
             }
             State::M | State::I => {
                 self.k.push(k);
                 self.i.push(i);
             }
         }
-        if let Some(pp_value) = pp {
+        if pp.is_some() {
             if self.pp.is_none() {
                 self.pp = Some(vec![0.0; self.n]);
             }
-            self.pp.as_mut().unwrap().push(pp_value);
+            self.pp.as_mut().unwrap().push(stored_pp);
         } else if let Some(pp_values) = &mut self.pp {
             pp_values.push(0.0);
         }
@@ -160,203 +172,271 @@ impl Trace {
     }
 }
 
+/// Float near-equality test. Faithful port of `esl_FCompare_old`
+/// (hmmer/easel/easel.c:2400). Used by the Viterbi traceback to compare a DP
+/// cell value against `prev + tsc + emission` candidate predecessors.
+#[inline]
+fn esl_fcompare_old(a: f32, b: f32, tol: f32) -> bool {
+    if a.is_infinite() && b.is_infinite() {
+        return true;
+    }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    if a.abs() == 0.0 && b.abs() <= tol {
+        return true;
+    }
+    if b.abs() == 0.0 && a.abs() <= tol {
+        return true;
+    }
+    if 2.0 * (a - b).abs() / (a + b).abs() <= tol {
+        return true;
+    }
+    false
+}
+
 /// Viterbi traceback: walk a filled generic Viterbi DP matrix `gx` backwards
-/// from T to S to recover the optimal state path. Port of `p7_GTrace()`
-/// in `hmmer/src/generic_vtrace.c`. Reconstructs an M+I+D path plus the
-/// surrounding S/N/B/E/C/J/T scaffold and returns it forward-ordered.
+/// from T to S to recover the optimal state path. Faithful port of
+/// `p7_GTrace()` in `hmmer/src/generic_vtrace.c`. Reconstructs an M+I+D path
+/// plus the surrounding S/N/B/E/C/J/T scaffold and returns it forward-ordered.
+///
+/// This is a reconstruction traceback: predecessor scores are compared against
+/// the full `prev + tsc + emission` sum in exactly the order Viterbi computed
+/// them (B,M,I,D for M-states), per the J1/121 note in the C source, so the
+/// near-equality tie-break matches C cell-for-cell.
 pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
     let m = gm.m;
     let mut tr = Trace::new();
     let tol = 1e-5_f32;
 
-    // Start from terminal state
-    tr.append(State::T, 0, 0);
+    let mut i = l; // position in seq (1..L)
+    let mut k = 0usize; // position in model (1..M)
 
-    // C state at position L
-    tr.append(State::C, 0, l);
-    let mut i = l;
-    let mut cur_state = State::C;
+    tr.append(State::T, k, i);
+    tr.append(State::C, k, i);
+    let mut sprv = State::C;
 
-    // Walk backwards through the trace
-    loop {
-        match cur_state {
+    while sprv != State::S {
+        // rsc[dsq[i]] available only for i>0; emission scores indexed with x=dsq[i].
+        let scur: State = match sprv {
             State::C => {
-                // C can come from C(i-1) or E(i)
-                if i > 0 {
-                    let c_from_e = gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_MOVE];
-                    if (gx.xmx(i, P7G_C) - c_from_e).abs() < tol {
-                        cur_state = State::E;
-                        tr.append(State::E, 0, i);
-                    } else {
-                        i -= 1;
-                        tr.append(State::C, 0, i);
-                    }
+                // C(i) comes from C(i-1) or E(i)
+                if esl_fcompare_old(
+                    gx.xmx(i, P7G_C),
+                    gx.xmx(i - 1, P7G_C) + gm.xsc[P7P_C][P7P_LOOP],
+                    tol,
+                ) {
+                    State::C
+                } else if esl_fcompare_old(
+                    gx.xmx(i, P7G_C),
+                    gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_MOVE],
+                    tol,
+                ) {
+                    State::E
                 } else {
-                    // At i=0, must be S->N->...->C
-                    cur_state = State::E;
-                    tr.append(State::E, 0, 0);
+                    // C couldn't be traced (impossible in a valid matrix).
+                    break;
                 }
             }
             State::E => {
-                // E comes from M_k or D_M — find which k
-                let mut found_k = 0;
-                for k in (1..=m).rev() {
-                    if (gx.xmx(i, P7G_E) - gx.mmx(i, k)).abs() < tol {
-                        found_k = k;
-                        break;
-                    }
-                    if k == m && (gx.xmx(i, P7G_E) - gx.dmx(i, m)).abs() < tol {
-                        found_k = m;
-                        cur_state = State::D;
-                        tr.append(State::D, m, 0);
-                        break;
-                    }
-                }
-                if cur_state != State::D {
-                    if found_k > 0 {
-                        cur_state = State::M;
-                        tr.append(State::M, found_k, i);
-                    } else {
-                        // Fallback: find best-scoring M_k
-                        let mut best_k = m;
-                        let mut best_sc = f32::NEG_INFINITY;
-                        for k in 1..=m {
-                            if gx.mmx(i, k) > best_sc {
-                                best_sc = gx.mmx(i, k);
-                                best_k = k;
-                            }
+                // E connects from any M state; k set here.
+                if gm.is_local() {
+                    // Can't come from D in a local Viterbi trace.
+                    let mut found = 0usize;
+                    let mut kk = m;
+                    while kk >= 1 {
+                        if esl_fcompare_old(gx.xmx(i, P7G_E), gx.mmx(i, kk), tol) {
+                            found = kk;
+                            break;
                         }
-                        cur_state = State::M;
-                        tr.append(State::M, best_k, i);
+                        kk -= 1;
+                    }
+                    if found == 0 {
+                        break; // E couldn't be traced
+                    }
+                    k = found;
+                    State::M
+                } else {
+                    // glocal mode: we come from either M_M or D_M
+                    if esl_fcompare_old(gx.xmx(i, P7G_E), gx.mmx(i, m), tol) {
+                        k = m;
+                        State::M
+                    } else if esl_fcompare_old(gx.xmx(i, P7G_E), gx.dmx(i, m), tol) {
+                        k = m;
+                        State::D
+                    } else {
+                        break; // E couldn't be traced
                     }
                 }
             }
             State::M => {
-                let k = *tr.k.last().unwrap();
-                if k == 0 || i == 0 {
-                    // Transition to B
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                    continue;
-                }
-                // M(i,k) can come from B, M(i-1,k-1), I(i-1,k-1), D(i-1,k-1)
-                if k > 1 {
-                    let mm_sc = gx.mmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_MM);
-                    let im_sc = gx.imx(i - 1, k - 1) + gm.tsc(k - 1, P7P_IM);
-                    let dm_sc = gx.dmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_DM);
-
-                    let sc = gx.mmx(i, k) - gm.msc(k, dsq[i] as usize);
-                    if (sc - mm_sc).abs() < tol {
-                        i -= 1;
-                        cur_state = State::M;
-                        tr.append(State::M, k - 1, i);
-                    } else if (sc - im_sc).abs() < tol {
-                        i -= 1;
-                        cur_state = State::I;
-                        tr.append(State::I, k - 1, i);
-                    } else if (sc - dm_sc).abs() < tol {
-                        i -= 1;
-                        cur_state = State::D;
-                        tr.append(State::D, k - 1, 0);
-                    } else {
-                        // B->M entry
-                        i -= 1;
-                        cur_state = State::B;
-                        tr.append(State::B, 0, i);
-                    }
+                // M connects from i-1,k-1, or B. Test B-entry FIRST, then MM, IM, DM,
+                // comparing against the full prev+tsc+emission sum (J1/121).
+                let msc = gm.msc(k, dsq[i] as usize);
+                let s = if esl_fcompare_old(
+                    gx.mmx(i, k),
+                    gx.xmx(i - 1, P7G_B) + gm.tsc(k - 1, P7P_BM) + msc,
+                    tol,
+                ) {
+                    State::B
+                } else if esl_fcompare_old(
+                    gx.mmx(i, k),
+                    gx.mmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_MM) + msc,
+                    tol,
+                ) {
+                    State::M
+                } else if esl_fcompare_old(
+                    gx.mmx(i, k),
+                    gx.imx(i - 1, k - 1) + gm.tsc(k - 1, P7P_IM) + msc,
+                    tol,
+                ) {
+                    State::I
+                } else if esl_fcompare_old(
+                    gx.mmx(i, k),
+                    gx.dmx(i - 1, k - 1) + gm.tsc(k - 1, P7P_DM) + msc,
+                    tol,
+                ) {
+                    State::D
                 } else {
-                    // k=1: must come from B
-                    i -= 1;
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                }
+                    break; // M couldn't be traced
+                };
+                k -= 1;
+                i -= 1;
+                s
             }
             State::D => {
-                let k = *tr.k.last().unwrap();
-                if k <= 1 {
-                    cur_state = State::B;
-                    tr.append(State::B, 0, i);
-                    continue;
-                }
-                // D(i,k) from M(i,k-1) or D(i,k-1)
-                let md_sc = gx.mmx(i, k - 1) + gm.tsc(k - 1, P7P_MD);
-                if (gx.dmx(i, k) - md_sc).abs() < tol {
-                    cur_state = State::M;
-                    tr.append(State::M, k - 1, i);
+                // D connects from M,D at i,k-1
+                let s = if esl_fcompare_old(
+                    gx.dmx(i, k),
+                    gx.mmx(i, k - 1) + gm.tsc(k - 1, P7P_MD),
+                    tol,
+                ) {
+                    State::M
+                } else if esl_fcompare_old(
+                    gx.dmx(i, k),
+                    gx.dmx(i, k - 1) + gm.tsc(k - 1, P7P_DD),
+                    tol,
+                ) {
+                    State::D
                 } else {
-                    cur_state = State::D;
-                    tr.append(State::D, k - 1, 0);
-                }
+                    break; // D couldn't be traced
+                };
+                k -= 1;
+                s
             }
             State::I => {
-                let k = *tr.k.last().unwrap();
-                i -= 1;
-                // I(i,k) from M(i-1,k) or I(i-1,k)
-                let mi_sc = gx.mmx(i, k) + gm.tsc(k, P7P_MI);
-                let sc = gx.imx(i + 1, k) - gm.isc(k, dsq[i + 1] as usize);
-                if (sc - mi_sc).abs() < tol {
-                    cur_state = State::M;
-                    tr.append(State::M, k, i);
+                // I connects from M,I at i-1,k
+                let isc = gm.isc(k, dsq[i] as usize);
+                let s = if esl_fcompare_old(
+                    gx.imx(i, k),
+                    gx.mmx(i - 1, k) + gm.tsc(k, P7P_MI) + isc,
+                    tol,
+                ) {
+                    State::M
+                } else if esl_fcompare_old(
+                    gx.imx(i, k),
+                    gx.imx(i - 1, k) + gm.tsc(k, P7P_II) + isc,
+                    tol,
+                ) {
+                    State::I
                 } else {
-                    cur_state = State::I;
-                    tr.append(State::I, k, i);
+                    break; // I couldn't be traced
+                };
+                i -= 1;
+                s
+            }
+            State::N => {
+                // N connects from S, N
+                if i == 0 {
+                    State::S
+                } else {
+                    State::N
                 }
             }
             State::B => {
-                // B from N or J
-                let bn_sc = gx.xmx(i, P7G_N) + gm.xsc[P7P_N][P7P_MOVE];
-                if (gx.xmx(i, P7G_B) - bn_sc).abs() < tol {
-                    cur_state = State::N;
-                    tr.append(State::N, 0, i);
+                // B connects from N, J
+                if esl_fcompare_old(
+                    gx.xmx(i, P7G_B),
+                    gx.xmx(i, P7G_N) + gm.xsc[P7P_N][P7P_MOVE],
+                    tol,
+                ) {
+                    State::N
+                } else if esl_fcompare_old(
+                    gx.xmx(i, P7G_B),
+                    gx.xmx(i, P7G_J) + gm.xsc[P7P_J][P7P_MOVE],
+                    tol,
+                ) {
+                    State::J
                 } else {
-                    cur_state = State::J;
-                    tr.append(State::J, 0, i);
-                }
-            }
-            State::N => {
-                if i == 0 {
-                    tr.append(State::S, 0, 0);
-                    break;
-                }
-                // N from N(i-1) or S
-                let nn_sc = gx.xmx(i - 1, P7G_N) + gm.xsc[P7P_N][P7P_LOOP];
-                if (gx.xmx(i, P7G_N) - nn_sc).abs() < tol && i > 0 {
-                    i -= 1;
-                    tr.append(State::N, 0, i);
-                } else {
-                    tr.append(State::S, 0, 0);
-                    break;
+                    break; // B couldn't be traced
                 }
             }
             State::J => {
-                // J from J(i-1) or E(i)
-                if i > 0 {
-                    let je_sc = gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_LOOP];
-                    if (gx.xmx(i, P7G_J) - je_sc).abs() < tol {
-                        cur_state = State::E;
-                        tr.append(State::E, 0, i);
-                    } else {
-                        i -= 1;
-                        tr.append(State::J, 0, i);
-                    }
+                // J connects from E(i) or J(i-1)
+                if esl_fcompare_old(
+                    gx.xmx(i, P7G_J),
+                    gx.xmx(i - 1, P7G_J) + gm.xsc[P7P_J][P7P_LOOP],
+                    tol,
+                ) {
+                    State::J
+                } else if esl_fcompare_old(
+                    gx.xmx(i, P7G_J),
+                    gx.xmx(i, P7G_E) + gm.xsc[P7P_E][P7P_LOOP],
+                    tol,
+                ) {
+                    State::E
                 } else {
-                    cur_state = State::E;
-                    tr.append(State::E, 0, 0);
+                    break; // J couldn't be traced
                 }
             }
-            _ => break,
+            _ => break, // bogus state
+        };
+
+        // Append this state and the current i,k to be explained.
+        tr.append(scur, k, i);
+
+        // For NCJ, we had to defer the i decrement.
+        if (scur == State::N || scur == State::J || scur == State::C) && scur == sprv {
+            i -= 1;
         }
 
-        // Safety: prevent infinite loops
-        if tr.n > l + m + 100 {
-            break;
+        sprv = scur;
+    }
+
+    tr.m = gm.m;
+    tr.l = l;
+
+    // Faithful port of p7_trace_Reverse (p7_trace.c:1108-1151).
+    // For emit-on-transition N/C/J runs built backwards, pull residues back by
+    // one (C-,Cx,Cx,Cx -> Cx,Cx,Cx,C-) before the in-place reversal.
+    if tr.n > 0 {
+        for z in 0..(tr.n - 1) {
+            let run = (tr.st[z] == State::N && tr.st[z + 1] == State::N)
+                || (tr.st[z] == State::C && tr.st[z + 1] == State::C)
+                || (tr.st[z] == State::J && tr.st[z + 1] == State::J);
+            if run && tr.i[z] == 0 && tr.i[z + 1] > 0 {
+                tr.i[z] = tr.i[z + 1];
+                tr.i[z + 1] = 0;
+                if let Some(pp) = &mut tr.pp {
+                    pp[z] = pp[z + 1];
+                    pp[z + 1] = 0.0;
+                }
+            }
         }
     }
 
-    // Reverse the trace (we built it backwards)
     tr.st.reverse();
     tr.k.reverse();
     tr.i.reverse();
+    if let Some(pp) = &mut tr.pp {
+        pp.reverse();
+    }
 
     tr
 }
@@ -412,11 +492,15 @@ pub fn alignment_display_with_pp_emission_odds(
     bg_override: Option<&[f32]>,
     emission_odds: Option<&dyn Fn(usize, usize) -> Option<f32>>,
 ) -> Option<AlignmentDisplay> {
-    // Find first and last M states (domain boundaries)
+    // C anchors the display window on M states ONLY (p7_alidisplay.c:108-119):
+    // z1 = first p7T_M state, z2 = last p7T_M state. Interior D/I between them
+    // are still emitted, but leading/trailing D and I (e.g. a `...M D D E`
+    // delete-trailer) are excluded so they don't leak into the display or
+    // over-advance hmmto/sqto.
     let mut z1 = None;
     let mut z2 = None;
     for z in 0..tr.n {
-        if tr.st[z] == State::M || tr.st[z] == State::D || tr.st[z] == State::I {
+        if tr.st[z] == State::M {
             if z1.is_none() {
                 z1 = Some(z);
             }
@@ -591,10 +675,12 @@ pub fn alignment_display_with_pp_emission_odds(
 /// Compute the same coordinate span as `alignment_display_with_pp` without
 /// constructing printable alignment strings.
 pub fn alignment_coords(tr: &Trace) -> Option<(usize, usize, usize, usize)> {
+    // M-only anchoring, matching C's p7_alidisplay_Create (z1 = first M,
+    // z2 = last M). Leading/trailing D and I are excluded.
     let mut z1 = None;
     let mut z2 = None;
     for z in 0..tr.n {
-        if tr.st[z] == State::M || tr.st[z] == State::D || tr.st[z] == State::I {
+        if tr.st[z] == State::M {
             if z1.is_none() {
                 z1 = Some(z);
             }

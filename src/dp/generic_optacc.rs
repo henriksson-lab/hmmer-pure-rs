@@ -213,8 +213,8 @@ pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
     let mut k = 0usize;
     let mut sprv = State::C;
 
-    tr.append(State::T, 0, i);
-    tr.append(State::C, 0, i);
+    tr.append_with_pp(State::T, 0, i, 0.0);
+    tr.append_with_pp(State::C, 0, i, 0.0);
 
     while sprv != State::S {
         let scur = match sprv {
@@ -242,7 +242,8 @@ pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
             _ => State::S,
         };
 
-        tr.append(scur, k, i);
+        let postprob = get_postprob(pp, scur, sprv, k, i);
+        tr.append_with_pp(scur, k, i, postprob);
 
         if matches!(scur, State::N | State::J | State::C) && scur == sprv {
             i = i.saturating_sub(1);
@@ -413,17 +414,19 @@ fn argmax_first(values: &[f32]) -> usize {
 
 /// Look up the posterior probability for a trace position.
 ///
-/// Returns the cell of `pp` corresponding to the given state code (M/I emit
-/// from the core matrix; N/C/J from special states; D and anything else 0.0).
-/// Used to annotate each alignment position with its confidence.
-pub fn get_postprob(pp: &Gmx, state: u8, i: usize, k: usize) -> f32 {
-    match state {
-        1 => pp.mmx(i, k),      // M state
-        2 => 0.0,               // D state (no emission)
-        3 => pp.imx(i, k),      // I state
-        5 => pp.xmx(i, P7G_N),  // N
-        8 => pp.xmx(i, P7G_C),  // C
-        10 => pp.xmx(i, P7G_J), // J
+/// Faithful port of `get_postprob()` in generic_optacc.c, including its C
+/// switch fall-through: M emits `MMX(i,k)`, I emits `IMX(i,k)`; the special
+/// states N/C/J contribute their `XMX` posterior only on a self-loop
+/// (`sprv == scur`), otherwise (and for every other state) the result is 0.0.
+pub fn get_postprob(pp: &Gmx, scur: State, sprv: State, k: usize, i: usize) -> f32 {
+    match scur {
+        State::M => pp.mmx(i, k),
+        State::I => pp.imx(i, k),
+        // C fall-through: N/C/J return the special-state PP only when sprv==scur,
+        // otherwise execution falls through to `default: return 0.0`.
+        State::N if sprv == scur => pp.xmx(i, P7G_N),
+        State::C if sprv == scur => pp.xmx(i, P7G_C),
+        State::J if sprv == scur => pp.xmx(i, P7G_J),
         _ => 0.0,
     }
 }

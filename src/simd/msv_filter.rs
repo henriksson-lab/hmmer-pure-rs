@@ -48,6 +48,16 @@ pub unsafe fn msv_filter_with_scratch(
     om: &OProfile,
     dp: &mut Vec<__m128i>,
 ) -> MsvResult {
+    // C p7_MSVFilter first tries the highly-optimized SSV filter; if it returns
+    // a definitive result (eslOK score or eslERANGE overflow) we return it
+    // directly. Only when SSV returns eslENORESULT do we run the full MSV DP.
+    // (msvfilter.c:102-104)
+    match super::ssv_filter::ssv_filter_q17(dsq, l, om) {
+        super::ssv_filter::SsvResult::Ok(sc) => return MsvResult::Ok(sc),
+        super::ssv_filter::SsvResult::Overflow => return MsvResult::Overflow,
+        super::ssv_filter::SsvResult::NoResult => {}
+    }
+
     let q_count = nqb(om.m);
     let zerov = _mm_setzero_si128();
     dp.resize(q_count, zerov);
@@ -67,10 +77,12 @@ pub unsafe fn msv_filter_with_scratch(
     let mut xbv = _mm_subs_epu8(basev, tjbmv);
 
     for i in 1..=l {
+        // C indexes `om->rbv[dsq[i]]` unconditionally for every residue 1..L:
+        // rbv is filled for all Kp codes (oprofile.rs builds it `for x in 0..kp`,
+        // covering canonical + degenerate + gap/missing), and every valid digital
+        // code is < Kp, so the row always exists and the recurrence must advance.
+        // (msvfilter.c:134)
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue; // skip non-residue characters
-        }
         let rsc_ptr = om.rbv.get_unchecked(xi).as_ptr();
         let dp_ptr = dp.as_mut_ptr();
 

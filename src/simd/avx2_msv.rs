@@ -106,25 +106,29 @@ pub unsafe fn avx2_msv_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2) -> Avx2M
     let mut xbv = _mm256_subs_epu8(basev, tjbmv);
 
     for i in 1..=l {
+        // C indexes `om->rbv[dsq[i]]` unconditionally for every residue 1..L
+        // (msvfilter.c:134). rbv is filled for all Kp codes (from_oprofile builds
+        // it `for x in 0..kp`), and every valid digital code is < Kp, so the row
+        // always exists and the recurrence must advance.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rbv[xi];
 
         let mut xev = _mm256_setzero_si256();
 
-        // Right shift by 1 byte within 256-bit lane
-        // Note: _mm256_slli_si256 shifts within 128-bit lanes independently
-        // Need cross-lane shift for proper striped layout
+        // Full-width 1-byte left shift across the whole 256-bit register
+        // (HMMER's "right shift": result[j] = v[j-1], result[0] = 0), matching the
+        // SSE `_mm_slli_si128(dp[Q-1], 1)`. Plain `_mm256_slli_si256::<1>` shifts each
+        // 128-bit lane independently and drops the byte that must carry from lane-0
+        // byte 15 into lane-1 byte 16, so we emulate a full-width shift.
+        //
+        // `permute2x128::<0x08>` yields perm = [lane0 = 0, lane1 = v's lane0].
+        // `alignr_epi8::<15>(v, perm)` then takes bytes 15..30 of (v_lane : perm_lane)
+        // per lane, producing:
+        //   lane0 = [0,   v0..v14]   (byte 0 sentinel = 0)
+        //   lane1 = [v15, v16..v30]  (carry v15 crosses the lane boundary; v31 dropped)
         let last = dp[q_count - 1];
-        let mut mpv = _mm256_slli_si256::<1>(last);
-        // Zero the first byte (cross-lane behavior)
-        let mask = _mm256_set_epi8(
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1i8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
-        );
-        mpv = _mm256_andnot_si256(mask, mpv);
+        let perm = _mm256_permute2x128_si256::<0x08>(last, last);
+        let mut mpv = _mm256_alignr_epi8::<15>(last, perm);
 
         for q in 0..q_count {
             let mut sv = _mm256_max_epu8(mpv, xbv);

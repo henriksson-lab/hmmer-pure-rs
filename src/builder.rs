@@ -8,98 +8,407 @@ use crate::hmm::*;
 use crate::msa::{self, Msa};
 use crate::prior::PriorStrategy;
 use crate::trace::{State as TraceState, Trace};
+use crate::util::random::{esl_rand64_deal, Rand64};
 
 pub const DEFAULT_WINDOW_BETA: f64 = 1e-7;
 
+/// Default PB-weighting config values, mirroring `ESL_MSAWEIGHT_CFG`
+/// (esl_msaweight.h:30-37). `ignore_rf` is supplied per-call because the
+/// HMMER builder flips it with `--hand` (p7_builder.c:814); the rest are the
+/// fixed Easel defaults.
+const PB_FRAGTHRESH: f32 = 0.5;
+const PB_SYMFRAC: f32 = 0.5;
+/// `eslMSAWEIGHT_ALLOW_SAMP` (TRUE): permit the deep-alignment subsampling
+/// consensus path. (esl_msaweight.h:33)
+const PB_ALLOW_SAMP: bool = true;
+/// `eslMSAWEIGHT_SAMPTHRESH` (50000): if `nseq > sampthresh`, determine
+/// consensus from a subsample rather than all sequences. (esl_msaweight.h:34)
+const PB_SAMPTHRESH: usize = 50000;
+/// `eslMSAWEIGHT_NSAMP` (10000): number of sequences in the subsample.
+/// (esl_msaweight.h:35)
+const PB_NSAMP: usize = 10000;
+/// `eslMSAWEIGHT_MAXFRAG` (5000): if the subsample contains more than this
+/// many fragments, reject sampling and fall back to all sequences.
+/// (esl_msaweight.h:36)
+const PB_MAXFRAG: usize = 5000;
+/// `eslMSAWEIGHT_RNGSEED` (42): fixed RNG seed for reproducible subsampling.
+/// (esl_msaweight.h:37)
+const PB_RNGSEED: u64 = 42;
+
 /// Henikoff position-based sequence weights, normalized to sum to `nseq`.
 ///
-/// In default "fast" architecture mode, any input RF annotation is ignored;
-/// `use_rf = true` (HMMER's `--hand` mode) restricts the column scan to RF
-/// consensus columns. Counterpart to Easel's `esl_msaweight_PB()`.
-pub fn pb_weights(msa: &Msa, abc: &Alphabet, use_rf: bool) -> Vec<f64> {
+/// Faithful port of Easel's `esl_msaweight_PB_adv()` (esl_msaweight.c:182) as
+/// invoked by the HMMER builder (`relative_weights`, p7_builder.c:809) with the
+/// default config. Consensus columns are determined by RF annotation when
+/// present and `ignore_rf` is false (i.e. `--hand`); otherwise by the symfrac
+/// gap-fraction rule over fragment-aware counts (`consensus_by_all`). Counts
+/// are collected with HMMER's fragment-span rule so fragments' external gaps
+/// are excluded. The per-residue PB rule `1/(r·ct)`, per-sequence `/rlen`
+/// normalization, and final scale-to-`nseq` all match the C exactly.
+///
+/// The deep-alignment subsampling path (`consensus_by_sample`, nseq > 50000) is
+/// reproduced bit-faithfully: it samples `nsamp` sequence indices with Easel's
+/// 64-bit Mersenne Twister (`esl_rand64`) + Vitter sequential sampling
+/// (`esl_rand64_Deal`), marks fragments by the same span rule, and determines
+/// consensus columns from the sample (or rejects when too many fragments are
+/// seen, falling back to `consensus_by_all`).
+pub fn pb_weights(msa: &Msa, abc: &Alphabet, ignore_rf: bool) -> Vec<f64> {
     let nseq = msa.nseq;
+    let alen = msa.alen;
     let k = abc.k;
+    let kp = abc.kp;
+
+    // Contract: single-sequence MSA gets weight 1.0 (esl_msaweight.c:199).
+    if nseq == 1 {
+        return vec![1.0];
+    }
+    if nseq == 0 || alen == 0 {
+        return vec![1.0; nseq];
+    }
 
     let ax = msa.digitize(abc);
+
+    // Count matrix ct[apos=0..=alen][a=0..Kp-1]; apos is 1-based, [0][] unused.
+    let mut ct = vec![vec![0i32; kp]; alen + 1];
+    // Consensus column indices (1-based), in increasing order.
+    let mut conscols: Vec<usize> = Vec::with_capacity(alen);
+
+    // Determine consensus columns early if we can. RF takes priority; else, on
+    // a deep alignment, sample to determine consensus (esl_msaweight.c:205-207).
+    // ncons stays 0 if neither path is used or the sample is rejected.
+    if !ignore_rf && msa.rf.is_some() {
+        consensus_by_rf(msa.rf.as_ref().unwrap(), abc, alen, &mut conscols);
+    } else if PB_ALLOW_SAMP && nseq > PB_SAMPTHRESH {
+        consensus_by_sample(&ax, abc, alen, nseq, &mut ct, &mut conscols);
+    }
+
+    // Collect count matrix (over all columns, or only consensus columns if
+    // already known), excluding fragments' external gaps.
+    collect_counts(&ax, abc, alen, nseq, &conscols, &mut ct);
+
+    // If consensus columns weren't determined yet, do it now from <ct>.
+    if conscols.is_empty() {
+        consensus_by_all(&ct, abc, alen, &mut conscols);
+    }
+
+    // If still nothing, that's pathological -- use all columns.
+    if conscols.is_empty() {
+        conscols.extend(1..=alen);
+    }
+
+    let ncons = conscols.len();
+
+    // Count how many different canonical residues are used in each consensus
+    // column: r[j] (esl_msaweight.c:224-231).
+    let mut r = vec![0i32; ncons];
+    for (j, &apos) in conscols.iter().enumerate() {
+        for a in 0..k {
+            if ct[apos][a] > 0 {
+                r[j] += 1;
+            }
+        }
+    }
+
+    // Bump sequence weights using the PB rule (esl_msaweight.c:234-246).
     let mut weights = vec![0.0_f64; nseq];
-
-    for col in 0..msa.alen {
-        if use_rf {
-            let rf = msa.rf.as_ref().unwrap();
-            if col >= rf.len() || rf[col] == b'.' || rf[col] == b'-' || rf[col] == b' ' {
-                continue;
+    for idx in 0..nseq {
+        let mut rlen = 0i32;
+        for (j, &apos) in conscols.iter().enumerate() {
+            let a = ax[idx][apos] as usize;
+            if a < k {
+                weights[idx] += 1.0 / (r[j] * ct[apos][a]) as f64;
+                rlen += 1;
             }
         }
-
-        // Count distinct residues and per-residue counts at this column
-        let mut counts = vec![0usize; k];
-
-        for seq in 0..nseq {
-            let pos = col + 1;
-            if pos < ax[seq].len() - 1 {
-                let residue = ax[seq][pos] as usize;
-                if residue < k {
-                    counts[residue] += 1;
-                }
-            }
-        }
-
-        let r = counts.iter().filter(|&&c| c > 0).count(); // number of distinct residues
-        if r == 0 {
-            continue;
-        }
-
-        // Weight each sequence's contribution at this column
-        for seq in 0..nseq {
-            let pos = col + 1;
-            if pos < ax[seq].len() - 1 {
-                let residue = ax[seq][pos] as usize;
-                if residue < k && counts[residue] > 0 {
-                    weights[seq] += 1.0 / (r * counts[residue]) as f64;
-                }
-            }
+        if rlen > 0 {
+            weights[idx] /= rlen as f64;
         }
     }
 
-    // Normalize: each weight divided by number of residues in that sequence
-    for seq in 0..nseq {
-        let mut n_res = 0;
-        for col in 0..msa.alen {
-            if use_rf {
-                let rf = msa.rf.as_ref().unwrap();
-                if col >= rf.len() || rf[col] == b'.' || rf[col] == b'-' || rf[col] == b' ' {
-                    continue;
-                }
-            }
-            let pos = col + 1;
-            if pos < ax[seq].len() - 1 {
-                let residue = ax[seq][pos] as usize;
-                if residue < k {
-                    n_res += 1;
-                }
-            }
-        }
-        if n_res > 0 {
-            weights[seq] /= n_res as f64;
-        }
-    }
-
-    // Normalize weights to sum to nseq
+    // Normalize to sum to 1, then scale to nseq (esl_vec_DNorm + DScale).
     let sum: f64 = weights.iter().sum();
     if sum != 0.0 {
-        let scale = nseq as f64 / sum;
         for w in &mut weights {
-            *w *= scale;
+            *w /= sum;
         }
-    } else if nseq > 0 {
+    } else {
         let uniform = 1.0 / nseq as f64;
-        weights.fill(uniform);
         for w in &mut weights {
-            *w *= nseq as f64;
+            *w = uniform;
         }
+    }
+    for w in &mut weights {
+        *w *= nseq as f64;
     }
 
     weights
+}
+
+/// Use RF annotation to define consensus columns (esl_msaweight.c:271).
+/// A column is consensus unless its RF character maps to the gap symbol
+/// (`esl_abc_CIsGap`). `conscols` is filled with 1-based indices.
+fn consensus_by_rf(rf: &[u8], abc: &Alphabet, alen: usize, conscols: &mut Vec<usize>) {
+    let gap = abc.gap_code();
+    for apos in 1..=alen {
+        let c = rf.get(apos - 1).copied().unwrap_or(b' ');
+        if abc.digitize_symbol(c) == gap {
+            continue;
+        }
+        conscols.push(apos);
+    }
+}
+
+/// Use counts from all sequences to determine consensus (esl_msaweight.c:400).
+/// A column is consensus if its gap fraction `ct[K]/tot < symfrac`, where
+/// `tot` sums symbol codes `0..Kp-2` (residues + gaps, incl. degeneracies,
+/// excl. nonresidue/missing). Float arithmetic mirrors the C cast order.
+fn consensus_by_all(ct: &[Vec<i32>], abc: &Alphabet, alen: usize, conscols: &mut Vec<usize>) {
+    let k = abc.k;
+    let kp = abc.kp;
+    for apos in 1..=alen {
+        let mut tot = 0i32;
+        for a in 0..(kp - 2) {
+            tot += ct[apos][a];
+        }
+        if (ct[apos][k] as f32 / tot as f32) < PB_SYMFRAC {
+            conscols.push(apos);
+        }
+    }
+}
+
+/// Collect the observed symbol-count matrix `ct[apos][a]`, applying HMMER's
+/// fragment-span rule so fragments' external (terminal) gaps are not counted
+/// (esl_msaweight.c:434). A sequence is a fragment if its aligned span
+/// `rpos-lpos+1 < ceil(fragthresh*alen)`; full-length sequences count columns
+/// `1..=alen`, fragments only `lpos..=rpos`. If `conscols` is non-empty, only
+/// those columns are counted (a pure optimization that matches C).
+fn collect_counts(
+    ax: &[Vec<u8>],
+    abc: &Alphabet,
+    alen: usize,
+    nseq: usize,
+    conscols: &[usize],
+    ct: &mut [Vec<i32>],
+) {
+    // C re-zeros the whole matrix here (esl_mat_ISet, esl_msaweight.c:443), so
+    // any counts left over from consensus_by_sample are discarded.
+    for row in ct.iter_mut() {
+        row.iter_mut().for_each(|c| *c = 0);
+    }
+
+    let minspan = (PB_FRAGTHRESH * alen as f32).ceil() as i64;
+
+    let alen_i = alen as i64;
+    for ax_seq in ax.iter().take(nseq) {
+        // Leftmost / rightmost aligned residue (1..=alen), as 1-based signed
+        // indices to mirror C's int loops (lpos may exit at alen+1, rpos at 0).
+        let mut lpos: i64 = 1;
+        while lpos <= alen_i && !abc.is_residue(ax_seq[lpos as usize]) {
+            lpos += 1;
+        }
+        let mut rpos: i64 = alen_i;
+        while rpos >= 1 && !abc.is_residue(ax_seq[rpos as usize]) {
+            rpos -= 1;
+        }
+
+        // Fragment test: span = rpos-lpos+1. Full-length seqs reset to whole
+        // alignment; fragments keep the [lpos,rpos] span. (span <= 0 for the
+        // all-gap / empty case, which is < minspan, so treated as a fragment.)
+        let span = rpos - lpos + 1;
+        if span >= minspan {
+            lpos = 1;
+            rpos = alen_i;
+        }
+
+        if !conscols.is_empty() {
+            for &apos in conscols {
+                let apos = apos as i64;
+                if apos > rpos {
+                    break;
+                }
+                if apos < lpos {
+                    continue;
+                }
+                let a = ax_seq[apos as usize] as usize;
+                ct[apos as usize][a] += 1;
+            }
+        } else {
+            let mut apos = lpos;
+            while apos <= rpos {
+                let a = ax_seq[apos as usize] as usize;
+                ct[apos as usize][a] += 1;
+                apos += 1;
+            }
+        }
+    }
+}
+
+/// Determine consensus columns from a statistical subsample of sequences,
+/// for deep alignments (esl_msaweight.c:321, `consensus_by_sample`).
+///
+/// Faithful port: samples `nsamp` sequence indices (0..nseq-1) without
+/// replacement using Easel's 64-bit Mersenne Twister seeded with
+/// `eslMSAWEIGHT_RNGSEED` (42) and the Vitter sequential-sampling `Deal`
+/// algorithm, then collects observed symbol counts in `ct` over each sampled
+/// sequence's fragment span (marking fragments by the `minspan = ceil(fragthresh*alen)`
+/// rule). If at most `maxfrag` fragments are seen, consensus columns are those
+/// with gap fraction `ct[K]/tot < symfrac`; otherwise sampling is rejected
+/// (`conscols` left empty), and the caller falls back to `consensus_by_all`.
+///
+/// On entry `ct` is overwritten (zeroed then filled); on success `conscols`
+/// holds the 1-based consensus-column indices. The `ct` populated here is
+/// discarded by `collect_counts`, which re-zeros it — exactly as in C.
+fn consensus_by_sample(
+    ax: &[Vec<u8>],
+    abc: &Alphabet,
+    alen: usize,
+    nseq: usize,
+    ct: &mut [Vec<i32>],
+    conscols: &mut Vec<usize>,
+) {
+    let k = abc.k;
+    let kp = abc.kp;
+
+    // Zero ct (esl_mat_ISet, esl_msaweight.c:340).
+    for row in ct.iter_mut() {
+        row.iter_mut().for_each(|c| *c = 0);
+    }
+
+    // Sample nsamp indices in 0..nseq-1, sorted ascending (esl_rand64_Deal).
+    let mut rng = Rand64::new(PB_RNGSEED);
+    let sampidx = esl_rand64_deal(&mut rng, PB_NSAMP as i64, nseq as i64);
+
+    let minspan = (PB_FRAGTHRESH * alen as f32).ceil() as i64;
+    let alen_i = alen as i64;
+    let mut nfrag = 0usize;
+
+    for &idx64 in &sampidx {
+        let idx = idx64 as usize;
+        let ax_seq = &ax[idx];
+
+        let mut lpos: i64 = 1;
+        while lpos <= alen_i && !abc.is_residue(ax_seq[lpos as usize]) {
+            lpos += 1;
+        }
+        let mut rpos: i64 = alen_i;
+        while rpos >= 1 && !abc.is_residue(ax_seq[rpos as usize]) {
+            rpos -= 1;
+        }
+        if rpos - lpos + 1 < minspan {
+            nfrag += 1;
+        } else {
+            lpos = 1;
+            rpos = alen_i;
+        }
+
+        let mut apos = lpos;
+        while apos <= rpos {
+            let a = ax_seq[apos as usize] as usize;
+            ct[apos as usize][a] += 1;
+            apos += 1;
+        }
+    }
+
+    if nfrag <= PB_MAXFRAG {
+        for apos in 1..=alen {
+            let mut tot = 0i32;
+            for a in 0..(kp - 2) {
+                tot += ct[apos][a];
+            }
+            if (ct[apos][k] as f32 / tot as f32) < PB_SYMFRAC {
+                conscols.push(apos);
+            }
+        }
+    }
+    // else: too many fragments -> reject; conscols stays empty (eslFAIL path).
+}
+
+/// Apply the `#=GC MM` model mask to the digitized alignment in place
+/// (`do_modelmask`, build.c:222). In every column marked `'m'`, each non-gap,
+/// non-missing residue is rewritten to the degenerate "any" symbol (Kp-3).
+/// `ax` rows are 1-based (`ax[seq][1..=alen]`); `msa.mm[apos-1]` is the mask.
+fn do_modelmask(ax: &mut [Vec<u8>], abc: &Alphabet, msa: &Msa) {
+    let Some(mm) = msa.mm.as_ref() else {
+        return;
+    };
+    let any = abc.unknown_code(); // Kp-3
+    let gap = abc.gap_code(); // K
+    let missing = abc.missing_code(); // Kp-1
+    for apos in 1..=msa.alen {
+        if mm.get(apos - 1).copied() != Some(b'm') {
+            continue;
+        }
+        for row in ax.iter_mut() {
+            let c = row[apos];
+            if c != gap && c != missing {
+                row[apos] = any;
+            }
+        }
+    }
+}
+
+/// Transfer rf/mm/cs/ca optional annotation from the MSA to the model
+/// (`annotate_model`, build.c:338). Each line, if present in the MSA, is
+/// emitted as a model array `hmm.X[0..=M]` where index 0 is a leading space
+/// and indices 1..=M hold the source character at each successive match
+/// column. The MM line maps `'.'` to `'-'` exactly as C does (build.c:360).
+/// (The alignment column map is set separately by the caller, matching the
+/// `p7H_MAP` portion of annotate_model.)
+fn annotate_model(hmm: &mut Hmm, matassign: &[bool], msa: &Msa) {
+    let alen = msa.alen;
+
+    if let Some(rf) = msa.rf.as_ref() {
+        let mut out = vec![b' '; hmm.m + 2];
+        let mut k = 1usize;
+        for apos in 1..=alen {
+            if matassign[apos - 1] {
+                out[k] = rf.get(apos - 1).copied().unwrap_or(b' ');
+                k += 1;
+            }
+        }
+        hmm.rf = Some(out);
+        hmm.flags |= P7H_RF;
+    }
+
+    if let Some(mm) = msa.mm.as_ref() {
+        let mut out = vec![b' '; hmm.m + 2];
+        let mut k = 1usize;
+        for apos in 1..=alen {
+            if matassign[apos - 1] {
+                let c = mm.get(apos - 1).copied().unwrap_or(b' ');
+                out[k] = if c == b'.' { b'-' } else { c };
+                k += 1;
+            }
+        }
+        hmm.mm = Some(out);
+        hmm.flags |= P7H_MMASK;
+    }
+
+    if let Some(ss) = msa.ss_cons.as_ref() {
+        let mut out = vec![b' '; hmm.m + 2];
+        let mut k = 1usize;
+        for apos in 1..=alen {
+            if matassign[apos - 1] {
+                out[k] = ss.get(apos - 1).copied().unwrap_or(b' ');
+                k += 1;
+            }
+        }
+        hmm.cs = Some(out);
+        hmm.flags |= P7H_CS;
+    }
+
+    if let Some(sa) = msa.sa_cons.as_ref() {
+        let mut out = vec![b' '; hmm.m + 2];
+        let mut k = 1usize;
+        for apos in 1..=alen {
+            if matassign[apos - 1] {
+                out[k] = sa.get(apos - 1).copied().unwrap_or(b' ');
+                k += 1;
+            }
+        }
+        hmm.ca = Some(out);
+        hmm.flags |= P7H_CA;
+    }
 }
 
 fn normalize_weights_to_nseq(weights: &mut [f64], nseq: usize) {
@@ -451,7 +760,7 @@ pub fn model_mask_from_msa(
 ) -> Vec<u8> {
     let mut ax = msa.digitize(abc);
     let weights = match weighting_strategy {
-        RelativeWeighting::PositionBased => pb_weights(msa, abc, hand_arch && msa.rf.is_some()),
+        RelativeWeighting::PositionBased => pb_weights(msa, abc, !hand_arch),
         RelativeWeighting::Gsc => gsc_weights(msa, abc),
         RelativeWeighting::Blosum { identity_cutoff } => blosum_weights(msa, abc, identity_cutoff),
         RelativeWeighting::Given => given_weights(msa),
@@ -545,7 +854,7 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
     // esl_msa_MarkFragments_old() in the C builder flow.
     let mut ax = msa.digitize(abc);
     let weights = match weighting_strategy {
-        RelativeWeighting::PositionBased => pb_weights(msa, abc, hand_arch && msa.rf.is_some()),
+        RelativeWeighting::PositionBased => pb_weights(msa, abc, !hand_arch),
         RelativeWeighting::Gsc => gsc_weights(msa, abc),
         RelativeWeighting::Blosum { identity_cutoff } => blosum_weights(msa, abc, identity_cutoff),
         RelativeWeighting::Given => given_weights(msa),
@@ -558,6 +867,13 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
             .into_iter()
             .map(|sym| sym == b'x')
             .collect();
+
+    // Apply the #=GC MM model mask (do_modelmask, build.c:222): rewrite
+    // non-gap residues in 'm'-marked columns to the degenerate "any" symbol
+    // (Kp-3) before counting, so those columns get degenerate emission counts.
+    // Architecture and weighting above used the unmasked residues, matching C
+    // (do_modelmask runs at the top of matassign2hmm, after modelmaking).
+    do_modelmask(&mut ax, abc, msa);
 
     let m = matassign.iter().filter(|&&x| x).count();
     if m == 0 {
@@ -617,19 +933,10 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
         clamp_insert_self_transition_counts(&mut hmm, max_insert_len);
     }
 
-    // Set RF from matassign
-    if msa.rf.is_some() {
-        let mut rf = vec![b' '; m + 2];
-        let mut node = 0;
-        for col in 0..msa.alen {
-            if matassign[col] {
-                node += 1;
-                rf[node] = b'x';
-            }
-        }
-        hmm.rf = Some(rf);
-        hmm.flags |= P7H_RF;
-    }
+    // Transfer rf/mm/cs/ca annotation from the MSA (annotate_model, build.c:338):
+    // for each annotation line present, copy the original character at every
+    // match column into a 1-based model array hmm->X[1..M], with index 0 = ' '.
+    annotate_model(&mut hmm, &matassign, msa);
 
     // Store alignment column map for hmmalign --mapali.
     let mut map = vec![0i32; m + 1];

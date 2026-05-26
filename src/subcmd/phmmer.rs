@@ -827,6 +827,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             &mut out,
             &th,
             &hmm.name,
+            hmm.acc.as_deref().unwrap_or(""),
             hmm.m,
             hmm.cs.as_deref(),
             z,

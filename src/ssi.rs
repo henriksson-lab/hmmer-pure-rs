@@ -251,8 +251,13 @@ pub fn write_hmm_ssi(hmm_path: &Path) -> HmmerResult<(PathBuf, usize, usize)> {
         )));
     }
 
-    write_hmm_ssi_records(
+    // C `hmmfetch --index` passes the full filename to esl_newssi_AddFile (which
+    // sizes flen from strlen(path)+1) but stores only the basename via
+    // esl_FileTail. Mirror that: size from the full path, store the basename.
+    let stored_path = path_file_name(hmm_path);
+    write_hmm_ssi_records_with_stored_path(
         hmm_path,
+        &stored_path,
         &ssi_path,
         index.primary_keys.iter().map(|p| {
             let acc = index
@@ -777,8 +782,11 @@ mod tests {
         assert_eq!(ssi_path, path_with_appended_suffix(&hmm_path, ".ssi"));
         assert!(ssi_path.as_os_str().as_bytes().contains(&0xff));
 
+        // C stores only the basename (esl_FileTail) in the SSI file table, so the
+        // round-tripped path is the basename — its non-UTF8 bytes must still survive.
+        let basename = PathBuf::from(std::ffi::OsString::from_vec(b"two-\xff.hmm".to_vec()));
         let on_disk = read_hmm_ssi(&hmm_path).unwrap().unwrap();
-        assert_eq!(on_disk.indexed_path, hmm_path);
+        assert_eq!(on_disk.indexed_path, basename);
         assert!(on_disk.indexed_path.as_os_str().as_bytes().contains(&0xff));
     }
 

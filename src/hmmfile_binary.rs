@@ -62,16 +62,12 @@ fn read_f32<R: Read>(r: &mut R) -> HmmerResult<f32> {
 }
 
 /// Read a length-prefixed C-string: `i32` length including trailing NUL, then bytes.
-/// A length of `-1` (absent) or `0` (empty) yields an empty string.
+/// Matches C `read_bin_string`, which treats any `len <= 0` as a NULL string
+/// with no error (the writer's NULL convention emits `len = 0`).
 fn read_string<R: Read>(r: &mut R) -> HmmerResult<String> {
     let len = read_i32(r)?;
     if len <= 0 {
-        if len < -1 {
-            return Err(HmmerError::Format(format!(
-                "Invalid binary HMM string length: {len}"
-            )));
-        }
-        return Ok(String::new()); // -1 = absent, 0 = empty
+        return Ok(String::new()); // len <= 0 = NULL/empty (C: s = NULL)
     }
     let len = len as usize;
     let mut buf = vec![0u8; len];
@@ -405,10 +401,10 @@ pub fn write_binary_hmm_with_format<W: std::io::Write>(
 
     // Optional fields
     if flags & P7H_ACC != 0 {
-        write_string(w, hmm.acc.as_deref().unwrap_or(""))?;
+        write_optional_string(w, hmm.acc.as_deref())?;
     }
     if flags & P7H_DESC != 0 {
-        write_string(w, hmm.desc.as_deref().unwrap_or(""))?;
+        write_optional_string(w, hmm.desc.as_deref())?;
     }
 
     if flags & P7H_RF != 0 {
@@ -428,7 +424,7 @@ pub fn write_binary_hmm_with_format<W: std::io::Write>(
     }
 
     // Command log
-    write_string(w, hmm.comlog.as_deref().unwrap_or(""))?;
+    write_optional_string(w, hmm.comlog.as_deref())?;
 
     // nseq, eff_nseq
     w.write_all(&hmm.nseq.to_ne_bytes())
@@ -442,7 +438,7 @@ pub fn write_binary_hmm_with_format<W: std::io::Write>(
     }
 
     // Creation time
-    write_string(w, hmm.ctime.as_deref().unwrap_or(""))?;
+    write_optional_string(w, hmm.ctime.as_deref())?;
 
     // Map
     if flags & P7H_MAP != 0 {
@@ -516,7 +512,8 @@ fn write_annotation<W: std::io::Write>(
     Ok(())
 }
 
-/// Write a length-prefixed C-string: length (including NUL), bytes, terminating NUL.
+/// Write a non-NULL length-prefixed C-string: length (including NUL), bytes,
+/// terminating NUL. Mirrors C `write_bin_string` for a non-NULL `s`.
 fn write_string<W: std::io::Write>(w: &mut W, s: &str) -> HmmerResult<()> {
     let bytes = s.as_bytes();
     let len = (bytes.len() + 1) as i32; // include null terminator
@@ -524,6 +521,19 @@ fn write_string<W: std::io::Write>(w: &mut W, s: &str) -> HmmerResult<()> {
     w.write_all(bytes).map_err(HmmerError::Io)?;
     w.write_all(&[0u8]).map_err(HmmerError::Io)?; // null terminator
     Ok(())
+}
+
+/// Write an optional length-prefixed C-string, matching C `write_bin_string`:
+/// for `None` (a NULL string) write just `int32 = 0` and no body; for `Some(s)`
+/// write `strlen(s)+1`, the bytes, and a terminating NUL.
+fn write_optional_string<W: std::io::Write>(w: &mut W, s: Option<&str>) -> HmmerResult<()> {
+    match s {
+        None => {
+            w.write_all(&0i32.to_ne_bytes()).map_err(HmmerError::Io)?;
+            Ok(())
+        }
+        Some(s) => write_string(w, s),
+    }
 }
 
 #[cfg(test)]
@@ -599,11 +609,13 @@ mod tests {
         for _ in 0..14 {
             buf.extend_from_slice(&0f32.to_ne_bytes()); // t[0..1]
         }
-        buf.extend_from_slice(&(-2i32).to_ne_bytes()); // invalid name length
+        buf.extend_from_slice(&(-2i32).to_ne_bytes()); // non-positive len: C read_bin_string returns NULL
 
+        // C treats any len<=0 as a NULL string (no error at the string level), then
+        // rejects the record because the required NAME is absent (p7_hmmfile.c:1565,1654).
         let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
         assert!(
-            matches!(err, HmmerError::Format(msg) if msg.contains("Invalid binary HMM string length"))
+            matches!(err, HmmerError::Format(msg) if msg.contains("empty required NAME"))
         );
     }
 

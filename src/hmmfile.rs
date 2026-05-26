@@ -326,11 +326,21 @@ fn read_one_hmm_with_format<B: BufRead>(
                 m = value
                     .parse()
                     .map_err(|_| HmmerError::Format("Bad LENG".to_string()))?;
+                if m == 0 {
+                    return Err(HmmerError::Format(format!(
+                        "Invalid model length {value} on LENG line"
+                    )));
+                }
             }
             "MAXL" => {
                 max_length = value
                     .parse()
                     .map_err(|_| HmmerError::Format("Bad MAXL".to_string()))?;
+                if max_length == 0 {
+                    return Err(HmmerError::Format(format!(
+                        "Invalid max length {value} on MAXL line"
+                    )));
+                }
             }
             "ALPH" => {
                 abc_type = if value.eq_ignore_ascii_case("amino") {
@@ -371,11 +381,21 @@ fn read_one_hmm_with_format<B: BufRead>(
                 nseq = value
                     .parse()
                     .map_err(|_| HmmerError::Format("Bad NSEQ".to_string()))?;
+                if nseq == 0 {
+                    return Err(HmmerError::Format(format!(
+                        "Invalid nseq on NSEQ line: should be integer, not {value}"
+                    )));
+                }
             }
             "EFFN" => {
                 eff_nseq = value
                     .parse()
                     .map_err(|_| HmmerError::Format("Bad EFFN".to_string()))?;
+                if eff_nseq <= 0.0 {
+                    return Err(HmmerError::Format(format!(
+                        "Invalid eff_nseq on EFFN line: should be a real number, not {value}"
+                    )));
+                }
             }
             "CKSUM" => {
                 checksum = value
@@ -384,9 +404,55 @@ fn read_one_hmm_with_format<B: BufRead>(
                 flags |= P7H_CHKSUM;
             }
             "STATS" => {
-                // "LOCAL MSV -6.4582 0.72049"
                 let parts: Vec<&str> = value.split_whitespace().collect();
-                if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("LOCAL") {
+                if format_version == "3a" {
+                    // HMMER3/a (reverse compatibility): 3-token form
+                    //   "LOCAL VLAMBDA <v>", "LOCAL VMU <v>", "LOCAL FTAU <v>"
+                    if parts.len() < 3 {
+                        return Err(HmmerError::Format(
+                            "Too few fields on STATS line".to_string(),
+                        ));
+                    }
+                    if !parts[0].eq_ignore_ascii_case("LOCAL") {
+                        return Err(HmmerError::Format(format!(
+                            "Failed to parse STATS, {} unrecognized as field 2",
+                            parts[0]
+                        )));
+                    }
+                    let v: f32 = parts[2]
+                        .parse()
+                        .map_err(|_| HmmerError::Format("Bad STATS value".to_string()))?;
+                    if parts[1].eq_ignore_ascii_case("VLAMBDA") {
+                        evparam[P7_MLAMBDA] = v;
+                        evparam[P7_VLAMBDA] = v;
+                        evparam[P7_FLAMBDA] = v;
+                        stat_msv = true;
+                    } else if parts[1].eq_ignore_ascii_case("VMU") {
+                        evparam[P7_MMU] = v;
+                        evparam[P7_VMU] = v;
+                        stat_viterbi = true;
+                    } else if parts[1].eq_ignore_ascii_case("FTAU") {
+                        evparam[P7_FTAU] = v;
+                        stat_forward = true;
+                    } else {
+                        return Err(HmmerError::Format(format!(
+                            "Failed to parse STATS, {} unrecognized as field 3",
+                            parts[1]
+                        )));
+                    }
+                } else {
+                    // HMMER3/b+ : 4-token form "LOCAL MSV -6.4582 0.72049"
+                    if parts.len() < 4 {
+                        return Err(HmmerError::Format(
+                            "Too few fields on STATS line".to_string(),
+                        ));
+                    }
+                    if !parts[0].eq_ignore_ascii_case("LOCAL") {
+                        return Err(HmmerError::Format(format!(
+                            "Failed to parse STATS, {} unrecognized as field 2",
+                            parts[0]
+                        )));
+                    }
                     let v1: f32 = parts[2]
                         .parse()
                         .map_err(|_| HmmerError::Format("Bad STATS value".to_string()))?;
@@ -405,6 +471,11 @@ fn read_one_hmm_with_format<B: BufRead>(
                         evparam[P7_FTAU] = v1;
                         evparam[P7_FLAMBDA] = v2;
                         stat_forward = true;
+                    } else {
+                        return Err(HmmerError::Format(format!(
+                            "Failed to parse STATS, {} unrecognized as field 3",
+                            parts[1]
+                        )));
                     }
                 }
             }
@@ -980,32 +1051,50 @@ pub fn write_hmm_with_format<W: std::io::Write>(
     if hmm.flags & P7H_CHKSUM != 0 {
         writeln!(w, "CKSUM {}", hmm.checksum).map_err(HmmerError::Io)?;
     }
+    // C (p7_hmmfile.c:546-554): nucleic-acid models emit a single cutoff value;
+    // only amino emits both the per-sequence and per-domain cutoffs.
+    let nucleic = matches!(hmm.abc_type, AlphabetType::Dna | AlphabetType::Rna);
     if hmm.flags & P7H_GA != 0 {
-        writeln!(
-            w,
-            "GA    {} {}",
-            fmt_fixed2(hmm.cutoff[P7_GA1] as f64),
-            fmt_fixed2(hmm.cutoff[P7_GA2] as f64)
-        )
-        .map_err(HmmerError::Io)?;
+        if nucleic {
+            writeln!(w, "GA    {}", fmt_fixed2(hmm.cutoff[P7_GA1] as f64))
+                .map_err(HmmerError::Io)?;
+        } else {
+            writeln!(
+                w,
+                "GA    {} {}",
+                fmt_fixed2(hmm.cutoff[P7_GA1] as f64),
+                fmt_fixed2(hmm.cutoff[P7_GA2] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+        }
     }
     if hmm.flags & P7H_TC != 0 {
-        writeln!(
-            w,
-            "TC    {} {}",
-            fmt_fixed2(hmm.cutoff[P7_TC1] as f64),
-            fmt_fixed2(hmm.cutoff[P7_TC2] as f64)
-        )
-        .map_err(HmmerError::Io)?;
+        if nucleic {
+            writeln!(w, "TC    {}", fmt_fixed2(hmm.cutoff[P7_TC1] as f64))
+                .map_err(HmmerError::Io)?;
+        } else {
+            writeln!(
+                w,
+                "TC    {} {}",
+                fmt_fixed2(hmm.cutoff[P7_TC1] as f64),
+                fmt_fixed2(hmm.cutoff[P7_TC2] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+        }
     }
     if hmm.flags & P7H_NC != 0 {
-        writeln!(
-            w,
-            "NC    {} {}",
-            fmt_fixed2(hmm.cutoff[P7_NC1] as f64),
-            fmt_fixed2(hmm.cutoff[P7_NC2] as f64)
-        )
-        .map_err(HmmerError::Io)?;
+        if nucleic {
+            writeln!(w, "NC    {}", fmt_fixed2(hmm.cutoff[P7_NC1] as f64))
+                .map_err(HmmerError::Io)?;
+        } else {
+            writeln!(
+                w,
+                "NC    {} {}",
+                fmt_fixed2(hmm.cutoff[P7_NC1] as f64),
+                fmt_fixed2(hmm.cutoff[P7_NC2] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+        }
     }
     if hmm.flags & P7H_STATS != 0 {
         if format == HmmAsciiFormat::Hmmer3a {
@@ -1069,7 +1158,7 @@ pub fn write_hmm_with_format<W: std::io::Write>(
 
     // COMPO line
     if hmm.flags & P7H_COMPO != 0 {
-        write!(w, "  COMPO  ").map_err(HmmerError::Io)?;
+        write!(w, "  COMPO ").map_err(HmmerError::Io)?;
         for i in 0..k {
             write!(w, " {}", fmt_prob(hmm.compo[i])).map_err(HmmerError::Io)?;
         }
@@ -1077,14 +1166,14 @@ pub fn write_hmm_with_format<W: std::io::Write>(
     }
 
     // Node 0 insert emissions
-    write!(w, "         ").map_err(HmmerError::Io)?;
+    write!(w, "        ").map_err(HmmerError::Io)?;
     for i in 0..k {
         write!(w, " {}", fmt_prob(hmm.ins[0][i])).map_err(HmmerError::Io)?;
     }
     writeln!(w).map_err(HmmerError::Io)?;
 
     // Node 0 transitions
-    write!(w, "         ").map_err(HmmerError::Io)?;
+    write!(w, "        ").map_err(HmmerError::Io)?;
     for i in 0..NTRANSITIONS {
         write!(w, " {}", fmt_prob(hmm.t[0][i])).map_err(HmmerError::Io)?;
     }
@@ -1092,8 +1181,8 @@ pub fn write_hmm_with_format<W: std::io::Write>(
 
     // Nodes 1..M
     for node in 1..=hmm.m {
-        // Match emission line
-        write!(w, " {:>6}", node).map_err(HmmerError::Io)?;
+        // Match emission line: C writes " %6d " (leading + trailing space).
+        write!(w, " {:>6} ", node).map_err(HmmerError::Io)?;
         for i in 0..k {
             write!(w, " {}", fmt_prob(hmm.mat[node][i])).map_err(HmmerError::Io)?;
         }
@@ -1121,14 +1210,14 @@ pub fn write_hmm_with_format<W: std::io::Write>(
         writeln!(w).map_err(HmmerError::Io)?;
 
         // Insert emission line
-        write!(w, "         ").map_err(HmmerError::Io)?;
+        write!(w, "        ").map_err(HmmerError::Io)?;
         for i in 0..k {
             write!(w, " {}", fmt_prob(hmm.ins[node][i])).map_err(HmmerError::Io)?;
         }
         writeln!(w).map_err(HmmerError::Io)?;
 
         // Transition line
-        write!(w, "         ").map_err(HmmerError::Io)?;
+        write!(w, "        ").map_err(HmmerError::Io)?;
         for i in 0..NTRANSITIONS {
             write!(w, " {}", fmt_prob(hmm.t[node][i])).map_err(HmmerError::Io)?;
         }
@@ -1142,13 +1231,18 @@ pub fn write_hmm_with_format<W: std::io::Write>(
 /// Format a probability `p` as `-ln(p)` (or `*` if zero) using single-precision
 /// `logf`, matching the C HMMER ASCII writer's field width and digits.
 fn fmt_prob(p: f32) -> String {
+    // C's `printprob` (hmmer/src/p7_hmmfile.c) uses an 8-wide field:
+    // `%8.5f` for probabilities and `%8s` of "*" for the zero/infinity case.
     if p <= 0.0 {
-        "      *".to_string()
+        // C: fprintf(fp, " %*s", 8, "*") -> "       *" (7 spaces + '*')
+        format!("{:>8}", "*")
     } else if p == 1.0 {
-        fmt_hmm_prob(0.0)
+        // C: fprintf(fp, " %*.5f", 8, 0.0)
+        format!("{:>8}", fmt_hmm_prob(0.0))
     } else {
         // HMMER's C writer uses logf(), not double-precision log().
-        fmt_hmm_prob(-c_logf_to_f32(p) as f64)
+        // `fmt_hmm_prob` is `%7.5f`; right-justify in width 8 to match `%8.5f`.
+        format!("{:>8}", fmt_hmm_prob(-c_logf_to_f32(p) as f64))
     }
 }
 

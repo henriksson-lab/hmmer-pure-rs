@@ -810,7 +810,9 @@ impl Pipeline {
             seq_score = sum_score;
             pre_score = pre2_score;
         }
-        let seq_bias_bits = (pre_score - seq_score).max(0.0);
+        // C stores/prints the raw difference unclamped (p7_tophits.c:1677,1764:
+        // `pre_score - score`), which can be slightly negative.
+        let seq_bias_bits = pre_score - seq_score;
         #[cfg(feature = "tracehash")]
         trace_pipeline_score_components(
             &sq.dsq,
@@ -867,6 +869,10 @@ impl Pipeline {
             (seq_score, pre_score, seq_bias_bits, lnp, pre_lnp)
         };
 
+        // Storage gate, matching C p7_pipeline.c:1062: a hit is stored only if it
+        // passes p7_pli_TargetReportable against the *current* pli->Z (running
+        // target count for Ntargets, fixed -Z for Option). This is a permissive
+        // lower bound; final thresholding re-applies with the true Z.
         if !self.target_reportable(hit_score, hit_lnp) {
             return false;
         }

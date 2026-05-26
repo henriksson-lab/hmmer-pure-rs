@@ -158,15 +158,16 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
     let neg_inf_v = _mm256_insert_epi16::<0>(_mm256_setzero_si256(), -32768);
 
     let mut xn: i16 = om.base_w;
-    let mut xb: i16 = xn.saturating_add(om.xw[P7O_N][P7O_MOVE]);
+    let mut xb: i16 = add_i16(xn, om.xw[P7O_N][P7O_MOVE]);
     let mut xj: i16 = -32768;
     let mut xc: i16 = -32768;
 
     for i in 1..=l {
+        // C indexes `om->rwv[dsq[i]]` unconditionally (vitfilter.c:127): rwv is
+        // filled for all Kp codes (from_oprofile builds it `for x in 0..kp`), and
+        // every valid digital code is < Kp, so the row always exists and the
+        // recurrence (plus per-row special-state updates) must advance.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = neg_inf_16;
@@ -231,13 +232,14 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
             return Avx2VitResult::Overflow;
         }
 
-        xn = xn.saturating_add(om.xw[P7O_N][P7O_LOOP]);
-        xc = (xc.saturating_add(om.xw[P7O_C][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_MOVE]));
-        xj = (xj.saturating_add(om.xw[P7O_J][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_LOOP]));
-        xb = (xj.saturating_add(om.xw[P7O_J][P7O_MOVE]))
-            .max(xn.saturating_add(om.xw[P7O_N][P7O_MOVE]));
+        // Scalar special-state updates use wrapping int16 arithmetic to match the
+        // SSE port (vit_filter.rs `add_i16`) and C (vitfilter.c:177-180), which add
+        // int16+int16 promoted to int and truncate on store. Saturating add would
+        // diverge at the -32768 "-inf" sentinel plus a negative loop cost.
+        xn = add_i16(xn, om.xw[P7O_N][P7O_LOOP]);
+        xc = add_i16(xc, om.xw[P7O_C][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_MOVE]));
+        xj = add_i16(xj, om.xw[P7O_J][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_LOOP]));
+        xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE]).max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
 
         // Lazy DD evaluation
         let dmax = hmax_epi16_avx2(dmaxv);
@@ -284,16 +286,32 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
     }
 }
 
+/// Wrapping i16 addition done via i32 intermediates, matching the SSE port's
+/// `add_i16` and C's int16+int16 scalar special-state arithmetic (wrap on store,
+/// not saturate).
+#[inline(always)]
+fn add_i16(a: i16, b: i16) -> i16 {
+    (a as i32 + b as i32) as i16
+}
+
 /// Cross-lane right-shift by 1 16-bit word for AVX2 (helper, Rust-only).
 /// Transforms `[a0,a1,...,a15]` into `[-inf,a0,a1,...,a14]`; needed because
 /// `_mm256_slli_si256` only shifts within 128-bit lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn cross_lane_shift_epi16(v: __m256i) -> __m256i {
-    // alignr within each lane, then fix the cross-lane boundary
-    let hi = _mm256_permute2x128_si256::<0x08>(v, v); // lane0 = zero, lane1 = old lane0
-    let shifted = _mm256_alignr_epi8::<2>(v, hi); // shift right by 2 bytes across lanes
-                                                  // Set lowest word to -32768
+    // We want, for input [a0..a15], the result [a0..a14] shifted up by one word with
+    // the previous lane's top word carried across the 128-bit boundary, i.e.
+    // [_, a0, a1, ..., a14] (a15 drops). This mirrors the SSE `_mm_slli_si128(x, 2)`
+    // one-word left shift (in little-endian word terms) applied across all 256 bits.
+    //
+    // `perm` places zero in lane0 and old-lane0 in lane1. `_mm256_alignr_epi8::<14>(a, b)`
+    // per lane takes bytes 14..30 of (a_lane:b_lane) = `b_lane[14..16] ++ a_lane[0..14]`,
+    // a 2-byte (1-word) up-shift carrying in the prior lane's top word. With a = v,
+    // b = perm: lane0 -> [0, a0..a6], lane1 -> [a7, a8..a14] (a7 carried from lane0).
+    let perm = _mm256_permute2x128_si256::<0x08>(v, v); // lane0 = zero, lane1 = old lane0
+    let shifted = _mm256_alignr_epi8::<14>(v, perm);
+    // Set lowest word to the -inf sentinel, matching the SSE `_mm_or_si128(x, negInfv)`.
     _mm256_insert_epi16::<0>(shifted, -32768)
 }
 

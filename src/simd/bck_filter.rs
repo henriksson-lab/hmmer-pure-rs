@@ -404,6 +404,14 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     let mut x_b: f32 = 0.0;
     let mut x_n: f32 = 0.0;
     let mut totscale: f64 = 0.0;
+    // SKIP (benign, audit 03 finding): when `fwd_row_scales` is `Some`, totscale
+    // is not accumulated, so the *scalar return value* (`totscale + log(xN)`)
+    // omits the cumulative `Σ log(SCALE)` that C always includes (fwdback.c:1505).
+    // This is intentional and harmless: every `Some(...)` caller (the
+    // posterior-decoding paths in domaindef.rs) discards the return and consumes
+    // only the filled `xmx` specials and `row_scale`, which are computed exactly
+    // as in C. The per-row `pmx.scale[i]` is deliberately left 0.0 in that path
+    // because cancellation runs through `row_scale` instead.
     let track_scales = cfg!(feature = "tracehash") || fwd_row_scales.is_none();
     let mut has_own_scales = fwd_row_scales.is_none();
     // Initialize row L: M(L,k)->E->C->T and D(L,k)->E->C->T

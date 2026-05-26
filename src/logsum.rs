@@ -52,9 +52,13 @@ pub fn p7_flogsum(a: f32, b: f32) -> f32 {
 /// Absolute error in probability space introduced by `p7_flogsum()`'s table
 /// lookup: `exp(approx) - exp(exact)`. Counterpart to C's `p7_FLogsumError()`.
 pub fn p7_flogsum_error(a: f32, b: f32) -> f32 {
+    // Mirror C bit-for-bit: `float exact = log(exp(a)+exp(b));` evaluates
+    // exp/log in double (libm) but rounds the result to float on store, and
+    // `exp(approx) - exp(exact)` is then evaluated in double and rounded to
+    // float on return. Keep the same promotion/rounding pattern.
     let approx = p7_flogsum(a, b);
-    let exact = ((a as f64).exp() + (b as f64).exp()).ln() as f32;
-    approx.exp() - exact.exp()
+    let exact = (c_exp_f64(a as f64) + c_exp_f64(b as f64)).ln() as f32;
+    (c_exp_f64(approx as f64) - c_exp_f64(exact as f64)) as f32
 }
 
 #[cfg(test)]

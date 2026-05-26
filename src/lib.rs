@@ -45,6 +45,10 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+// Let the crate refer to itself by name, so the CLI subcommand modules (moved
+// in from the binary) can keep using their existing `hmmer_pure_rs::` paths.
+extern crate self as hmmer_pure_rs;
+
 pub mod alphabet;
 pub mod bg;
 pub mod builder;
@@ -71,6 +75,7 @@ pub mod simd;
 pub mod spensemble;
 pub mod ssi;
 pub mod stats;
+pub mod subcmd;
 pub mod tophits;
 pub mod trace;
 pub mod util;

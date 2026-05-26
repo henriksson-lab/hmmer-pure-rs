@@ -20,10 +20,46 @@ pub fn print_alidisplay_blocks(
     cs_line: Option<&str>,
     linewidth: usize,
 ) {
+    // Back-compat wrapper: never prefers accessions (no --acc handling).
+    print_alidisplay_blocks_acc(
+        out, hmm_name, "", seq_name, "", ad, cs_line, linewidth, false,
+    );
+}
+
+/// Like [`print_alidisplay_blocks`] but honors the `--acc` option
+/// (C `p7_nontranslated_alidisplay_Print`'s `show_accessions` argument,
+/// p7_alidisplay.c:1162,1176-1180): when `show_accessions` is set and the
+/// corresponding accession is non-empty, the accession is shown in place of
+/// the name and `namewidth` is derived from the chosen strings.
+#[allow(clippy::too_many_arguments)]
+pub fn print_alidisplay_blocks_acc(
+    out: &mut dyn std::io::Write,
+    hmm_name: &str,
+    hmm_acc: &str,
+    seq_name: &str,
+    seq_acc: &str,
+    ad: &AliDisplay,
+    cs_line: Option<&str>,
+    linewidth: usize,
+    show_accessions: bool,
+) {
     let n = ad.model.chars().count();
     if n == 0 {
         return;
     }
+    // Mirror C p7_alidisplay.c:1176-1180: with --acc, prefer the accession
+    // when one is present; otherwise fall back to the name. namewidth is then
+    // derived from whichever string is actually shown.
+    let hmm_name = if show_accessions && !hmm_acc.is_empty() {
+        hmm_acc
+    } else {
+        hmm_name
+    };
+    let seq_name = if show_accessions && !seq_acc.is_empty() {
+        seq_acc
+    } else {
+        seq_name
+    };
     let namewidth = hmm_name.len().max(seq_name.len());
     let coordwidth = [ad.hmmfrom, ad.hmmto, ad.sqfrom, ad.sqto]
         .iter()
@@ -287,24 +323,32 @@ impl TopHits {
         let mut prev = 0usize;
         for i in 1..n {
             // Extract comparison fields without holding a borrow.
-            let (p_j, s_j_raw, e_j_raw, hmm_from_j, hmm_to_j, name_j, seqidx_j) = {
+            let (p_j, s_j_raw, e_j_raw, hmm_from_j, hmm_to_j) = {
                 let h = &self.hits[prev];
                 let dom = h.dcl.first();
                 let (sj, ej) = dom.map(|d| (d.iali, d.jali)).unwrap_or((0, 0));
                 let (hf, ht) = dom
                     .and_then(|d| d.ad.as_ref().map(|a| (a.hmmfrom as i64, a.hmmto as i64)))
                     .unwrap_or((0, 0));
-                (h.lnp, sj, ej, hf, ht, h.name.clone(), h.seqidx)
+                (h.lnp, sj, ej, hf, ht)
             };
-            let (p_i, s_i_raw, e_i_raw, hmm_from_i, hmm_to_i, name_i, seqidx_i) = {
+            let (p_i, s_i_raw, e_i_raw, hmm_from_i, hmm_to_i) = {
                 let h = &self.hits[i];
                 let dom = h.dcl.first();
                 let (si, ei) = dom.map(|d| (d.iali, d.jali)).unwrap_or((0, 0));
                 let (hf, ht) = dom
                     .and_then(|d| d.ad.as_ref().map(|a| (a.hmmfrom as i64, a.hmmto as i64)))
                     .unwrap_or((0, 0));
-                (h.lnp, si, ei, hf, ht, h.name.clone(), h.seqidx)
+                (h.lnp, si, ei, hf, ht)
             };
+            // C (p7_tophits.c:861-862) compares the name/seqidx of hit i against
+            // the *immediately adjacent* prior hit (i-1), even if i-1 was itself
+            // flagged duplicate — distinct from `j` (the last *kept* hit) used for
+            // the coordinate/p-value fields above.
+            let name_i = self.hits[i].name.clone();
+            let seqidx_i = self.hits[i].seqidx;
+            let name_j = self.hits[i - 1].name.clone();
+            let seqidx_j = self.hits[i - 1].seqidx;
             let dir_j = if s_j_raw < e_j_raw { 1 } else { -1 };
             let dir_i = if s_i_raw < e_i_raw { 1 } else { -1 };
             let (s_j, e_j) = if dir_j == -1 {
@@ -390,6 +434,15 @@ impl TopHits {
     ///   2. name.
     ///   3. strand (positive first).
     ///   4. `dcl[0].iali` ascending.
+    ///
+    /// Stability note (audit 09 finding, intentional): Rust `sort_by` is a
+    /// stable sort, whereas C uses `qsort`, whose ordering on a *full* tie
+    /// (every comparator key equal) is unspecified. C's tie order therefore
+    /// cannot be reproduced faithfully; a stable sort that preserves input
+    /// order is the deterministic, safe choice. This only affects output line
+    /// order among exact ties, which is effectively unobservable. The same
+    /// reasoning applies to `sort_by_seqidx_and_alipos` and
+    /// `sort_by_modelname_and_alipos`.
     pub fn sort_by_sortkey(&mut self) {
         self.hits.sort_by(|a, b| {
             a.sortkey
@@ -938,6 +991,9 @@ pub fn included_alignment(
             nseq: sequences.len(),
             alen,
             rf: Some(rf),
+            mm: None,
+            ss_cons: None,
+            sa_cons: None,
             pp_cons: pp_consensus(&pp_totals, &pp_counts),
         });
     }
@@ -1003,6 +1059,9 @@ pub fn included_alignment(
         nseq: sequences.len(),
         alen,
         rf: Some(rf),
+        mm: None,
+        ss_cons: None,
+        sa_cons: None,
         pp_cons: pp_consensus(&pp_totals, &pp_counts),
     })
 }

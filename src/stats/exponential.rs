@@ -3,6 +3,10 @@
 
 use crate::util::cmath::c_exp_f64;
 
+/// Threshold below which `1 - exp(-x) ~ x` is used to avoid cancellation.
+/// Mirrors Easel's `eslSMALLX1` (`= 5e-9`, defined in `easel.h`).
+const ESL_SMALLX1: f64 = 5e-9;
+
 /// Survivor function P(X > x), i.e. 1 - CDF, the right-tail probability mass.
 ///
 /// Given offset `mu` and decay parameter `lambda`. Returns 1.0 for x < mu;
@@ -44,7 +48,7 @@ pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
         return 0.0;
     }
     let y = lambda * (x - mu);
-    if y < 5e-9 {
+    if y < ESL_SMALLX1 {
         y
     } else {
         1.0 - c_exp_f64(-y)

@@ -12,7 +12,7 @@ pub const PXJ: usize = 2;
 pub const PXB: usize = 3;
 pub const PXC: usize = 4;
 const NXCELLS: usize = 5;
-const DP_CELLS_PER_K: usize = 3; // M, I, D
+const DP_CELLS_PER_K: usize = 3; // M, D, I (p7X_M=0, p7X_D=1, p7X_I=2)
 
 /// Return the in-slice offset (in `f32` elements) needed to reach the next
 /// 16-byte aligned boundary inside `v`. Used to align striped DP storage for

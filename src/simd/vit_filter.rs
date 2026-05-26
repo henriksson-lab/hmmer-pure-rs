@@ -65,10 +65,11 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
     }
 
     for i in 1..=l {
+        // C indexes `om->rwv[dsq[i]]` unconditionally (vitfilter.c:127): rwv is
+        // filled for all Kp codes (oprofile.rs builds it `for x in 0..kp`), and
+        // every valid digital code is < Kp, so the row always exists and the
+        // recurrence (and per-row special-state updates) must advance.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = _mm_set1_epi16(-32768);
@@ -269,10 +270,11 @@ pub unsafe fn viterbi_filter_longtarget(
     let mut windows: Vec<HmmWindow> = Vec::new();
 
     for i in 1..=l {
+        // C indexes `om->rwv[dsq[i]]` unconditionally (vitfilter.c:127): rwv is
+        // filled for all Kp codes (oprofile.rs builds it `for x in 0..kp`), and
+        // every valid digital code is < Kp, so the row always exists and the
+        // recurrence (and per-row special-state updates) must advance.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = _mm_set1_epi16(-32768);

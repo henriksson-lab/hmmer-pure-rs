@@ -478,23 +478,55 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
     length_header: &str,
 ) {
     use hmmer_pure_rs::tophits::P7_IS_REPORTED;
-    // Column widths taken from C's format string (static minimum 20/10/20/10/7/7/...).
+    // Column widths sized dynamically to mirror C p7_tophits.c:1612-1616:
+    //   tnamew = ESL_MAX(20, GetMaxNameLength)
+    //   qnamew = ESL_MAX(20, strlen(qname))
+    //   qaccw  = (qacc != NULL) ? ESL_MAX(10, strlen(qacc)) : 10
+    //   taccw  = ESL_MAX(10, GetMaxAccessionLength)
+    //   posw   = ESL_MAX(7, GetMaxPositionLength)   (long_targets always true here)
+    // All GetMax* helpers iterate over *all* hits (h->unsrt), not just reported.
     let namew = th
         .hits
         .iter()
-        .filter(|h| h.flags & P7_IS_REPORTED != 0)
         .map(|h| h.name.len())
         .max()
-        .unwrap_or(20)
+        .unwrap_or(0)
         .max(20);
     let qw = qname.len().max(20);
+    let qaccw = qacc.map(|s| s.len()).unwrap_or(0).max(10);
+    let taccw = th
+        .hits
+        .iter()
+        .map(|h| h.acc.len())
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    // p7_tophits_GetMaxPositionLength: max decimal-digit length of iali/jali
+    // over hits with dcl[0].iali > 0, min 7.
+    let posw = th
+        .hits
+        .iter()
+        .filter_map(|h| h.dcl.first())
+        .filter(|d| d.iali > 0)
+        .map(|d| {
+            let a = d.iali.to_string().len();
+            let b = d.jali.to_string().len();
+            a.max(b)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(7);
 
     // Mirror C p7_tophits.c:1623: `#%-*s ...` where width=namew-1, value has
     // leading space (` target name`). Net effect: `#` + 19-char field = 20.
     if show_header {
+        // C p7_tophits.c:1623 long_targets header:
+        //   "#%-*s %-*s %-*s %-*s %s %s %*s %*s %*s %*s %*s %6s %9s %6s %5s  %s\n"
+        // widths: tnamew-1, taccw, qnamew, qaccw, then "hmmfrom"/"hmm to" plain,
+        // then posw x5, then %6s strand, %9s E-value, %6s score, %5s bias.
         writeln!(
             f,
-            "#{tname:<tnw$} {tacc:<10} {qn:<qnw$} {qacc:<10} {hf} {ht} {af:>7} {at:>7} {ef:>7} {et:>7} {sl:>7} {strand:>6} {ev:>9} {sc:>6} {bi:>5}  {desc}",
+            "#{tname:<tnw$} {tacc:<taccw$} {qn:<qnw$} {qacc:<qaccw$} {hf} {ht} {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5}  {desc}",
             tname = " target name",
             tacc = "accession",
             qn = "query name",
@@ -513,11 +545,14 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             desc = "description of target",
             tnw = namew - 1,
             qnw = qw,
+            taccw = taccw,
+            qaccw = qaccw,
+            posw = posw,
         )
         .unwrap();
         writeln!(
             f,
-            "#{tname:-<tnw$} {tacc:-<10} {qn:-<qnw$} {qacc:-<10} {hf} {ht} {af:->7} {at:->7} {ef:->7} {et:->7} {sl:->7} {strand:->6} {ev:->9} {sc:->6} {bi:->5} {desc:-<21}",
+            "#{tname:-<tnw$} {tacc:-<taccw$} {qn:-<qnw$} {qacc:-<qaccw$} {hf} {ht} {af:->posw$} {at:->posw$} {ef:->posw$} {et:->posw$} {sl:->posw$} {strand:->6} {ev:->9} {sc:->6} {bi:->5} {desc:-<21}",
             tname = "",
             tacc = "",
             qn = "",
@@ -536,6 +571,9 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             desc = "",
             tnw = namew - 1,
             qnw = qw,
+            taccw = taccw,
+            qaccw = qaccw,
+            posw = posw,
         )
         .unwrap();
     }
@@ -568,9 +606,11 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             hit.desc.as_str()
         };
         let ev_str = fmt_evalue(evalue_scale * c_exp_f64(hit.lnp));
+        // C p7_tophits.c:1649 long_targets row:
+        //   "%-*s %-*s %-*s %-*s %7d %7d %*PRId64 x5 %6s %9.2g %6.1f %5.1f  %s"
         writeln!(
             f,
-            "{tname:<namew$} {tacc:<10} {qn:<qw$} {qacc:<10} {hf:>7} {ht:>7} {af:>7} {at:>7} {ef:>7} {et:>7} {sl:>7} {strand} {ev:>9} {sc} {bi}  {desc}",
+            "{tname:<namew$} {tacc:<taccw$} {qn:<qw$} {qacc:<qaccw$} {hf:>7} {ht:>7} {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand} {ev:>9} {sc} {bi}  {desc}",
             tname = hit.name,
             tacc = acc_display,
             qn = qname,
@@ -589,6 +629,9 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             desc = desc_display,
             namew = namew,
             qw = qw,
+            taccw = taccw,
+            qaccw = qaccw,
+            posw = posw,
         )
         .unwrap();
     }
