@@ -21,22 +21,28 @@ are kept here for context.
   byte-identical). **OPEN (minor):** multi-block (split-sequence) ambiguity-range
   ordering in overlap regions still differs from C (counts and substituted bases
   match; only the range ordering/coordinate basis in the overlap differs).
-- nhmmer FM-index target search: **OPEN (large).** Still a seed-then-rescore
-  approximation, not C's exact SIMD SSV-over-FM diagonal pipeline. A faithful
-  `fm_recurse`/`fm_get_seeds`/`fm_merge_seeds`/`fm_extend_seed` port of the
-  forward sweep now lives, unit-tested, in `src/simd/fm_ssv.rs` (NOT wired into
-  the pipeline). Full integration is blocked on a dependency: `src/fm_index.rs`
-  has no bi-directional search, which C's `fm_reverse` half of `FM_Recurse`
-  needs, and there is no float `ssv_scores_f` on the oprofile. **Regression
-  coverage:** `test_nhmmer_3box_preserves_c_longtarget_minimum_alignment_span`,
-  `test_nhmmer_3box_exact_parity_bundle`, `test_nhmmer_ecori_max_matches_c_no_hit_behavior`,
-  `test_nhmmer_max_uses_longtarget_max_filter_thresholds` (+2 others) in
-  `tests/real_world_regression_tests.rs` fail because of this gap. They are
-  pre-existing: the `8057e96` baseline had 6 such failures; this pass reduced
-  them to 3 (nhmmer dynamic tblout widths + RemoveDuplicates `i-1` fixes), no
-  new regressions. The committed `model_start = k - extend + 1` off-by-one was
-  reverted — observably neutral here (spans diverge from the FM seed gap, not
-  that line).
+- nhmmer `--max` long-target path: **resolved.** The 3 failing nhmmer
+  `real_world_regression_tests` (`..._3box_preserves_c_longtarget_minimum_alignment_span`,
+  `..._ecori_max_matches_c_no_hit_behavior`, `..._max_uses_longtarget_max_filter_thresholds`)
+  were caused by `search_longtarget` special-casing `do_max`: it collapsed `--max`
+  to a single full-sequence window and skipped the SSV/MSV/Vit windowing+counter
+  stages. C (`p7_pipeline.c:355-356`) has NO such special-case — `--max` just sets
+  `F1=0.3, F2=F3=1.0` and runs the identical pipeline (Rust already set those
+  thresholds at `nhmmer.rs:1436`). Removing the `do_max` branches in
+  `search_longtarget` (single-window override + the three `if !do_max` gates)
+  restored C's multi-window segmentation (recovering the span-8 hits) and the
+  per-stage residue counters (`12 (1)` for SSV/bias/Vit, matching C). Full suite
+  is green. Residual (no test enforces it, default parity is exact): under the
+  extreme `--max -T -100` stress config Rust over-segments (≈32 vs C's 10
+  reported windows) — a long-target windowing/merge detail under all-pass
+  Vit/Fwd, not a default-path issue.
+- nhmmer FM-index seed search (default mode): **OPEN (large).** Still a
+  seed-then-rescore approximation, not C's exact SIMD SSV-over-FM diagonal
+  pipeline. A faithful `fm_recurse`/`fm_get_seeds`/`fm_merge_seeds`/`fm_extend_seed`
+  port of the forward sweep lives, unit-tested, in `src/simd/fm_ssv.rs` (NOT
+  wired in). Full integration is blocked on a dependency: `src/fm_index.rs` has
+  no bi-directional search (C's `fm_reverse` half of `FM_Recurse` needs it) and
+  there is no float `ssv_scores_f` on the oprofile.
 - hmmpgmd: **resolved (was a non-gap).** C hmmpgmd performs no cross-worker
   dedup; each DB index is visited by exactly one worker. The Rust master now
   coalesces overlapping user `--seqdb_ranges` into disjoint shards, reproducing

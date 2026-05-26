@@ -3963,10 +3963,8 @@ fn fm_extend_seed_diagonal(
     // NOTE: this is the seed-then-rescore approximation's extension window, NOT a
     // 1:1 port of C `FM_extendSeed`; the downstream window extension + MSV
     // rescore recompute final coordinates. Adding C's `model_start = k-extend+1`
-    // "+ 1" here was tried and is observably neutral on the current fixtures
-    // (the longtarget span differences in the failing `test_nhmmer_3box_*` /
-    // `..._max_*` C-parity tests come from the FM seed-vs-exact-SSV gap, not this
-    // line), so the simpler long-standing no-`+1` form is kept.
+    // "+ 1" here was tried and is observably neutral on the current fixtures, so
+    // the simpler long-standing no-`+1` form is kept.
     let mut model_start = seed_model_start.saturating_sub(extend).max(1);
     let mut model_end = (seed_model_start + seed_len + extend - 1).min(hmm.m);
     let mut target_start = seq_seed_start0 as isize - (seed_model_start - model_start) as isize;
@@ -7888,16 +7886,14 @@ fn search_longtarget(
         unsafe { ssv_longtarget::ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, f1, max_length) }
     };
 
-    if do_max {
-        windows = vec![ssv_longtarget::HmmWindow {
-            n: 1,
-            k: hmm.m,
-            length: sq.n,
-            score: 0.0,
-            target_len: sq.n,
-            complement: is_complement,
-        }];
-    } else if windows.is_empty() {
+    // C p7_Pipeline_LongTarget has NO do_max special-case here: --max sets
+    // F1=0.3, F2=F3=1.0 (p7_pipeline.c:355-356) and runs the identical SSV
+    // windowing + MSV/Vit/Fwd pipeline. The F2/F3=1.0 gates pass everything,
+    // but the F1=0.3 SSV gate still segments windows, and the per-stage
+    // counters are still credited. (The previous Rust code collapsed --max to a
+    // single full-sequence window and skipped the stages, which both lost C's
+    // multi-window hits and left pos_past_msv/bias/vit at 0.)
+    if windows.is_empty() {
         return Vec::new();
     }
 
@@ -7915,7 +7911,7 @@ fn search_longtarget(
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths_from_om(om);
     #[cfg(not(target_arch = "x86_64"))]
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths(hmm);
-    if !do_max {
+    {
         ssv_longtarget::extend_and_merge_windows_with_scoredata(
             &mut windows,
             ml,
@@ -7932,7 +7928,7 @@ fn search_longtarget(
     // rejects SSV peaks that don't also pass a full MSV p-value threshold.
     // Without this, Rust finds SSV peaks that C rejects at this stage.
     let f1_thresh = f1;
-    if !do_max {
+    {
         let mut msv_filtered: Vec<ssv_longtarget::HmmWindow> = Vec::new();
         for win in &windows {
             let win_start = win.n;
@@ -7986,7 +7982,7 @@ fn search_longtarget(
         hmm.max_length.max((hmm.m * 4) as i32) as usize
     };
     let mut vit_windows: Vec<ssv_longtarget::HmmWindow> = Vec::new();
-    if !do_max {
+    {
         for msv in &windows {
             let msv_start = msv.n;
             let msv_end = (msv.n + msv.length - 1).min(sq.n);
