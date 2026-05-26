@@ -1,6 +1,6 @@
 [package]
 name = "hmmer-pure-rs"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "Pure Rust port of HMMER 3.4 — biological sequence analysis using profile HMMs"
 license = "BSD-3-Clause"
@@ -12,13 +12,19 @@ keywords = ["bioinformatics", "hmm", "hmmer", "sequence-analysis", "profile-hmm"
 categories = ["science", "command-line-utilities"]
 include = [
     "src/**/*.rs",
+    "examples/**/*.rs",
     "tests/**/*.rs",
     "tests/golden/**",
     "test_data/**",
+    "hmmer/easel/esl_scorematrix.c",
     "Cargo.toml",
     "README.md",
     "LICENSE",
-    "!hmmer/**",
+    "!hmmer/LICENSE",
+    "!hmmer/README.md",
+    "!hmmer/easel/LICENSE",
+    "!hmmer/easel/README.md",
+    "!Cargo.toml.orig",
     "!test_data/human_swissprot_2k.fasta",
     "!test_data/human_swissprot_2k.fasta.gz",
     "!test_data/gecco_cluster1_proteins.faa",

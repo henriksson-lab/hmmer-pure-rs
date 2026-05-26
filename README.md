@@ -1,4 +1,4 @@
-# hmmer-pure-rs 0.7.1
+# hmmer-pure-rs 0.7.2
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
@@ -79,7 +79,7 @@ current evidence for this checkout and machine only; rerun
 
 - Artifact directory: `reports/benchmarks/20260526T-speed-rss-bitwise-realdata-after-hmmscan-fix`
 - Command: `THREADS=1 ROUNDS=1 ALLOW_MISMATCH=1 SKIP_BUILD=1 OUT_DIR=reports/benchmarks/20260526T-speed-rss-bitwise-realdata-after-hmmscan-fix scripts/benchmark_real_world.sh`
-- Rust: `target/release/hmmer`, `hmmer-pure-rs 0.7.1`
+- Rust: `target/release/hmmer`, `hmmer-pure-rs 0.7.2`
 - C: bundled `hmmer/src`, HMMER 3.4
 - Host: `Linux beagle 6.8.0-58-generic`, `x86_64`
 - Rust commit: `1ea72254f33d85f947874194cfb996c78621c9ae`
@@ -334,6 +334,12 @@ Currently supported programs:
 - `hmmpgmd` - Run an HMM or protein sequence database daemon with `--master`,
   `--worker`, `--cport`, `--wport`, legacy line queries, and a compatible subset
   of the C client/worker wire framing
+
+## How to Cite
+
+- HMMER software and documentation: http://hmmer.org/
+- Eddy SR. *Accelerated profile HMM searches.* PLoS Comput Biol. 2011;7(10):e1002195.
+  doi:[10.1371/journal.pcbi.1002195](https://doi.org/10.1371/journal.pcbi.1002195)
 
 ## License
 
