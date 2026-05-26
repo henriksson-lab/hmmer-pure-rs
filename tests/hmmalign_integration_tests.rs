@@ -246,23 +246,25 @@ fn hmmalign_globins_matches_exact_first_block_prefix() {
         &test_path("hmmer/tutorial/globins45.fa"),
     );
 
+    // Expected prefix generated from C hmmalign and verified to match Rust output.
+    // margin = 19 because maxname=10 (HBA2_GALCR etc.) + maxgr(PP=2) + 7 = 19.
     let expected_prefix = "\
 # STOCKHOLM 1.0
 
-MYG_ESCGI     .-VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYKelgfqg
-#=GR MYG_ESCGI PP ..69****************************************************************************.99******************************************************************7******
-MYG_HORSE     g--LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYKelgfqg
-#=GR MYG_HORSE PP 8..89***************************************************************************.99******************************************************************7******
-MYG_PROGU     g--LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
-#=GR MYG_PROGU PP 8..89***************************************************************************.99******************************************************************7******
-MYG_SAISC     g--LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYKelgfqg
-#=GR MYG_SAISC PP 8..89***************************************************************************.99******************************************************************7******
-MYG_LYCPI     g--LSDGEWQIVLNIWGKVETDLAGHGQEVLIRLFKNHPETLDKFDKFKHLKTEDEMKGSEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPVKYLEFISDAIIQVLQNKHSGDFHADTEAAMKKALELFRNDIAAKYKelgfqg
-#=GR MYG_LYCPI PP 8..89***************************************************************************.99******************************************************************7******
-MYG_MOUSE     g--LSDGEWQLVLNVWGKVEADLAGHGQEVLIGLFKTHPETLDKFDKFKNLKSEEDMKGSEDLKKHGCTVLTALGTILKK-KGQHAAEIQPLAQSHATKHKIPVKYLEFISEIIIEVLKKRHSGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
-#=GR MYG_MOUSE PP 8..89***************************************************************************.99******************************************************************7******
-MYG_MUSAN     v------DWEKVNSVWSAVESDLTAIGQNILLRLFEQYPESQNHFPKFKNKS-LGELKDTADIKAQADTVLSALGNIVKK-KGSHSQPVKALAATHITTHKIPPHYFTKITTIAVDVLSEMYPSEMNAQVQAAFSGAFKIICSDIEKEYKaanfqg
-#=GR MYG_MUSAN PP 7......89***************************************9877.89*************************.99****************************************************************997******
+MYG_ESCGI          .-VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYKelgfqg
+#=GR MYG_ESCGI  PP ..69****************************************************************************.99******************************************************************7******
+MYG_HORSE          g--LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYKelgfqg
+#=GR MYG_HORSE  PP 8..89***************************************************************************.99******************************************************************7******
+MYG_PROGU          g--LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
+#=GR MYG_PROGU  PP 8..89***************************************************************************.99******************************************************************7******
+MYG_SAISC          g--LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYKelgfqg
+#=GR MYG_SAISC  PP 8..89***************************************************************************.99******************************************************************7******
+MYG_LYCPI          g--LSDGEWQIVLNIWGKVETDLAGHGQEVLIRLFKNHPETLDKFDKFKHLKTEDEMKGSEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPVKYLEFISDAIIQVLQNKHSGDFHADTEAAMKKALELFRNDIAAKYKelgfqg
+#=GR MYG_LYCPI  PP 8..89***************************************************************************.99******************************************************************7******
+MYG_MOUSE          g--LSDGEWQLVLNVWGKVEADLAGHGQEVLIGLFKTHPETLDKFDKFKNLKSEEDMKGSEDLKKHGCTVLTALGTILKK-KGQHAAEIQPLAQSHATKHKIPVKYLEFISEIIIEVLKKRHSGDFGADAQGAMSKALELFRNDIAAKYKelgfqg
+#=GR MYG_MOUSE  PP 8..89***************************************************************************.99******************************************************************7******
+MYG_MUSAN          v------DWEKVNSVWSAVESDLTAIGQNILLRLFEQYPESQNHFPKFKNKS-LGELKDTADIKAQADTVLSALGNIVKK-KGSHSQPVKALAATHITTHKIPPHYFTKITTIAVDVLSEMYPSEMNAQVQAAFSGAFKIICSDIEKEYKaanfqg
+#=GR MYG_MUSAN  PP 7......89***************************************9877.89*************************.99****************************************************************997******
 ";
 
     assert!(output.starts_with(expected_prefix));
@@ -276,16 +278,18 @@ fn hmmalign_trim_matches_exact_first_block_prefix() {
         &["--trim"],
     );
 
+    // Expected prefix generated from C hmmalign and verified to match Rust output.
+    // margin = 19 because maxname=10 + maxgr(PP=2) + 7 = 19.
     let expected_prefix = "\
 # STOCKHOLM 1.0
 
-MYG_ESCGI     -VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYK
-#=GR MYG_ESCGI PP .69****************************************************************************.99******************************************************************7
-MYG_HORSE     --LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYK
-#=GR MYG_HORSE PP ..89***************************************************************************.99******************************************************************7
-MYG_PROGU     --LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYK
-#=GR MYG_PROGU PP ..89***************************************************************************.99******************************************************************7
-MYG_SAISC     --LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYK
+MYG_ESCGI          -VLSDAEWQLVLNIWAKVEADVAGHGQDILIRLFKGHPETLEKFDKFKHLKTEAEMKASEDLKKHGNTVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSRHPGDFGADAQAAMNKALELFRKDIAAKYK
+#=GR MYG_ESCGI  PP .69****************************************************************************.99******************************************************************7
+MYG_HORSE          --LSDGEWQQVLNVWGKVEADIAGHGQEVLIRLFTGHPETLEKFDKFKHLKTEAEMKASEDLKKHGTVVLTALGGILKK-KGHHEAELKPLAQSHATKHKIPIKYLEFISDAIIHVLHSKHPGNFGADAQGAMTKALELFRNDIAAKYK
+#=GR MYG_HORSE  PP ..89***************************************************************************.99******************************************************************7
+MYG_PROGU          --LSDGEWQLVLNVWGKVEGDLSGHGQEVLIRLFKGHPETLEKFDKFKHLKAEDEMRASEELKKHGTTVLTALGGILKK-KGQHAAELAPLAQSHATKHKIPVKYLEFISEAIIQVLQSKHPGDFGADAQGAMSKALELFRNDIAAKYK
+#=GR MYG_PROGU  PP ..89***************************************************************************.99******************************************************************7
+MYG_SAISC          --LSDGEWQLVLNIWGKVEADIPSHGQEVLISLFKGHPETLEKFDKFKHLKSEDEMKASEELKKHGTTVLTALGGILKK-KGQHEAELKPLAQSHATKHKIPVKYLELISDAIVHVLQKKHPGDFGADAQGAMKKALELFRNDMAAKYK
 ";
 
     assert!(output.starts_with(expected_prefix));
@@ -545,23 +549,25 @@ fn hmmalign_mapali_custom_built_simple_case_matches_exact_stockholm_output() {
         &["--mapali", msafile.to_str().unwrap()],
     );
 
+    // Expected output generated from C hmmalign and verified to match Rust output.
+    // maxname=4 (test/seq0/...), margin=13 (maxgc+6=13 dominates).
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-seq1          ACDEFGHIKLMNPQRSTVWY
-seq2          ACDEFGHIKLMNPQRSTVWY
-seq3          ACDEFGHIKLMNPQRSTVWY
-seq4          ACDEFGHIKLMNPQRSTVWY
-seq5          ACDEFGHIKLMNPQRSTVWY
-seq6          ACDEFGHIKLMNPQRSTVWY
-seq7          ACDEFGHIKLMNPQRSTVWY
-seq8          ACDEFGHIKLMNPQRSTVWY
-seq9          ACDEFGHIKLMNPQRSTVWY
-seq0          ACDEFGHIKLMNPQRSTVWY
-test          ACDEFGHIKLMNPQRSTVWY
-#=GR test PP  9*******************
-#=GC PP_cons  9*******************
-#=GC RF       xxxxxxxxxxxxxxxxxxxx
+seq1         ACDEFGHIKLMNPQRSTVWY
+seq2         ACDEFGHIKLMNPQRSTVWY
+seq3         ACDEFGHIKLMNPQRSTVWY
+seq4         ACDEFGHIKLMNPQRSTVWY
+seq5         ACDEFGHIKLMNPQRSTVWY
+seq6         ACDEFGHIKLMNPQRSTVWY
+seq7         ACDEFGHIKLMNPQRSTVWY
+seq8         ACDEFGHIKLMNPQRSTVWY
+seq9         ACDEFGHIKLMNPQRSTVWY
+seq0         ACDEFGHIKLMNPQRSTVWY
+test         ACDEFGHIKLMNPQRSTVWY
+#=GR test PP 9*******************
+#=GC PP_cons 9*******************
+#=GC RF      xxxxxxxxxxxxxxxxxxxx
 //
 ";
 
@@ -752,21 +758,23 @@ fn hmmalign_mapali_custom_built_fragment_case_matches_exact_output() {
         &["--mapali", msafile.to_str().unwrap()],
     );
 
+    // Expected output generated from C hmmalign and verified to match Rust output.
+    // maxname=4 (test), margin=13 (maxgc+6=13 dominates; maxname+maxgr+7=13, not strictly >13).
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-s1            ACDEFG.HIK.LMNPQRSTVWY
-s2            ACDEFG.HIK.LMNPQRSTVWY
-s3            ACDEFG.HIK.LMNPQRSTVWY
-s4            ACDEFG.HIK.LMNPQRSTVWY
-s5            ACDEFG.HIK.LMNPQRSTVWY
-s6            -----G.HIK.LM---------
-s7            ACDEF-aHIK.LMNPQRSTVWY
-s8            ACDEFG.HIKa-MNPQRSTVWY
-test          -CDEFG.HIK.LMNPQRSTVW-
-#=GR test PP  .*****.***.**********.
-#=GC PP_cons  .*****.***.**********.
-#=GC RF       xxxxxx.xxx.xxxxxxxxxxx
+s1           ACDEFG.HIK.LMNPQRSTVWY
+s2           ACDEFG.HIK.LMNPQRSTVWY
+s3           ACDEFG.HIK.LMNPQRSTVWY
+s4           ACDEFG.HIK.LMNPQRSTVWY
+s5           ACDEFG.HIK.LMNPQRSTVWY
+s6           -----G.HIK.LM---------
+s7           ACDEF-aHIK.LMNPQRSTVWY
+s8           ACDEFG.HIKa-MNPQRSTVWY
+test         -CDEFG.HIK.LMNPQRSTVW-
+#=GR test PP .*****.***.**********.
+#=GC PP_cons .*****.***.**********.
+#=GC RF      xxxxxx.xxx.xxxxxxxxxxx
 //
 ";
 
@@ -848,15 +856,17 @@ fn hmmalign_mapali_rebuilt_ecori_matches_exact_stockholm_output() {
         &["--mapali", &test_path("hmmer/testsuite/ecori.sto")],
     );
 
+    // Expected output generated from C hmmalign and verified to match Rust output.
+    // maxname=11 (ecori_query), margin=20 (maxname+maxgr+7 = 11+2+7 = 20 dominates).
     let expected_stdout = "\
 # STOCKHOLM 1.0
 
-seq1          GAATTC
-seq2          GAATTC
-ecori_query   GAATTC
+seq1                GAATTC
+seq2                GAATTC
+ecori_query         GAATTC
 #=GR ecori_query PP 79**97
-#=GC PP_cons  79**97
-#=GC RF       xxxxxx
+#=GC PP_cons        79**97
+#=GC RF             xxxxxx
 //
 ";
 

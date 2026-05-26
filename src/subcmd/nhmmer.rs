@@ -3447,6 +3447,38 @@ fn fm_seed_candidate_windows(
     )
 }
 
+// APPROXIMATION NOTE vs C p7_SSVFM_longlarget (hmmer/src/fm_ssv.c):
+//
+// C's exact pipeline is a single trie traversal over the FM index
+// (FM_getSeeds -> FM_Recurse) that scores SSV diagonals *directly* over FM
+// intervals using ssvdata->ssv_scores_f, prunes with the full FM_DP_PAIR state
+// (max_score, score_peak_len, consec_pos, consec_consensus, opt_ext_fwd/rev
+// look-ahead), then: merge raw short seeds (FM_mergeSeeds) -> extend each
+// merged seed (FM_extendSeed) -> keep diagonals whose extended score >=
+// sc_thresh (the F1/gumbel window threshold).
+//
+// This Rust path is a faithful *seed-then-rescore approximation*: it enumerates
+// candidate seed strings (consensus + score-threshold tries below, with pruning
+// that mirrors FM_Recurse's state), locates them in the FM index, extends each
+// seed (fm_extend_seed_diagonal mirrors FM_extendSeed), merges on the diagonal
+// (fm_merge_seed_windows mirrors FM_mergeSeeds), and emits the surviving spans
+// as candidate windows. The real SSV/MSV/Viterbi/Forward scoring then re-runs
+// downstream in search_longtarget, so the FM path only needs to *locate*
+// windows, not produce final scores.
+//
+// Two ordering/scoring differences from C remain and would require a dedicated
+// SIMD SSV-over-FM kernel (e.g. a new src/simd/fm_ssv module) to close exactly,
+// which is out of scope for this file:
+//   1. C merges raw short seeds and extends *after* merging; here each seed is
+//      extended before merge and merged spans are re-scored with a flat LOD sum
+//      rather than C's best-clipped-sub-diagonal re-extension. Because the
+//      window coordinates are re-extended/re-merged by the downstream SSV stage
+//      and the final score is recomputed there, this only perturbs which
+//      candidate locations are emitted, not the final reported hit coordinates.
+//   2. The FM seed score here gates on >0 bits (plus a boundary-LOD escape)
+//      instead of C's exact F1-derived sc_thresh; the F1 threshold is instead
+//      applied later by the per-window MSV gate in search_longtarget. Net effect
+//      is at most extra candidate windows that the downstream MSV gate discards.
 fn fm_seed_candidate_windows_with_config(
     target_db: &NhmmerTargetDb,
     seq_idx: usize,
@@ -3927,7 +3959,12 @@ fn fm_extend_seed_diagonal(
     }
 
     let extend = 10usize.max(ssv_length.saturating_sub(seed_len));
-    let mut model_start = seed_model_start.saturating_sub(extend).max(1);
+    // C FM_extendSeed (fm_ssv.c:655): model_start = max(1, diag->k - extend + 1),
+    // where diag->k is the model position at the *start* of the seed. The "+ 1"
+    // matters once the seed sits more than `extend` positions into the model;
+    // without it the Rust extension reached one model node further upstream than
+    // C, shifting the clipped best sub-diagonal coordinates and score.
+    let mut model_start = (seed_model_start + 1).saturating_sub(extend).max(1);
     let mut model_end = (seed_model_start + seed_len + extend - 1).min(hmm.m);
     let mut target_start = seq_seed_start0 as isize - (seed_model_start - model_start) as isize;
     let mut target_end = seq_seed_start0 as isize + (model_end - seed_model_start) as isize;

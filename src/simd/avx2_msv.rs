@@ -190,6 +190,76 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
+    /// Verifies the in-loop cross-lane byte up-shift is a true whole-vector shift:
+    /// `[v0..v31] -> [0, v0..v30]` (v31 dropped, v15 carried across the lane boundary).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_avx2_msv_cross_lane_shift() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        unsafe fn shift(v: __m256i) -> __m256i {
+            let perm = _mm256_permute2x128_si256::<0x08>(v, v);
+            _mm256_alignr_epi8::<15>(v, perm)
+        }
+        unsafe {
+            let mut input = [0u8; 32];
+            for (z, b) in input.iter_mut().enumerate() {
+                *b = z as u8;
+            }
+            let v = _mm256_loadu_si256(input.as_ptr() as *const __m256i);
+            let shifted = shift(v);
+            let mut out = [0u8; 32];
+            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, shifted);
+            let mut expect = [0u8; 32];
+            for z in 1..32 {
+                expect[z] = (z - 1) as u8; // result[z] = v[z-1]; result[0] = 0
+            }
+            assert_eq!(out, expect);
+        }
+    }
+
+    /// Cross-checks the AVX2 MSV filter against the SSE2 reference within 1e-3.
+    #[test]
+    fn test_avx2_msv_matches_sse() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let abc = Alphabet::new(hmm.abc_type);
+        let bg = Bg::new(&abc);
+        let mut gm = Profile::new(hmm.m, &abc);
+        profile_config(&hmm, &bg, &mut gm, 400, P7_LOCAL);
+        let om = crate::simd::oprofile::OProfile::convert(&gm);
+        let om_avx2 = OProfileAvx2::from_oprofile(&om);
+        let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY");
+        let l = dsq.len() - 2;
+        // Compare the full MSV DP directly (bypass the SSV shortcut) so we exercise
+        // the AVX2 striped recurrence and its cross-lane shift.
+        let mut scratch = vec![unsafe { _mm_setzero_si128() }; 1];
+        let sse = match unsafe {
+            crate::simd::msv_filter::msv_filter_dp_only(&dsq, l, &om, &mut scratch)
+        } {
+            crate::simd::msv_filter::MsvResult::Ok(sc) => sc,
+            crate::simd::msv_filter::MsvResult::Overflow => return,
+        };
+        let avx = match unsafe { avx2_msv_filter(&dsq, l, &om_avx2) } {
+            Avx2MsvResult::Ok(sc) => sc,
+            Avx2MsvResult::Overflow => return,
+        };
+        assert!(
+            (sse - avx).abs() < 1.0e-3,
+            "SSE MSV {sse} and AVX2 MSV {avx} differ"
+        );
+    }
+
     /// Smoke test: AVX2 MSV filter returns a finite score (or overflow) on a small model.
     #[test]
     fn test_avx2_msv_basic() {

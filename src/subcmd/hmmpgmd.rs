@@ -148,7 +148,7 @@ enum ClientQuery {
     Hmm(Hmm),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DbRange {
     start: usize,
     end: usize,
@@ -1258,8 +1258,8 @@ fn worker_sharded_requests(
         };
     }
 
-    let requested_ranges =
-        command
+    let requested_ranges = coalesce_db_ranges(
+        &command
             .seqdb_ranges
             .clone()
             .unwrap_or_else(|| match usize::try_from(total_nseqs) {
@@ -1268,7 +1268,8 @@ fn worker_sharded_requests(
                     start: 1,
                     end: total,
                 }],
-            });
+            }),
+    );
     if matches!(command.query, ClientQuery::Hmm(_)) && !db_ranges_are_contiguous(&requested_ranges)
     {
         return vec![WorkerRequest::ascii(HMMD_CMD_SEARCH, request)];
@@ -1349,6 +1350,44 @@ fn db_ranges_are_contiguous(ranges: &[DbRange]) -> bool {
     ranges
         .windows(2)
         .all(|window| window[0].end.saturating_add(1) == window[1].start)
+}
+
+// Coalesce a list of (possibly overlapping or unsorted) `--seqdb_ranges` into a
+// sorted set of disjoint ranges that together cover exactly the distinct target
+// indices the user asked for.
+//
+// FAITHFULNESS TO C: the C hmmpgmd master (`hmmdmstr.c` lines 346-385) never
+// assigns the same target to two workers. It walks the database by *physical
+// position* with a monotonically advancing `inx`, testing each position once via
+// `hmmpgmd_IsWithinRanges`, and hands each position to exactly one worker
+// (`inx += worker->srch_cnt`). The sharded master (`hmmdmstr_shard.c`) likewise
+// gives each worker a disjoint modulo-`num_shards` partition. In both variants
+// every target is scored exactly once, so `forward_results()` only sorts and runs
+// `p7_tophits_Threshold` — it does NOT run `p7_tophits_RemoveDuplicates` (that
+// primitive is exclusive to nhmmer/nhmmscan's overlapping-window pipeline). There
+// is therefore no "overlapping shard" hit-dedup scheme in C hmmpgmd to reconstruct.
+//
+// The only way the Rust master could produce overlapping shards is by slicing a
+// user-supplied overlapping range string (e.g. `1..5,3..8`) directly. Coalescing
+// here reproduces C's "visit each index once" semantics up front, so the existing
+// exact, byte-identical worker-payload merge stays correct: each surviving target
+// is emitted by exactly one worker and the concatenated hit lists need no dedup.
+fn coalesce_db_ranges(ranges: &[DbRange]) -> Vec<DbRange> {
+    let mut sorted: Vec<DbRange> = ranges.iter().copied().filter(|r| r.end >= r.start).collect();
+    sorted.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+    let mut out: Vec<DbRange> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        match out.last_mut() {
+            // Merge when the next range overlaps or is directly adjacent to the
+            // current accumulated range (adjacent so 1..3,4..6 collapses to 1..6,
+            // matching one contiguous monotonic walk in C).
+            Some(last) if range.start <= last.end.saturating_add(1) => {
+                last.end = last.end.max(range.end);
+            }
+            _ => out.push(range),
+        }
+    }
+    out
 }
 
 fn count_db_ranges(ranges: &[DbRange]) -> usize {
@@ -1780,9 +1819,20 @@ fn shutdown_worker_connection(stream: &mut TcpStream) -> std::io::Result<()> {
 // from the master's totals plus summed worker filter counts; this file does not
 // reconstruct a P7_PIPELINE on the master to re-run Threshold, because the
 // pipeline thresholds object is per-query and not part of the serialized wire
-// payload. This is faithful for the non-overlapping shard scheme used here; an
-// overlapping/duplicated-hit scheme would additionally need master-side
-// dedup + a true global Threshold pass.
+// payload. Per-hit reporting/inclusion thresholds are independent given a fixed
+// global Z, so summing per-shard counts equals a single global Threshold pass.
+//
+// NO OVERLAPPING-SHARD DEDUP IS NEEDED: both C hmmpgmd master variants partition
+// the database into DISJOINT pieces — by monotonic physical index range
+// (`hmmdmstr.c` `inx += srch_cnt`) or by modulo shard (`hmmdmstr_shard.c`
+// `my_shard`/`num_shards`). Every target is scored by exactly one worker, so C's
+// `forward_results()` only sorts + Thresholds and never calls
+// `p7_tophits_RemoveDuplicates` (that is solely an nhmmer/nhmmscan within-process
+// concern for overlapping nucleotide windows). The Rust master likewise produces
+// disjoint shards: master-generated ranges advance monotonically, and any
+// user-supplied `--seqdb_ranges` are coalesced into disjoint ranges by
+// `coalesce_db_ranges` before partitioning. Hence the concatenated worker hit
+// lists contain each target once and this merge stays exact without dedup.
 fn merge_worker_payloads(
     partials: &[Vec<u8>],
     total_nmodels: u64,
@@ -3500,6 +3550,112 @@ mod tests {
         assert_eq!(reparsed.hits.len(), 1);
         // Merged hit bytes are byte-identical to the original serialized hit.
         assert_eq!(reparsed.hits[0].bytes, parsed.hits[0].bytes);
+    }
+
+    #[test]
+    fn coalesce_db_ranges_merges_overlapping_and_adjacent() {
+        // Overlapping and adjacent user ranges collapse to the disjoint set of
+        // distinct indices C visits once. 1..5 & 3..8 overlap -> 1..8; 10..12 &
+        // 13..15 are adjacent -> 10..15; unsorted input is normalized.
+        let coalesced = coalesce_db_ranges(&[
+            DbRange { start: 13, end: 15 },
+            DbRange { start: 1, end: 5 },
+            DbRange { start: 3, end: 8 },
+            DbRange { start: 10, end: 12 },
+        ]);
+        assert_eq!(
+            coalesced,
+            vec![DbRange { start: 1, end: 8 }, DbRange { start: 10, end: 15 }]
+        );
+        // Coalesced length is the distinct-index count (8 + 6), not the naive
+        // sum of the raw ranges (5 + 6 + 3 + 3 = 17) which would double-count.
+        assert_eq!(count_db_ranges(&coalesced), 14);
+    }
+
+    #[test]
+    fn overlapping_seqdb_ranges_produce_disjoint_worker_shards() {
+        // A SEQUENCE query (ASCII-sharded) with overlapping user ranges must be
+        // split across workers so that each target index is searched by exactly
+        // one worker, matching C's "visit each physical index once" master.
+        let request = "@--seqdb 1 --seqdb_ranges 1..5,3..8\n>q\nACDEF\n//\n";
+        let command = ClientCommand {
+            db_mode: DbMode::Seq,
+            query: ClientQuery::Sequence {
+                name: "q".to_string(),
+                desc: String::new(),
+                seq: "ACDEF".to_string(),
+            },
+            options: SearchOptions::default(),
+            seqdb_ranges: Some(vec![
+                DbRange { start: 1, end: 5 },
+                DbRange { start: 3, end: 8 },
+            ]),
+            db_slice: None,
+        };
+
+        // Two workers split the coalesced 1..8 (8 distinct targets) into 4 + 4.
+        let requests = worker_sharded_requests(request, &command, 2, 1, 8);
+        assert_eq!(requests.len(), 2);
+
+        // Collect the indices each worker is told to search and assert they form
+        // a disjoint cover of exactly 1..=8 (no index appears in two shards).
+        let mut all_indices = Vec::new();
+        for req in &requests {
+            let body = std::str::from_utf8(&req.body).unwrap();
+            let ranges_str = body
+                .split("--seqdb_ranges")
+                .nth(1)
+                .expect("worker request carries --seqdb_ranges")
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap();
+            for part in ranges_str.split(',') {
+                let (s, e) = part.split_once("..").unwrap();
+                for idx in s.parse::<usize>().unwrap()..=e.parse::<usize>().unwrap() {
+                    all_indices.push(idx);
+                }
+            }
+        }
+        all_indices.sort_unstable();
+        let deduped: Vec<usize> = {
+            let mut d = all_indices.clone();
+            d.dedup();
+            d
+        };
+        assert_eq!(
+            all_indices, deduped,
+            "no target index may be assigned to more than one worker"
+        );
+        assert_eq!(all_indices, (1..=8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn merge_concatenates_disjoint_shard_hit_lists_without_duplication() {
+        // Two workers each return a hit for a distinct target (disjoint shards,
+        // as the master guarantees). The master merge must contain both hits,
+        // each exactly once, sorted — no dedup pass drops or double-counts them.
+        // sortkey is lnP-style (lower = more significant = sorted first), matching
+        // Pipeline::hit_sortkey and the merge's ascending compare_serialized_hits.
+        let mut a = sample_search_hit_with_domains();
+        a.name = "targetA".to_string();
+        a.seq_name = "targetA".to_string();
+        a.sortkey = -50.0;
+        let mut b = sample_search_hit_with_domains();
+        b.name = "targetB".to_string();
+        b.seq_name = "targetB".to_string();
+        b.sortkey = -40.0;
+
+        let payload_a = serialize_c_search_payload(1, 8, &mut vec![a]);
+        let payload_b = serialize_c_search_payload(1, 8, &mut vec![b]);
+
+        let merged =
+            merge_worker_payloads(&[payload_a, payload_b], 1, 8).expect("merge must succeed");
+        let reparsed = parse_worker_payload(&merged).expect("merged payload must parse");
+        assert_eq!(reparsed.hits.len(), 2);
+        let names: Vec<&str> = reparsed.hits.iter().map(|h| h.name.as_str()).collect();
+        // Ascending sortkey: targetA (-50) is more significant, comes first.
+        assert_eq!(names, vec!["targetA", "targetB"]);
     }
 
     #[test]

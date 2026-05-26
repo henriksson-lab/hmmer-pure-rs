@@ -4835,7 +4835,12 @@ fn makehmmerdb_accepts_c_style_output_positional() {
     std::fs::write(&seq, ">s1\nACGTACGT\n>s2\nTTTT\n").unwrap();
 
     let output = Command::new(hmmer())
-        .args(["makehmmerdb", seq.to_str().unwrap(), db.to_str().unwrap()])
+        .args([
+            "makehmmerdb",
+            "--dna",
+            seq.to_str().unwrap(),
+            db.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -4862,6 +4867,7 @@ fn makehmmerdb_cstream_keeps_native_c_stream_top_level() {
     let output = Command::new(hmmer())
         .args([
             "makehmmerdb",
+            "--dna",
             "--cstream",
             "--fwd_only",
             seq.to_str().unwrap(),
@@ -4909,6 +4915,7 @@ fn makehmmerdb_container_preserves_metadata_and_ambiguity_ranges() {
     let output = Command::new(hmmer())
         .args([
             "makehmmerdb",
+            "--dna",
             "--container",
             seq.to_str().unwrap(),
             db.to_str().unwrap(),
@@ -4952,7 +4959,9 @@ fn makehmmerdb_container_preserves_metadata_and_ambiguity_ranges() {
     assert_eq!(c_meta.sequences[0].length, 7);
     assert_eq!(c_meta.sequences[0].name, "s1");
     assert_eq!(c_meta.sequences[0].acc, "");
-    assert_eq!(c_meta.sequences[0].source, "");
+    // C makehmmerdb sets source = name for the windowed (DNA/RNA) read path
+    // (verified against hmmer/src/makehmmerdb on this exact input).
+    assert_eq!(c_meta.sequences[0].source, "s1");
     assert_eq!(c_meta.sequences[0].desc, "first description");
     assert_eq!(c_meta.sequences[1].target_id, 1);
     assert_eq!(c_meta.sequences[1].target_start, 1);
@@ -4988,6 +4997,7 @@ fn makehmmerdb_fwd_only_suppresses_reverse_strand_index_records() {
     let output = Command::new(hmmer())
         .args([
             "makehmmerdb",
+            "--dna",
             "--container",
             seq.to_str().unwrap(),
             default_db.to_str().unwrap(),
@@ -5004,6 +5014,7 @@ fn makehmmerdb_fwd_only_suppresses_reverse_strand_index_records() {
     let output = Command::new(hmmer())
         .args([
             "makehmmerdb",
+            "--dna",
             "--container",
             "--fwd_only",
             seq.to_str().unwrap(),
@@ -5109,6 +5120,7 @@ fn makehmmerdb_accepts_stdin_informat_and_tuning_flags() {
     let output = run_with_stdin(
         &[
             "makehmmerdb",
+            "--dna",
             "--informat",
             "fasta",
             "-",

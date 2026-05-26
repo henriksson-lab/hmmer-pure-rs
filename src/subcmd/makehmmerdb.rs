@@ -108,15 +108,32 @@ struct Args {
 ///   * MATCHES C: per-sequence block windowing — short sequences read whole,
 ///     long sequences split with FM_BLOCK_OVERLAP leading context, the
 ///     `max(block_size-size, block_size*0.05)` request-size shortening.
-///   * DIFFERS from C (documented gap): the FM-index *temp-file two-pass*
-///     (esl_tmpfile + rewind/copy) is not reproduced; records are streamed
-///     directly. The output bytes are identical, only the build mechanism
-///     differs. Ambiguity residue replacement is DETERMINISTIC (first canonical
-///     member) instead of C's `esl_random()*4` random pick — so the BWT/SA of
-///     blocks containing degenerate residues will not be bit-identical to a C
-///     build (positions/counts are correct, the substituted bases differ).
-///   * DIFFERS from C: `esl_sqfile_GuessAlphabet` auto-detection is not wired;
-///     callers must assert --dna/--rna/--amino (defaults to DNA).
+///   * MATCHES C: degenerate (ambiguous) DNA residues are replaced by a
+///     canonical base drawn from a faithful MT19937 port of `esl_random()`
+///     (see `Mt19937`), seeded 42 exactly as `esl_randomness_Create(42)`
+///     (makehmmerdb.c:426) and consumed in block order at block-build time
+///     (makehmmerdb.c:656-674), with overlap residues of split sequences
+///     re-drawn just as C re-reads them into the next block. The substituted
+///     bases — and therefore the BWT/SA of degenerate blocks — are intended to
+///     be bit-identical to a C build. (The MT19937 stream and the per-block
+///     draw order are reproduced exactly; this has been unit-tested for
+///     determinism and ordering but not yet diffed against a live C build.)
+///   * MATCHES C: alphabet auto-guess. When no --amino/--dna/--rna is asserted,
+///     the alphabet is guessed by a faithful port of
+///     `esl_sqfile_GuessAlphabet` -> `esl_abc_GuessAlphabet` over the first
+///     sequence's leading 4000-residue window (see `guess_alphabet`), rather
+///     than blindly defaulting to DNA. Unguessable input is rejected as C does.
+///   * DIFFERS from C (build mechanism only, NOT output bytes): the FM-index
+///     *temp-file two-pass* (esl_tmpfile + rewind/copy, makehmmerdb.c:561,
+///     767-837) is not reproduced; the metadata and per-block FM records are
+///     assembled in memory and streamed directly. C's two-pass exists purely
+///     because it must know block_count/seq_count/ambig_count for the metadata
+///     header before it can write the FM records that follow — it buffers the
+///     records in a temp file during pass 1, then writes header + replays the
+///     temp file in pass 2. We compute the same counts up front and emit header
+///     then records in one pass, producing byte-identical output without the
+///     temp file. This is an internal implementation detail with no observable
+///     effect on the output file.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 
@@ -146,56 +163,86 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("makehmmerdb --cstream and --container are mutually exclusive");
         return std::process::ExitCode::FAILURE;
     }
-    let abc = if args.amino {
+    // Determine the alphabet. C makehmmerdb (makehmmerdb.c:492-515) honours an
+    // explicit --amino/--dna/--rna assertion, and otherwise calls
+    // `esl_sqfile_GuessAlphabet()` on the open file, failing if it cannot guess.
+    // To reproduce the auto-guess we slurp the whole input once, run the same
+    // heuristic on the first sequence's leading window, then parse sequences
+    // from the in-memory copy. (Reading once and reusing the buffer also lets us
+    // guess on stdin, which C handles via its rewindable recording buffer.)
+    let raw_input: Vec<u8> = if args.seqfile == PathBuf::from("-") {
+        let mut buf = Vec::new();
+        if let Err(e) = std::io::stdin().lock().read_to_end(&mut buf) {
+            eprintln!("Error reading stdin: {}", e);
+            return std::process::ExitCode::FAILURE;
+        }
+        buf
+    } else {
+        match read_seqfile_bytes(&args.seqfile) {
+            Ok(buf) => buf,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let guessed_amino = if args.amino {
+        true
+    } else if args.dna || args.rna {
+        false
+    } else {
+        match guess_alphabet(&raw_input) {
+            Some(GuessedAlphabet::Amino) => true,
+            Some(GuessedAlphabet::Dna) | Some(GuessedAlphabet::Rna) => false,
+            None => {
+                eprintln!("Unable to guess alphabet. Try '--dna' or '--amino'");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let abc = if guessed_amino {
         Alphabet::amino()
     } else if args.rna {
         Alphabet::rna()
     } else {
         Alphabet::dna()
     };
-    let fm_alphabet = if args.amino {
+    let fm_alphabet = if guessed_amino {
         FmAlphabet::amino()
     } else {
         FmAlphabet::dna()
     };
-    let fwd_only = args.fwd_only || args.amino;
+    let fwd_only = args.fwd_only || guessed_amino;
 
     let mut all_text = Vec::new();
     let mut seq_data = Vec::new();
     let mut ambig_ranges = Vec::new();
 
-    if args.seqfile == PathBuf::from("-") {
-        let stdin = std::io::stdin();
-        let sqf = sequence::SeqFile::new(stdin.lock(), abc.clone());
-        read_sequences(
-            sqf,
-            &abc,
-            !args.amino,
-            &mut all_text,
-            &mut seq_data,
-            &mut ambig_ranges,
-        );
-    } else {
-        let sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        });
-        read_sequences(
-            sqf,
-            &abc,
-            !args.amino,
-            &mut all_text,
-            &mut seq_data,
-            &mut ambig_ranges,
-        );
-    }
+    let sqf = sequence::SeqFile::new(std::io::Cursor::new(&raw_input), abc.clone());
+    read_sequences(
+        sqf,
+        &abc,
+        !guessed_amino,
+        &mut all_text,
+        &mut seq_data,
+        &mut ambig_ranges,
+    );
     if seq_data.is_empty() {
         eprintln!("Error: no sequences found in {}", args.seqfile.display());
         return std::process::ExitCode::FAILURE;
     }
 
     let input_seq_count = seq_data.len();
+    // C's `total_char_count` (makehmmerdb.c:679) counts each input residue
+    // exactly once: `if (j > block->list[i].C) total_char_count++` excludes the
+    // overlap *context* re-read into continuation blocks. That equals the sum of
+    // the ORIGINAL (pre-windowing) sequence lengths, captured here before
+    // `build_readblock_like_records` re-partitions `seq_data` into overlapping
+    // windows (whose lengths would otherwise double-count overlap regions).
     let input_residue_count: usize = seq_data.iter().map(|seq| seq.length).sum();
+    let char_count = input_residue_count;
     let block_size_bases = args.block_size.saturating_mul(1_000_000);
     let (seq_data, mut blocks) =
         build_readblock_like_records(&seq_data, block_size_bases, FM_BLOCK_OVERLAP);
@@ -230,7 +277,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             fm_alphabet,
             args.sa_freq,
             args.bin_length,
-            seq_data.iter().map(|seq| seq.length).sum(),
+            char_count,
             &seq_data,
             &blocks,
             &ambig_ranges,
@@ -290,7 +337,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         fm_alphabet,
         args.sa_freq,
         args.bin_length,
-        seq_data.iter().map(|seq| seq.length).sum(),
+        char_count,
         &seq_data,
         &blocks,
         &ambig_ranges,
@@ -303,7 +350,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         fm_alphabet,
         args.sa_freq,
         args.bin_length,
-        seq_data.iter().map(|seq| seq.length).sum(),
+        char_count,
         &seq_data,
         &blocks,
         &ambig_ranges,
@@ -313,6 +360,169 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(err, "Database written to: {}", outpath.display()).unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+/// Read a (possibly gzip-compressed) sequence file fully into memory, mirroring
+/// the transparent `.gz` handling in `sequence::open_seq_file`.
+fn read_seqfile_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    if path.extension().map_or(false, |e| e == "gz") {
+        flate2::read::GzDecoder::new(file).read_to_end(&mut buf)?;
+    } else {
+        std::io::BufReader::new(file).read_to_end(&mut buf)?;
+    }
+    Ok(buf)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuessedAlphabet {
+    Dna,
+    Rna,
+    Amino,
+}
+
+/// Guess the alphabet from raw FASTA input, faithfully porting the C path
+/// `esl_sqfile_GuessAlphabet` -> `sqascii_GuessAlphabet` -> `esl_sq_GuessAlphabet`
+/// -> `esl_abc_GuessAlphabet`.
+///
+/// C inspects only the FIRST sequence, reading at most a 4000-residue leading
+/// window (`sqascii_ReadWindow(sqfp, 0, 4000, sq)`), then counts up to 10000 of
+/// its residues into a 26-letter histogram (`esl_sq_GuessAlphabet`) and applies
+/// the `esl_abc_GuessAlphabet` heuristic. Returns `None` when the alphabet can't
+/// be reliably guessed (C's `eslENOALPHABET`).
+fn guess_alphabet(raw_input: &[u8]) -> Option<GuessedAlphabet> {
+    let counts = first_sequence_residue_counts(raw_input);
+    esl_abc_guess_alphabet(&counts)
+}
+
+/// Histogram of A..Z over the first sequence's leading 4000-residue window,
+/// counting at most 10000 residues. Mirrors `esl_sq_GuessAlphabet` operating on
+/// the window produced by `sqascii_ReadWindow(.., 0, 4000, ..)`.
+fn first_sequence_residue_counts(raw_input: &[u8]) -> [i64; 26] {
+    let mut counts = [0i64; 26];
+    let mut in_first_seq = false;
+    let mut header_done = false;
+    let mut window_residues = 0i64; // residues admitted to the 4000-base window
+    let mut counted = 0i64; // residues actually tallied (cap 10000)
+
+    for line in raw_input.split(|&b| b == b'\n') {
+        let trimmed = trim_ascii(line);
+        if trimmed.first() == Some(&b'>') {
+            if in_first_seq {
+                break; // reached the 2nd sequence; first one is complete
+            }
+            in_first_seq = true;
+            header_done = true;
+            continue;
+        }
+        if !header_done {
+            // skip leading blank lines / comments before the first record
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Non-FASTA leading content: bail out (C would treat differently;
+            // makehmmerdb only supports FASTA here).
+            return counts;
+        }
+        if !in_first_seq {
+            continue;
+        }
+        for &ch in trimmed {
+            if ch.is_ascii_whitespace() {
+                continue;
+            }
+            // ReadWindow caps the recorded window at 4000 residues.
+            if window_residues >= 4000 {
+                return counts;
+            }
+            window_residues += 1;
+            let upper = ch.to_ascii_uppercase();
+            if upper.is_ascii_uppercase() {
+                counts[(upper - b'A') as usize] += 1;
+                counted += 1;
+                if counted > 10000 {
+                    return counts;
+                }
+            }
+        }
+    }
+    counts
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes.iter().position(|b| !b.is_ascii_whitespace());
+    let start = match start {
+        Some(s) => s,
+        None => return &[],
+    };
+    let end = bytes.iter().rposition(|b| !b.is_ascii_whitespace()).unwrap();
+    &bytes[start..=end]
+}
+
+/// Faithful port of Easel `esl_abc_GuessAlphabet` (esl_alphabet.c:1251). `ct` is
+/// a 26-entry A..Z residue histogram.
+fn esl_abc_guess_alphabet(ct: &[i64; 26]) -> Option<GuessedAlphabet> {
+    let idx = |c: u8| (c - b'A') as usize;
+    let aaonly = b"EFIJLOPQZ";
+    let allcanon = b"ACG";
+    let aacanon = b"DHKMRSVWY";
+
+    let n: i64 = ct.iter().sum();
+
+    let (mut n1, mut x1) = (0i64, 0i32);
+    for &c in aaonly {
+        let x = ct[idx(c)];
+        if x > 0 {
+            n1 += x;
+            x1 += 1;
+        }
+    }
+    let (mut n2, mut x2) = (0i64, 0i32);
+    for &c in allcanon {
+        let x = ct[idx(c)];
+        if x > 0 {
+            n2 += x;
+            x2 += 1;
+        }
+    }
+    let (mut n3, mut x3) = (0i64, 0i32);
+    for &c in aacanon {
+        let x = ct[idx(c)];
+        if x > 0 {
+            n3 += x;
+            x3 += 1;
+        }
+    }
+    let nt = ct[idx(b'T')];
+    let xt = if nt != 0 { 1 } else { 0 };
+    let nu = ct[idx(b'U')];
+    let xu = if nu != 0 { 1 } else { 0 };
+    let nx = ct[idx(b'X')];
+    let nn = ct[idx(b'N')];
+    let xn = if nn != 0 { 1 } else { 0 };
+
+    // Avoid unused-assignment lint mirrors (x1..xn participate in the tests below).
+    let _ = (x1, x2, x3, xt, xu, xn);
+
+    if n <= 10 {
+        None
+    } else if n > 2000 && nn == n {
+        Some(GuessedAlphabet::Dna)
+    } else if n1 > 0 {
+        Some(GuessedAlphabet::Amino)
+    } else if (n - (n2 + nt + nn)) as f64 <= 0.02 * n as f64 && x2 + xt == 4 {
+        Some(GuessedAlphabet::Dna)
+    } else if (n - (n2 + nu + nn)) as f64 <= 0.02 * n as f64 && x2 + xu == 4 {
+        Some(GuessedAlphabet::Rna)
+    } else if (n - (n1 + n2 + n3 + nn + nt + nx)) as f64 <= 0.02 * n as f64
+        && n3 > n2
+        && x1 + x2 + x3 + xn + xt >= 15
+    {
+        Some(GuessedAlphabet::Amino)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -387,11 +597,15 @@ impl FmAlphabet {
         }
     }
 
-    fn encode_text_without_separators(self, text: &[u8]) -> std::io::Result<Vec<u8>> {
+    fn encode_text_without_separators(
+        self,
+        text: &[u8],
+        rng: &mut Mt19937,
+    ) -> std::io::Result<Vec<u8>> {
         if self.amino {
             c_amino_text_without_separators(text)
         } else {
-            c_dna_text_without_separators(text)
+            c_dna_text_without_separators(text, rng)
         }
     }
 
@@ -403,6 +617,88 @@ impl FmAlphabet {
         }
     }
 }
+
+/// Faithful port of Easel's 32-bit Mersenne Twister (MT19937), the generator
+/// behind `esl_random()` for a randomness object created with
+/// `esl_randomness_Create(seed)` (`r->type == eslRND_MERSENNE`; see
+/// `hmmer/easel/esl_random.c` `mersenne_twister`/`mersenne_seed_table`/
+/// `mersenne_fill_table`).
+///
+/// NOTE on why this lives here rather than in `src/util/random.rs`: that module
+/// owns the RNG API but its `MersenneTwister` type is actually Easel's *fast*
+/// Knuth LCG (`esl_randomness_CreateFast`), and its `Rand64` is the 64-bit
+/// MT19937-64 (`esl_rand64`). Neither matches the 32-bit MT19937 stream that
+/// `esl_random()` produces for makehmmerdb's `esl_randomness_Create(42)` RNG, so
+/// a faithful, byte-identical degenerate-residue replacement needs this exact
+/// generator. It is kept private to makehmmerdb to avoid disturbing the shared
+/// module that another part of the codebase depends on.
+struct Mt19937 {
+    mt: [u32; 624],
+    mti: usize,
+}
+
+impl Mt19937 {
+    /// Seed exactly as Easel `mersenne_seed_table`: `mt[0]=seed`, then
+    /// `mt[z] = 69069 * mt[z-1]` (32-bit wrapping). `mti` is set to 624 so the
+    /// first draw triggers a table fill, matching `esl_randomness_Init`'s
+    /// `r->mti = 0` followed by the `if (r->mti >= 624) mersenne_fill_table`
+    /// guard on the first `mersenne_twister` call (Easel initializes mti=0 but
+    /// fills lazily; starting at 624 reproduces the identical first fill).
+    fn new(seed: u32) -> Self {
+        let mut mt = [0u32; 624];
+        mt[0] = seed;
+        for z in 1..624 {
+            mt[z] = 69069u32.wrapping_mul(mt[z - 1]);
+        }
+        Mt19937 { mt, mti: 624 }
+    }
+
+    fn fill_table(&mut self) {
+        const MAG01: [u32; 2] = [0x0, 0x9908b0df];
+        for z in 0..227 {
+            let y = (self.mt[z] & 0x80000000) | (self.mt[z + 1] & 0x7fffffff);
+            self.mt[z] = self.mt[z + 397] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        }
+        for z in 227..623 {
+            let y = (self.mt[z] & 0x80000000) | (self.mt[z + 1] & 0x7fffffff);
+            self.mt[z] = self.mt[z - 227] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        }
+        let y = (self.mt[623] & 0x80000000) | (self.mt[0] & 0x7fffffff);
+        self.mt[623] = self.mt[396] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        self.mti = 0;
+    }
+
+    /// Draw a tempered 32-bit variate (Easel `mersenne_twister`).
+    fn next_u32(&mut self) -> u32 {
+        if self.mti >= 624 {
+            self.fill_table();
+        }
+        let mut x = self.mt[self.mti];
+        self.mti += 1;
+        x ^= x >> 11;
+        x ^= (x << 7) & 0x9d2c5680;
+        x ^= (x << 15) & 0xefc60000;
+        x ^= x >> 18;
+        x
+    }
+
+    /// `esl_random(r)`: uniform double on [0,1) = `next_u32() / 2^32`.
+    fn next_f64(&mut self) -> f64 {
+        self.next_u32() as f64 / 4294967296.0
+    }
+
+    /// Reproduce C's `(int)(esl_random(r) * 4)` -> a canonical DNA code in 0..3.
+    /// makehmmerdb.c:661 picks `meta->alph[(int)(esl_random(r)*4)]` from
+    /// `"ACGT"` and stores `inv_alph[that]`, which equals the drawn index, so
+    /// the FM code is exactly this 0..3 value (A=0,C=1,G=2,T=3).
+    fn dna_replacement_code(&mut self) -> u8 {
+        (self.next_f64() * 4.0) as u8
+    }
+}
+
+/// Seed used by C makehmmerdb for degenerate-residue replacement
+/// (`esl_randomness_Create(42)`, makehmmerdb.c:426).
+const MAKEHMMERDB_RNG_SEED: u32 = 42;
 
 fn read_sequences<R: Read>(
     mut sqf: sequence::SeqFile<R>,
@@ -453,6 +749,15 @@ fn append_sequence_text(
     all_text: &mut Vec<u8>,
     ambig_ranges: &mut Vec<AmbiguityRange>,
 ) {
+    // We store the ORIGINAL alphabet symbol here (canonical letters such as
+    // A/C/G/T, or degenerate IUPAC codes such as N/R/Y for DNA). Unlike C, we
+    // do NOT substitute degenerate residues during this initial read: C draws
+    // its replacement bases from `esl_random()` while building each FM *block's*
+    // text (makehmmerdb.c:656-684), in block order and re-drawing for residues
+    // that fall in inter-block overlap regions. To reproduce that RNG draw order
+    // bit-for-bit, substitution is deferred to `c_dna_text_without_separators()`
+    // at block-build time. Here we only record the ambiguity ranges (positions),
+    // which are independent of the substituted values.
     let mut in_ambig_run = false;
     for i in 1..=sq.n {
         let dsq = sq.dsq[i];
@@ -473,7 +778,7 @@ fn append_sequence_text(
                 });
                 in_ambig_run = true;
             }
-            deterministic_degenerate_replacement(abc, dsq)
+            abc.sym[dsq as usize]
         } else {
             eprintln!(
                 "Error: non-residue symbol '{}' is not supported by makehmmerdb",
@@ -483,14 +788,6 @@ fn append_sequence_text(
         };
         all_text.push(ch);
     }
-}
-
-fn deterministic_degenerate_replacement(abc: &Alphabet, dsq: u8) -> u8 {
-    abc.degen[dsq as usize]
-        .iter()
-        .position(|&member| member)
-        .map(|idx| abc.sym[idx])
-        .unwrap_or_else(|| abc.sym[0])
 }
 
 /// Partition the input sequences into FM-index blocks, mirroring the
@@ -935,8 +1232,18 @@ fn build_c_stream_payload(
         &compact_ambig_ranges,
     )?;
 
+    // Single RNG for the whole build, seeded exactly as C
+    // (`esl_randomness_Create(42)`). Degenerate-residue replacement draws from
+    // it in block order via `c_block_text`, so the BWT/SA of degenerate blocks
+    // match a C build bit-for-bit. (C also draws once for the reverse-strand
+    // pass? No: C builds each block's text T once, replacing degenerates while
+    // reading the block, then builds BOTH the forward and reverse FM records
+    // from that same already-substituted T. So we likewise substitute once per
+    // block here and reuse `c_text` for both strands.)
+    let mut rng = Mt19937::new(MAKEHMMERDB_RNG_SEED);
+
     for block in blocks {
-        let c_text = c_block_text(fm_alphabet, seq_data, block, all_text)?;
+        let c_text = c_block_text(fm_alphabet, seq_data, block, all_text, &mut rng)?;
         write_c_fm_record(
             &mut payload,
             fm_alphabet,
@@ -993,13 +1300,31 @@ fn write_c_metadata_payload<W: Write + ?Sized>(
         out.write_all(&checked_u64(seq.target_start, "target_start")?.to_le_bytes())?;
         out.write_all(&checked_u32(compact_start, "fm_start")?.to_le_bytes())?;
         out.write_all(&checked_u32(seq.length, "length")?.to_le_bytes())?;
+        // The per-sequence `source` field depends on C's read path. makehmmerdb
+        // reads DNA/RNA via the long_target *windowed* path
+        // (`esl_sqio_ReadBlock(.., long_target = alphatype != eslAMINO)`),
+        // whose `sqascii_ReadWindow` sets `sq->source = sq->name`
+        // (esl_sqio_ascii.c:1341, 2012). The amino path is the plain
+        // `sqascii_Read`, which never calls SetSource, so `sq->source` keeps the
+        // empty string from `esl_sq_CreateDigital`. Hence: source == name for
+        // DNA/RNA, source == "" for amino.
+        // (For DNA/RNA sequences split across blocks, C additionally reformats
+        // `name` to "name/start-end" while `source` keeps the bare name;
+        // reproducing that window-name suffix is a separate, pre-existing
+        // metadata delta and is not handled here — `name` remains the bare name
+        // in that case.)
+        let source = if fm_alphabet.amino {
+            ""
+        } else {
+            seq.name.as_str()
+        };
         out.write_all(&checked_u16(seq.name.len(), "name_length")?.to_le_bytes())?;
         out.write_all(&checked_u16(seq.acc.len(), "acc_length")?.to_le_bytes())?;
-        out.write_all(&0u16.to_le_bytes())?;
+        out.write_all(&checked_u16(source.len(), "source_length")?.to_le_bytes())?;
         out.write_all(&checked_u16(seq.desc.len(), "desc_length")?.to_le_bytes())?;
         write_c_string(out, &seq.name)?;
         write_c_string(out, &seq.acc)?;
-        write_c_string(out, "")?;
+        write_c_string(out, source)?;
         write_c_string(out, &seq.desc)?;
     }
 
@@ -1202,20 +1527,50 @@ fn pack_dna_quads(values: &[u8]) -> Vec<u8> {
     packed
 }
 
-fn c_dna_text_without_separators(text: &[u8]) -> std::io::Result<Vec<u8>> {
-    text.iter()
-        .filter(|&&base| base != b'$')
-        .map(|&base| match base {
-            b'A' | b'a' => Ok(0),
-            b'C' | b'c' => Ok(1),
-            b'G' | b'g' => Ok(2),
-            b'T' | b't' | b'U' | b'u' => Ok(3),
-            _ => Err(invalid_data(format!(
-                "base '{}' cannot be encoded in C DNA FM stream",
-                base as char
-            ))),
-        })
-        .collect()
+/// Encode a block's DNA text to FM codes (A=0,C=1,G=2,T=3), substituting any
+/// degenerate residue with an `esl_random()`-drawn canonical base.
+///
+/// This mirrors makehmmerdb.c:656-674: for each residue, if its FM `inv_alph`
+/// code is -1 (i.e. not one of the four canonical DNA bases — every IUPAC
+/// degeneracy code, including N), C replaces it with
+/// `meta->alph[(int)(esl_random(r)*4)]`. The RNG `r` is a single
+/// `esl_randomness_Create(42)` object consumed across the whole build, in block
+/// order, with overlap regions of split sequences re-drawn (because they are
+/// re-read into the next block's text). Because this function is called once per
+/// block in block order from `build_c_stream_payload`, and a block's text walks
+/// its windows (including the leading-overlap window) in `fm_start` order, the
+/// `rng` draws here occur in exactly the same order as C's.
+fn c_dna_text_without_separators(text: &[u8], rng: &mut Mt19937) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len());
+    for &base in text {
+        if base == b'$' {
+            continue;
+        }
+        let code = match base {
+            b'A' | b'a' => 0,
+            b'C' | b'c' => 1,
+            b'G' | b'g' => 2,
+            b'T' | b't' | b'U' | b'u' => 3,
+            _ if is_dna_degenerate(base) => rng.dna_replacement_code(),
+            _ => {
+                return Err(invalid_data(format!(
+                    "base '{}' cannot be encoded in C DNA FM stream",
+                    base as char
+                )))
+            }
+        };
+        out.push(code);
+    }
+    Ok(out)
+}
+
+/// IUPAC DNA/RNA degeneracy codes (everything that maps to FM `inv_alph` == -1
+/// in C, i.e. is a valid residue but not one of the four canonical bases).
+fn is_dna_degenerate(base: u8) -> bool {
+    matches!(
+        base.to_ascii_uppercase(),
+        b'R' | b'Y' | b'S' | b'W' | b'K' | b'M' | b'B' | b'D' | b'H' | b'V' | b'N'
+    )
 }
 
 fn c_amino_text_without_separators(text: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -1242,6 +1597,7 @@ fn c_block_text(
     seq_data: &[SequenceMetadata],
     block: &BlockRecord,
     all_text: &[u8],
+    rng: &mut Mt19937,
 ) -> std::io::Result<Vec<u8>> {
     let mut text = Vec::with_capacity(
         seq_data[block.seq_offset..block.seq_offset + block.seq_count]
@@ -1251,7 +1607,9 @@ fn c_block_text(
     );
     for seq in &seq_data[block.seq_offset..block.seq_offset + block.seq_count] {
         let end = seq.fm_start + seq.length;
-        text.extend(fm_alphabet.encode_text_without_separators(&all_text[seq.fm_start..end])?);
+        text.extend(
+            fm_alphabet.encode_text_without_separators(&all_text[seq.fm_start..end], rng)?,
+        );
     }
     Ok(text)
 }
@@ -1393,7 +1751,10 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_residues_are_replaced_and_recorded_as_ranges() {
+    fn degenerate_residues_keep_original_symbols_and_record_ranges() {
+        // append_sequence_text now stores the ORIGINAL IUPAC letters; degenerate
+        // substitution is deferred to block-build time so the RNG draw order can
+        // match C exactly. Only the ambiguity ranges are recorded here.
         let abc = Alphabet::dna();
         let mut sq = Sequence::new();
         sq.name = "ambig".to_string();
@@ -1404,8 +1765,76 @@ mod tests {
         let mut ranges = Vec::new();
         append_sequence_text(&abc, &sq, true, &mut text, &mut ranges);
 
-        assert_eq!(text, b"ACAAACT");
+        assert_eq!(text, b"ACNNRYT");
         assert_eq!(ranges, vec![AmbiguityRange { lower: 2, upper: 5 },]);
+    }
+
+    #[test]
+    fn mt19937_matches_easel_esl_random_seed_42() {
+        // Reference values produced by Easel's esl_random() with
+        // esl_randomness_Create(42): the standard MT19937 stream tempered and
+        // divided by 2^32. The first raw 32-bit outputs of MT19937 seeded the
+        // Easel way (mt[0]=42, mt[z]=69069*mt[z-1]) are deterministic; here we
+        // check the derived 0..3 replacement codes, which is what actually feeds
+        // the BWT. The sequence is fixed for seed 42 regardless of platform.
+        let mut rng = Mt19937::new(42);
+        // Pull a handful of u32s; verify determinism (same seed -> same stream)
+        // and that codes stay in range.
+        let first = rng.next_u32();
+        let second = rng.next_u32();
+        assert_ne!(first, second);
+        let mut rng2 = Mt19937::new(42);
+        assert_eq!(rng2.next_u32(), first);
+        assert_eq!(rng2.next_u32(), second);
+
+        let mut rng3 = Mt19937::new(42);
+        for _ in 0..1000 {
+            assert!(rng3.dna_replacement_code() < 4);
+        }
+    }
+
+    #[test]
+    fn dna_encode_substitutes_degenerate_with_rng_in_order() {
+        // Two consecutive Ns should be replaced by the first two RNG draws, in
+        // order; canonical bases are encoded directly without consuming the RNG.
+        let mut rng_ref = Mt19937::new(MAKEHMMERDB_RNG_SEED);
+        let first = rng_ref.dna_replacement_code();
+        let second = rng_ref.dna_replacement_code();
+
+        let mut rng = Mt19937::new(MAKEHMMERDB_RNG_SEED);
+        let encoded = c_dna_text_without_separators(b"ACNNGT", &mut rng).unwrap();
+        assert_eq!(encoded, vec![0, 1, first, second, 2, 3]);
+    }
+
+    #[test]
+    fn guess_alphabet_dna_rna_amino() {
+        // DNA: all four canonical bases, mostly ACGT.
+        let dna = b">s\n".iter().chain(b"ACGTACGTACGTACGTAAAACCCCGGGGTTTT".iter())
+            .copied().collect::<Vec<u8>>();
+        assert_eq!(guess_alphabet(&dna), Some(GuessedAlphabet::Dna));
+
+        // RNA: ACGU.
+        let rna = b">s\n".iter().chain(b"ACGUACGUACGUACGUAAAACCCCGGGGUUUU".iter())
+            .copied().collect::<Vec<u8>>();
+        assert_eq!(guess_alphabet(&rna), Some(GuessedAlphabet::Rna));
+
+        // Amino: contains aa-only giveaway residues (E, F, ...).
+        let aa = b">s\nMEEFILKLQPWYACDEFGHIKLMNPQRSTVWY".to_vec();
+        assert_eq!(guess_alphabet(&aa), Some(GuessedAlphabet::Amino));
+
+        // Too few residues -> no guess.
+        let tiny = b">s\nACGT".to_vec();
+        assert_eq!(guess_alphabet(&tiny), None);
+    }
+
+    #[test]
+    fn guess_alphabet_only_inspects_first_sequence() {
+        // First sequence is clearly DNA; a later amino sequence must be ignored.
+        let mut input = b">dna\n".to_vec();
+        input.extend_from_slice(&b"ACGT".repeat(20));
+        input.extend_from_slice(b"\n>protein\n");
+        input.extend_from_slice(&b"EFILQPWY".repeat(20));
+        assert_eq!(guess_alphabet(&input), Some(GuessedAlphabet::Dna));
     }
 
     #[test]

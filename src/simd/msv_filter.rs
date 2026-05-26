@@ -52,12 +52,40 @@ pub unsafe fn msv_filter_with_scratch(
     // a definitive result (eslOK score or eslERANGE overflow) we return it
     // directly. Only when SSV returns eslENORESULT do we run the full MSV DP.
     // (msvfilter.c:102-104)
+    //
+    // LANDMINE (see TODO.md "Known Bad Or Neutral Experiments"): many earlier
+    // attempts to add a general SSV pre-filter into this hot MSV path were
+    // REVERTED because carrying SSV code/`sbv` storage here perturbed downstream
+    // exact trace hashes (score_domain_null2, define_domains_summary, pipeline
+    // score probes) or were slower. `ssv_filter_q17` is the *accepted* narrow
+    // shortcut: it is restricted to the reference shape (Q=17, band widths 8/9),
+    // returns NoResult on any unsupported shape, and is tracehash-parity verified.
+    // Do NOT broaden this into a generic SSV port without re-verifying trace parity.
     match super::ssv_filter::ssv_filter_q17(dsq, l, om) {
         super::ssv_filter::SsvResult::Ok(sc) => return MsvResult::Ok(sc),
         super::ssv_filter::SsvResult::Overflow => return MsvResult::Overflow,
         super::ssv_filter::SsvResult::NoResult => {}
     }
 
+    msv_filter_dp_only(dsq, l, om, dp)
+}
+
+/// Runs only the striped MSV dynamic-programming recurrence (C: the body of
+/// `p7_MSVFilter` after the `p7_SSVFilter` shortcut), without the SSV pre-filter.
+///
+/// This is the faithful MSV DP that C falls back to when SSV returns
+/// `eslENORESULT`. It is split out so callers (and AVX2 cross-check tests) can
+/// exercise the DP directly without the SSV short-circuit.
+///
+/// # Safety
+/// Requires SSE2 support.
+#[target_feature(enable = "sse2")]
+pub unsafe fn msv_filter_dp_only(
+    dsq: &[Dsq],
+    l: usize,
+    om: &OProfile,
+    dp: &mut Vec<__m128i>,
+) -> MsvResult {
     let q_count = nqb(om.m);
     let zerov = _mm_setzero_si128();
     dp.resize(q_count, zerov);

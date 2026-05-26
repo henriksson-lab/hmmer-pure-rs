@@ -94,9 +94,12 @@ pub fn fmt_fixed5(val: f64) -> String {
     c_snprintf_double(b"%.5f\0", val)
 }
 
-/// Format a probability field using C's `%7.5f`.
+/// Format a probability field using C's `%8.5f` (width 8, 5 decimals).
+///
+/// Matches `printprob` in `hmmer/src/p7_hmmfile.c` which uses `%*.5f`
+/// with `fieldwidth=8`.
 pub fn fmt_hmm_prob(val: f64) -> String {
-    c_snprintf_double(b"%7.5f\0", val)
+    c_snprintf_double(b"%8.5f\0", val)
 }
 
 /// Format a floating-point value using C's `%8.2f`.

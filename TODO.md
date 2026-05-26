@@ -4,16 +4,13 @@ This file tracks current parity/speed snapshots, preserved invariants, rejected
 experiments, and deferred follow-up ideas. Keep it current when a trace result,
 benchmark, or failed experiment changes the next useful target.
 
-## Translation Audit Status - 2026-05-25
-
-These notes come from the latest parallel C/Rust audit. Preserve evidence for
-active parity/speed claims until each item has regression coverage.
+Preserve evidence for active parity/speed claims until each item has regression
+coverage.
 
 ## Known Remaining Feature Gaps - 2026-05-26
 
-Documented best-effort gaps after the subcommand feature-completeness pass.
-These are functional/parity gaps, not bugs; each is faithful where it can be and
-documented in-code where it diverges.
+These are the current actionable items. They are functional/parity gaps, not
+bugs; each is faithful where it can be and documented in-code where it diverges.
 
 - makehmmerdb: temp-file two-pass build mechanism not reproduced; degenerate-residue
   replacement is deterministic vs C's `esl_random()` (so BWT/SA of degenerate blocks
@@ -23,11 +20,60 @@ documented in-code where it diverges.
 - hmmpgmd: master-side pipeline reconstruction + dedup for an overlapping-hit scheme
   (current non-overlapping shard merge is exact; the overlapping path is the
   remaining distributed gap).
-- dsqdata: synchronous reader vs C's threaded loader; deterministic uniquetag;
-  taxid read-but-not-stored.
+- dsqdata: the on-disk format is now the real Easel 4-file scheme
+  (`.dsqi/.dsqm/.dsqs`, magic `0xc4d3d1b1`, 2-bit/5-bit packing, interoperable
+  with C `esl_dsqdata_*`). Remaining gap is operational only: synchronous reader
+  vs C's threaded loader; deterministic uniquetag; taxid read-but-not-stored.
 - hmmalign: Stockholm/SELEX/PSIBLAST writers emit only the annotation hmmalign
   actually produces (no SS/SA/MM/GF-cutoff lines — which hmmalign never generates
   anyway).
+
+## Audit-Finding Resolution Pass - 2026-05-26
+
+Parallel resolution of the `reports/audit-20260526/` findings (9 High + 17 Med).
+Each finding was re-verified against the C source side-by-side rather than
+blindly re-applied.
+
+Outcome: the vast majority were already fixed in `8057e96 "further audit"`
+(the report `.md` files were kept as documentation). Re-verification confirmed
+faithfulness for H1 (OA-trace PP via `append_with_pp`), H2/H3 (AVX2 cross-lane
+shifts), H4 (`define_domains` no longer fabricates a whole-seq domain), H5 (PB
+weights now port `esl_msaweight_PB_adv` incl. RF/consensus/fragment-span and the
+nseq>50000 sampling path), H6 (ASCII writer width), H7 (`sample_discrete` ==
+`esl_rnd_FChoose`, f64 roll + `/norm`), H8 (calibration always uses quantized
+SSE2/NEON filters; non-SIMD targets `compile_error!` rather than use an
+unfaithful generic fallback), H9 (alidisplay z1/z2 M-only), plus all Med items
+(Viterbi/stochastic traceback order and primitive, pipeline Z handling, rf
+annotation, STATS 3a parsing, SSI basename, dsqdata Easel format, pfamtblout
+ordinal, nhmmer dynamic column widths, RemoveDuplicates `i-1` name compare,
+`--acc` alignment blocks, `best_domain` first-on-tie).
+
+Genuinely new work this pass:
+
+- Fixed an additional AVX2 Viterbi lazy-F outer-loop bug
+  (`src/simd/avx2_vit.rs`): the `do/while(q==Q)` equivalent used an
+  "any-update" flag instead of the `broke`/`q==Q` completion flag, diverging
+  from the verified SSE port and C `vitfilter.c`. Added AVX2-vs-SSE cross-check
+  tests for both MSV and Viterbi full filters and standalone tests for the two
+  cross-lane shift idioms. The AVX2 kernels are not wired into the production
+  pipeline, so this is a correctness fix to dormant code with no trace-parity
+  risk to the default path.
+- Cleaned up the H6 ASCII-writer fix from an indirect `{:>8}` pad workaround to
+  a direct `%8.5f` in `fmt_hmm_prob` (`src/output.rs`) with a simplified
+  `fmt_prob` (`src/hmmfile.rs`); output stays byte-identical to C
+  (` ` + 8-wide field).
+
+Rejected (false trail, do not re-apply):
+
+- Audit 08 suggested computing `p7_FLogsumError`'s `exact` term with f32 ops
+  (`a.exp()` etc.). That is wrong: C's `log()/exp()` are the double-precision
+  libm calls on float operands, so the current Rust
+  (`(c_exp_f64(a) + c_exp_f64(b)).ln() as f32`) is the faithful form. Left as-is.
+
+Verification: `cargo check` and `cargo check --features tracehash` clean;
+`cargo test --lib` 284 passed; `cargo test --test rust_hmmsearch_tests` 35
+passed; `cargo test --manifest-path tracehash/Cargo.toml` 3 passed;
+`git diff --check` clean. C was not traced this pass.
 
 ## Ground Rules
 
@@ -53,12 +99,6 @@ nm hmmer/src/hmmsearch | rg tracehash
 ```
 
 The final `nm` command should print nothing and exit with status 1.
-
-## Live Output Parity TODO - Real-Data Benchmark 2026-05-26
-
-All live real-data parity items from this section are resolved as of
-`reports/benchmarks/20260526T-nhmmer-ssv-fix`, generated with
-`THREADS=1 ROUNDS=1 ALLOW_MISMATCH=1 SKIP_BUILD=1`.
 
 ## Current Reference Case
 
@@ -389,6 +429,14 @@ Do not repeat these without a new reason:
   - Historical note: C domtblout profiling pointed at SSE
     `p7_OptimalAccuracy`; Rust now has the SIMD OA coordinate path. Future OA
     work should be based on a fresh profile, not this older gap statement.
+- Removing canonical-residue scans before the direct full-DP SIMD kernels
+  preserved the reference output but measured slower on the reference benchmark;
+  keep the safer scan unless a prevalidated-sequence approach is tested.
+- Skipping the generic PP Gmx allocation for coordinate-only SIMD OA was
+  output-exact but caused a repeatable minor-fault/system-time spike on the
+  reference benchmark; it was reverted.
+- `RUSTFLAGS='-C target-cpu=native'` did not improve the current reused-scratch
+  build on the reference benchmark; do not rely on it as the parity-speed fix.
 
 ## Completed Parity Invariants And Fixture Coverage
 
@@ -500,10 +548,6 @@ Before stopping after any parity change:
 - Update `TRACE_PARITY.md` and this `TODO.md` if counts, next targets, or known
   false trails changed.
 
-- Removing canonical-residue scans before the direct full-DP SIMD kernels preserved the reference output but measured slower on the reference benchmark; keep the safer scan unless a prevalidated-sequence approach is tested.
-- Skipping the generic PP Gmx allocation for coordinate-only SIMD OA was output-exact but caused a repeatable minor-fault/system-time spike on the reference benchmark; it was reverted.
-- `RUSTFLAGS='-C target-cpu=native'` did not improve the current reused-scratch build on the reference benchmark; do not rely on it as the parity-speed fix.
-
 ## Complexity-Audit Historical Notes - 2026-04-23
 
 Findings from running `code-complexity-comparator` (`/home/mahogny/github/claude/code-complexity-comparator`) with the mapping file at `ccc_mapping.toml` against the full tree. Snapshot from that run: 165 matched pairs after mapping. Each of these surfaces where Rust carries measurably more static complexity than C in hot code. None are a speed fix by themselves; each is a hypothesis worth checking with `perf stat` (cycles, instructions, branch-misses) on the reference case before/after any attempted change.
@@ -592,37 +636,19 @@ iTLB/D-cache: Rust **iTLB miss rate 30.58% vs C 16.06%** (1.9x), Rust L1-dcache 
 
 `define_domains` (the 463-LOC top-level domain-definition function) does not appear as a separate symbol in the release binary; it is fully inlined into its sole caller `Pipeline::run`. That is why `Pipeline::run` is 43.9 KB.
 
-**Rejected experiment: split `Pipeline::run` at filter boundary.** Extracted everything past `self.n_past_fwd += 1` into `#[inline(never)] fn run_after_filters(&mut self, gm, om, bg, hmm, sq, th, fwd_sc, null_sc)`. Byte-identical tblout; all 128 tests pass.
+**Rejected experiment: split `Pipeline::run` at filter boundary.** Extracted
+everything past `self.n_past_fwd += 1` into `#[inline(never)] run_after_filters`
+(9 args). Byte-identical tblout. `Pipeline::run` shrank 3.3x and iTLB-misses
+dropped 21%, but paired multi-run timing did not move beyond noise and cycles
+went up 1.3%: the 9-arg inter-function call cost (marshalling, spill/reload)
+absorbed the I-cache win. Reverted. Do not re-try as a plain `inline(never)` on
+a wide capture set.
 
-| Metric | before | after | delta |
-|---|---:|---:|---:|
-| `Pipeline::run` size | 43.9 KB | 13.4 KB | -69% |
-| `run_after_filters` size | (inlined) | 30.8 KB | (new frame) |
-| `.text` total | 1427.3 KB | 1427.9 KB | +640 B |
-| iTLB-load-misses | 50,077 | 39,557 | -21% |
-| iTLB miss rate | 30.58% | 25.02% | -5.6 pp |
-| L1-dcache-load-misses | 102 M | 100 M | -1.5% |
-| cycles | 4.59 Bn | 4.65 Bn | +1.3% |
-| IPC | 1.85 | 1.82 | -0.01 |
-| user time | 1.70-1.77 s | 1.67-1.96 s | noise-overlapping |
-
-Structural target was hit: `Pipeline::run` shrank 3.3x and iTLB-misses dropped 21%. But paired multi-run timing did not move beyond noise, and cycles went up 1.3%. The 9-arg inter-function call cost (argument marshalling, register spill/reload) absorbed the I-cache win the same way it did in the `inline(never) define_domains` experiment. Reverted. Do not re-try this as a plain `inline(never)` on a wide capture set.
-
-**Rejected experiment: `#[inline(never)] define_domains`.** Marked `define_domains` as `#[inline(never)]` to force a real call boundary. Output byte-identical.
-
-| Metric | before | after | delta |
-|---|---:|---:|---:|
-| `Pipeline::run` size | 43.9 KB | 16.3 KB | -63% |
-| `define_domains` size | (inlined) | 28.7 KB | out of Pipeline::run |
-| `.text` total | 1427 KB | 1429 KB | +0.1% |
-| iTLB-load-misses | 50,077 | 43,295 | -14% |
-| iTLB miss rate | 30.58% | 28.25% | -2.3 pp |
-| L1-dcache-load-misses | 102 M | 100 M | -2% |
-| cycles | 4.59 Bn | 4.67 Bn | +1.7% |
-| IPC | 1.85 | 1.83 | -0.01 |
-| user time | 1.70-1.77 s | 1.75-1.79 s | +0.05 s noisy |
-
-Structural result was exactly as predicted: Pipeline::run dropped 2.7x, iTLB improved 14%, but function-call overhead from de-inlining (spill/reload, argument marshalling for 14 parameters) cancelled the I-cache win. Matches the broader lesson in Priority 6 that `#[inline(never)]` has not been a net speed change in this codebase. Reverted. Do not re-try this exact approach on `define_domains`.
+**Rejected experiment: `#[inline(never)] define_domains`.** Output
+byte-identical. `Pipeline::run` dropped 2.7x and iTLB improved 14%, but the
+de-inline function-call overhead (spill/reload, 14 parameters) cancelled the
+I-cache win; cycles +1.7%, user time noisy. Reverted. Do not re-try this exact
+approach on `define_domains`.
 
 **Pattern observed from both rejected experiments above:** `#[inline(never)]` on a function that takes many arguments (9-14 refs/values) consistently produces the expected I-cache improvement but is cancelled by per-call register spill/reload. Attempts in this direction should either (a) use a much smaller argument surface (e.g. wrap everything in a single borrowed struct parameter), or (b) split only tiny focused blocks whose call cost is minimal.
 

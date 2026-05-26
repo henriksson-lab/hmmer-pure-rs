@@ -1230,19 +1230,26 @@ pub fn write_hmm_with_format<W: std::io::Write>(
 
 /// Format a probability `p` as `-ln(p)` (or `*` if zero) using single-precision
 /// `logf`, matching the C HMMER ASCII writer's field width and digits.
+///
+/// Mirrors `printprob(fp, 8, p)` from `hmmer/src/p7_hmmfile.c:2091`:
+///   - `p == 0.0` → `" %*s"` with `fieldwidth=8` and `"*"` → `"       *"` (7 spaces + `*`)
+///   - `p == 1.0` → `" %*.5f"` with `fieldwidth=8` and `0.0` → `" 0.00000"` (8 chars)
+///   - else       → `" %*.5f"` with `fieldwidth=8` and `-logf(p)` → 8-char float string
+///
+/// Returns an 8-wide string; the caller prepends one space via `" {}"` to
+/// reproduce C's `fprintf(fp, " %*.5f", 8, ...)` = 9 bytes per probability value.
 fn fmt_prob(p: f32) -> String {
-    // C's `printprob` (hmmer/src/p7_hmmfile.c) uses an 8-wide field:
-    // `%8.5f` for probabilities and `%8s` of "*" for the zero/infinity case.
+    // C's `printprob` uses `%8s` / `%8.5f` (8-wide field).
     if p <= 0.0 {
-        // C: fprintf(fp, " %*s", 8, "*") -> "       *" (7 spaces + '*')
-        format!("{:>8}", "*")
+        // C: fprintf(fp, " %*s", 8, "*") -> "       *" (7 spaces + '*', 8 chars)
+        "       *".to_string()
     } else if p == 1.0 {
-        // C: fprintf(fp, " %*.5f", 8, 0.0)
-        format!("{:>8}", fmt_hmm_prob(0.0))
+        // C: fprintf(fp, " %*.5f", 8, 0.0) -> " 0.00000" (8 chars)
+        fmt_hmm_prob(0.0)
     } else {
         // HMMER's C writer uses logf(), not double-precision log().
-        // `fmt_hmm_prob` is `%7.5f`; right-justify in width 8 to match `%8.5f`.
-        format!("{:>8}", fmt_hmm_prob(-c_logf_to_f32(p) as f64))
+        // fmt_hmm_prob is now %8.5f, directly matching C's fieldwidth=8.
+        fmt_hmm_prob(-c_logf_to_f32(p) as f64)
     }
 }
 

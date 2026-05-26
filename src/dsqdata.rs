@@ -13,7 +13,7 @@
 //!   - `<basename>.dsqm` — metadata file
 //!   - `<basename>.dsqs` — packed sequence file
 //!
-//! The four files are linked by a random 32-bit `uniquetag`.
+//! The four files are linked by a 32-bit `uniquetag`.
 //!
 //! ### Stub file (`<basename>`, text)
 //! First line is machine-parsed:
@@ -52,18 +52,58 @@
 //! may be a partial 5-bit packet whose unused residue slots are 0x1f. A
 //! zero-length sequence is a single EOD packet `0xFFFFFFFF`.
 //!
-//! ## Simplification vs. C
-//! Easel's reader uses a threaded producer/consumer pipeline (a loader thread
-//! and several unpacker threads) purely for throughput. This port implements a
-//! simple **synchronous** reader/writer. The bytes read and written are
-//! format-identical to C; only the concurrency optimization is omitted.
+//! ## Uniquetag
+//! The C `esl_dsqdata_Write()` generates the uniquetag via `esl_randomness_Create(0)`
+//! (which seeds Mersenne Twister from `time()+pid+clock()`) followed by one call
+//! to `esl_random_uint32()` — so C's uniquetag is **non-deterministic**. Any nonzero
+//! uint32 is a valid tag as long as all four files agree. This Rust port instead
+//! derives a **deterministic** tag by hashing the dataset's basic statistics
+//! (`nseq`, `nres`, `max_seqlen`) with a fixed seed. Databases written by Rust and
+//! by C are interoperable regardless of the differing tag derivation methods.
+//!
+//! ## Taxid
+//! The metadata format stores a per-sequence `int32` taxid field. This port reads
+//! (and validates the format of) the taxid but **does not store it**, because
+//! [`Sequence`] has no `taxid` field. Wiring taxid storage through requires adding
+//! `pub taxid: i32` to `Sequence` in `src/sequence.rs`; that is a cross-file
+//! change outside the permitted scope of `dsqdata.rs`. When writing, taxid is
+//! emitted as `-1` (none), which is correct for sequences sourced from
+//! [`Sequence`] objects.
+//!
+//! ## Threaded loader
+//! Easel's reader uses a loader thread (disk I/O) and several unpacker threads
+//! (CPU decompression) running in a producer/consumer pipeline. This port
+//! implements a **two-thread pipeline**: a background loader thread streams raw
+//! packed bytes off disk in fixed-size chunks and sends them over a channel;
+//! the main thread receives each raw chunk and unpacks it while the loader
+//! prefetches the next one. The bytes processed and the sequences produced are
+//! format-identical to the synchronous approach; only the overlap of I/O and
+//! CPU work differs.
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::mpsc;
 
 use crate::alphabet::{Alphabet, AlphabetType, Dsq, DSQ_SENTINEL};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::sequence::Sequence;
+
+/// Maximum number of sequences per chunk in the threaded loader, matching
+/// `eslDSQDATA_CHUNK_MAXSEQ` from the C implementation.
+const CHUNK_MAXSEQ: usize = 4096;
+
+/// A raw (still-packed) chunk sent from the loader thread to the main thread.
+/// Contains the raw packed uint32 words, raw metadata bytes, and the index
+/// records for each sequence in the chunk so the unpacker knows the boundaries.
+struct RawChunk {
+    /// Packed sequence data (uint32 packets) for this chunk's sequences.
+    packed: Vec<u32>,
+    /// Raw metadata bytes (name\0 acc\0 desc\0 taxid×4) for this chunk's sequences.
+    metadata: Vec<u8>,
+    /// Index records for each sequence in this chunk. Each record carries
+    /// the *chunk-relative* cumulative end offsets (0-based within this chunk).
+    records: Vec<IndexRecord>,
+}
 
 /// "dsq1" + 0x80808080. Detects format and byte order (port of `eslDSQDATA_MAGIC_V1`).
 const MAGIC_V1: u32 = 0xc4d3d1b1;
@@ -269,7 +309,10 @@ fn unpack2(psq: &[u32], start: usize, out: &mut Vec<Dsq>) -> HmmerResult<(usize,
 /// `alphabet` must be nucleic (DNA/RNA) or amino; nucleic uses 2-bit packing,
 /// amino uses 5-bit packing, matching C.
 ///
-/// Taxids are written as -1 (none), since [`Sequence`] carries no taxid field.
+/// Taxids are written as `-1` (none) because [`Sequence`] carries no `taxid`
+/// field. Storing the taxid would require adding `pub taxid: i32` to
+/// `Sequence` in `src/sequence.rs` — a cross-file dependency outside the
+/// permitted scope of `dsqdata.rs`.
 pub fn write_dsqdata(
     basename: &Path,
     sequences: &[Sequence],
@@ -377,19 +420,28 @@ pub fn write_dsqdata(
 }
 
 // ---------------------------------------------------------------------------
-// Read (synchronous port of esl_dsqdata_Open + loader + unpacker)
+// Read (threaded loader + synchronous unpacker)
 // ---------------------------------------------------------------------------
 
 /// Open and read an entire dsqdata database from `<basename>` and its three
 /// `.dsq?` companion files.
 ///
-/// This is a synchronous replacement for Easel's threaded reader (see module
-/// docs). It validates the magic/uniquetag linkage exactly as C does, then
-/// unpacks every sequence. The alphabet is determined from the index header's
-/// `alphatype` (as C does when the caller passes a NULL alphabet).
+/// Implements a two-thread pipeline mirroring Easel's loader/unpacker design:
+/// a background **loader thread** streams raw packed bytes and metadata off
+/// disk in chunks of up to [`CHUNK_MAXSEQ`] sequences and sends each
+/// [`RawChunk`] over a channel; the main thread receives each chunk and
+/// unpacks (decompresses) it while the loader prefetches the next one. This
+/// overlaps disk I/O with CPU decompression, faithfully reflecting C's
+/// threaded pipeline (which uses more threads but the same two-stage
+/// loader→unpacker structure).
+///
+/// Magic/uniquetag validation is identical to C. The alphabet is determined
+/// from the index header's `alphatype` (as C does when the caller passes a
+/// NULL alphabet).
 ///
 /// Returns the sequences with their leading/trailing [`DSQ_SENTINEL`] bytes
 /// restored. Accession/description are populated from the metadata file.
+/// Taxid is read (and format-validated) but not stored; see module docs.
 pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     let p = basename;
 
@@ -458,18 +510,20 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     };
     let do_pack5 = alphabet.abc_type == AlphabetType::Amino;
 
-    // ---- Read all index records. ----
-    let mut records = Vec::with_capacity(nseq as usize);
+    // ---- Read all index records into memory (small: 16 bytes × nseq). ----
+    // We read the full index up front so the loader thread can seek freely.
+    let mut all_records: Vec<IndexRecord> = Vec::with_capacity(nseq as usize);
     for _ in 0..nseq {
         let metadata_end = read_i64(&mut ifp)?;
         let psq_end = read_i64(&mut ifp)?;
-        records.push(IndexRecord {
+        all_records.push(IndexRecord {
             metadata_end,
             psq_end,
         });
     }
+    drop(ifp); // index fully consumed
 
-    // ---- Metadata file: verify header, slurp body. ----
+    // ---- Validate metadata and sequence file headers. ----
     let mut mfp = BufReader::new(open(&with_ext(p, "dsqm"))?);
     let m_magic = read_u32(&mut mfp)?;
     let m_tag = read_u32(&mut mfp)?;
@@ -481,10 +535,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
             "dsqdata metadata file has bad tag, doesn't match stub".into(),
         ));
     }
-    let mut metadata = Vec::new();
-    mfp.read_to_end(&mut metadata).map_err(HmmerError::Io)?;
 
-    // ---- Sequence file: verify header, slurp packed body as u32 packets. ----
     let mut sfp = BufReader::new(open(&with_ext(p, "dsqs"))?);
     let s_magic = read_u32(&mut sfp)?;
     let s_tag = read_u32(&mut sfp)?;
@@ -496,24 +547,119 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
             "dsqdata sequence file has bad tag, doesn't match stub".into(),
         ));
     }
-    let mut sbytes = Vec::new();
-    sfp.read_to_end(&mut sbytes).map_err(HmmerError::Io)?;
-    if sbytes.len() % 4 != 0 {
-        return Err(HmmerError::Format(
-            "dsqdata sequence file body is not a whole number of packets".into(),
-        ));
-    }
-    let psq: Vec<u32> = sbytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
 
-    // ---- Walk records, unpacking metadata + sequence per record. ----
-    let mut sequences = Vec::with_capacity(nseq as usize);
-    let mut psq_last: i64 = -1; // last packet offset consumed (inclusive)
-    let mut meta_last: i64 = -1; // last metadata byte offset consumed (inclusive)
-    for rec in &records {
-        // Packet range for this sequence: (psq_last+1 ..= rec.psq_end).
+    // ---- Spawn the loader thread. ----
+    // The loader reads raw bytes in chunks of CHUNK_MAXSEQ sequences and sends
+    // RawChunk values over the channel. The main thread receives and unpacks
+    // each chunk while the loader prefetches the next one.
+    //
+    // Channel is bounded to 1 so the loader stays at most one chunk ahead,
+    // bounding memory use while still achieving I/O/CPU overlap.
+    let (tx, rx) = mpsc::sync_channel::<Result<RawChunk, String>>(1);
+
+    let loader_handle = std::thread::spawn(move || {
+        let mut psq_last: i64 = -1;
+        let mut meta_last: i64 = -1;
+        let mut i = 0usize;
+        let nseq_total = all_records.len();
+
+        while i < nseq_total {
+            // Take up to CHUNK_MAXSEQ index records for this chunk.
+            let chunk_end = (i + CHUNK_MAXSEQ).min(nseq_total);
+            let chunk_records = &all_records[i..chunk_end];
+
+            let last_rec = chunk_records[chunk_records.len() - 1];
+
+            // Number of packets in this chunk.
+            let n_packets = (last_rec.psq_end - psq_last) as usize;
+            // Number of metadata bytes in this chunk.
+            let n_meta = (last_rec.metadata_end - meta_last) as usize;
+
+            // Read packed sequence data.
+            let mut packed_bytes = vec![0u8; n_packets * 4];
+            if let Err(e) = sfp.read_exact(&mut packed_bytes) {
+                let _ = tx.send(Err(format!("dsqdata loader: seq read error: {}", e)));
+                return;
+            }
+            let packed: Vec<u32> = packed_bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+
+            // Read metadata.
+            let mut metadata = vec![0u8; n_meta];
+            if let Err(e) = mfp.read_exact(&mut metadata) {
+                let _ = tx.send(Err(format!("dsqdata loader: meta read error: {}", e)));
+                return;
+            }
+
+            // Adjust index records to be chunk-relative (subtract the offsets
+            // that were consumed before this chunk started).
+            let psq_base = psq_last;
+            let meta_base = meta_last;
+            let records: Vec<IndexRecord> = chunk_records
+                .iter()
+                .map(|r| IndexRecord {
+                    psq_end: r.psq_end - psq_base - 1, // convert to 0-based packet index within chunk
+                    metadata_end: r.metadata_end - meta_base - 1, // 0-based byte index within chunk
+                })
+                .collect();
+
+            psq_last = last_rec.psq_end;
+            meta_last = last_rec.metadata_end;
+            i = chunk_end;
+
+            if tx
+                .send(Ok(RawChunk {
+                    packed,
+                    metadata,
+                    records,
+                }))
+                .is_err()
+            {
+                // Receiver dropped (main thread errored out). Stop loading.
+                return;
+            }
+        }
+        // Loader done; channel closes automatically when `tx` is dropped here.
+    });
+
+    // ---- Main thread: receive and unpack each chunk. ----
+    let mut sequences: Vec<Sequence> = Vec::with_capacity(nseq as usize);
+
+    for raw in rx {
+        let chunk = raw.map_err(|e| HmmerError::Format(e.into()))?;
+        unpack_chunk(&chunk, do_pack5, &mut sequences)?;
+    }
+
+    // Join the loader thread to propagate any panics.
+    loader_handle
+        .join()
+        .map_err(|_| HmmerError::Format("dsqdata loader thread panicked".into()))?;
+
+    Ok(sequences)
+}
+
+/// Unpack a [`RawChunk`] into [`Sequence`]s, appending to `out`.
+///
+/// This is the "unpacker" side of the two-thread pipeline. It mirrors
+/// `dsqdata_unpack_chunk()` in the C implementation but operates on
+/// chunk-relative offsets pre-computed by the loader thread.
+fn unpack_chunk(
+    chunk: &RawChunk,
+    do_pack5: bool,
+    out: &mut Vec<Sequence>,
+) -> HmmerResult<()> {
+    let psq = &chunk.packed;
+    let metadata = &chunk.metadata;
+
+    // The chunk's records have chunk-relative cumulative end offsets
+    // (0-based, inclusive). Walk them to recover per-sequence slices.
+    let mut psq_last: i64 = -1;
+    let mut meta_last: i64 = -1;
+
+    for rec in &chunk.records {
+        // Packet range for this sequence within the chunk.
         let pstart = (psq_last + 1) as usize;
         let pn = (rec.psq_end - psq_last) as usize;
         if pn == 0 {
@@ -521,11 +667,12 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
                 "dsqdata: index record encodes zero packets (every seq needs an EOD packet)".into(),
             ));
         }
+
         let mut residues = Vec::new();
         let (l, consumed) = if do_pack5 {
-            unpack5(&psq, pstart, &mut residues)?
+            unpack5(psq, pstart, &mut residues)?
         } else {
-            unpack2(&psq, pstart, &mut residues)?
+            unpack2(psq, pstart, &mut residues)?
         };
         if consumed != pn {
             return Err(HmmerError::Format(format!(
@@ -535,7 +682,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         }
         psq_last = rec.psq_end;
 
-        // Metadata range for this sequence: bytes (meta_last+1 ..= rec.metadata_end).
+        // Metadata range for this sequence within the chunk.
         let mstart = (meta_last + 1) as usize;
         let mend = (rec.metadata_end + 1) as usize; // exclusive
         if mend > metadata.len() || mstart > mend {
@@ -547,9 +694,13 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         let (acc, rest) = take_cstr(rest)?;
         let (desc, rest) = take_cstr(rest)?;
         if rest.len() < 4 {
-            return Err(HmmerError::Format("dsqdata: metadata record truncated (taxid)".into()));
+            return Err(HmmerError::Format(
+                "dsqdata: metadata record truncated (taxid)".into(),
+            ));
         }
-        // taxid is read but not stored (Sequence has no taxid field).
+        // taxid is read (format-validated) but not stored: Sequence has no
+        // taxid field. Adding storage requires `pub taxid: i32` on Sequence
+        // in src/sequence.rs — a cross-file dependency outside dsqdata.rs.
         let _taxid = i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
         meta_last = rec.metadata_end;
 
@@ -558,7 +709,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         dsq.extend_from_slice(&residues);
         dsq.push(DSQ_SENTINEL);
 
-        sequences.push(Sequence {
+        out.push(Sequence {
             name: String::from_utf8_lossy(name).into_owned(),
             acc: String::from_utf8_lossy(acc).into_owned(),
             desc: String::from_utf8_lossy(desc).into_owned(),
@@ -567,8 +718,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
             l,
         });
     }
-
-    Ok(sequences)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -660,9 +810,18 @@ fn decode_type(t: AlphabetType) -> &'static str {
     }
 }
 
-/// Derive a deterministic uniquetag. C uses a random uint32, but any value is
-/// valid provided the four files agree. We mix the dataset's basic stats with a
-/// fixed nonzero seed so the tag is nonzero and stable for a given dataset.
+/// Derive a deterministic uniquetag from dataset statistics.
+///
+/// The C `esl_dsqdata_Write()` generates the tag by calling
+/// `esl_randomness_Create(0)` (which seeds a Mersenne Twister from
+/// `time() + pid + clock()`, making it non-deterministic / different on every
+/// run) and then drawing one `uint32_t`. Any nonzero `uint32` is valid as a
+/// tag, provided all four files agree. This Rust implementation instead
+/// produces a **deterministic** tag by mixing the dataset's basic statistics
+/// with a fixed nonzero starting constant. Files written by Rust and files
+/// written by C are interoperable regardless of the different tag derivation
+/// methods, because the reader only checks that all four files carry the same
+/// tag — it does not mandate a specific derivation method.
 fn derive_uniquetag(nseq: u64, nres: u64, max_seqlen: u64) -> u32 {
     let mut h = 0x9E3779B9u32;
     for v in [nseq, nres, max_seqlen] {
@@ -800,6 +959,96 @@ mod tests {
         std::fs::write(with_ext(&base, "dsqs"), Vec::<u8>::new()).unwrap();
         let err = read_dsqdata(&base).unwrap_err();
         assert!(err.to_string().contains("bad magic"));
+        cleanup(&base);
+    }
+
+    /// Verify taxid field: write a database (taxid will be -1 for all seqs),
+    /// read it back and confirm the metadata (name, acc, desc, sequence) is
+    /// intact. This exercises the taxid parse path in `unpack_chunk` and
+    /// ensures the format-validation of the taxid int32 does not corrupt the
+    /// surrounding name/acc/desc data.
+    ///
+    /// Full taxid *storage* round-trip (write non-(-1) taxids) requires a
+    /// `taxid` field on `Sequence` (src/sequence.rs dependency — see module
+    /// docs). This test validates the read-side format correctness only.
+    #[test]
+    fn taxid_metadata_roundtrip() {
+        let abc = Alphabet::amino();
+        let seqs = vec![
+            Sequence {
+                name: "taxseq1".into(),
+                acc: "AC001".into(),
+                desc: "organism A".into(),
+                dsq: abc.digitize(b"MKVLWA"),
+                n: 6,
+                l: 6,
+            },
+            Sequence {
+                name: "taxseq2".into(),
+                acc: String::new(),
+                desc: "organism B".into(),
+                dsq: abc.digitize(b"ACDEF"),
+                n: 5,
+                l: 5,
+            },
+        ];
+
+        let base = tmp("taxid");
+        write_dsqdata(&base, &seqs, &abc).unwrap();
+        let got = read_dsqdata(&base).unwrap();
+
+        // Metadata must survive the write→taxid-parse→read cycle intact.
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "taxseq1");
+        assert_eq!(got[0].acc, "AC001");
+        assert_eq!(got[0].desc, "organism A");
+        assert_eq!(got[0].n, 6);
+        assert_eq!(got[0].dsq, seqs[0].dsq);
+        assert_eq!(got[1].name, "taxseq2");
+        assert_eq!(got[1].acc, "");
+        assert_eq!(got[1].desc, "organism B");
+        assert_eq!(got[1].n, 5);
+        assert_eq!(got[1].dsq, seqs[1].dsq);
+
+        cleanup(&base);
+    }
+
+    /// Stress the threaded loader by writing and reading more sequences than
+    /// CHUNK_MAXSEQ in a single database. This exercises the chunked pipeline
+    /// that spans multiple loader→channel→unpack iterations.
+    #[test]
+    fn threaded_loader_multi_chunk() {
+        let abc = Alphabet::amino();
+        // CHUNK_MAXSEQ is 4096; write 2×CHUNK_MAXSEQ+7 sequences to force
+        // three complete loader chunks.
+        let n_seqs = CHUNK_MAXSEQ * 2 + 7;
+        let amino_chars = b"ACDEFGHIKLMNPQRSTVWY";
+        let seqs: Vec<Sequence> = (0..n_seqs)
+            .map(|i| {
+                let raw: Vec<u8> = (0..((i % 20) + 1))
+                    .map(|j| amino_chars[(i + j) % 20])
+                    .collect();
+                let n = raw.len();
+                Sequence {
+                    name: format!("seq{}", i),
+                    acc: String::new(),
+                    desc: String::new(),
+                    dsq: abc.digitize(&raw),
+                    n,
+                    l: n,
+                }
+            })
+            .collect();
+
+        let base = tmp("multichunk");
+        write_dsqdata(&base, &seqs, &abc).unwrap();
+        let got = read_dsqdata(&base).unwrap();
+        assert_eq!(got.len(), n_seqs);
+        for (i, (expected, actual)) in seqs.iter().zip(got.iter()).enumerate() {
+            assert_eq!(actual.name, expected.name, "name mismatch at seq {}", i);
+            assert_eq!(actual.n, expected.n, "length mismatch at seq {}", i);
+            assert_eq!(actual.dsq, expected.dsq, "dsq mismatch at seq {}", i);
+        }
         cleanup(&base);
     }
 }

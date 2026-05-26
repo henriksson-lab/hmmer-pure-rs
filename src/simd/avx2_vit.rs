@@ -251,22 +251,26 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
                 let tdd = _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
                 dcv = _mm256_adds_epi16(dmx!(q), tdd);
             }
+            // C `do { ... } while (q == Q)`: the outer loop repeats only when the
+            // inner q-loop ran to completion (never broke early). Mirror the SSE
+            // port's `broke` flag rather than an "any update happened" flag — those
+            // differ when the inner loop breaks partway (some q updated but q != Q),
+            // in which case C does NOT repeat. (vitfilter.c:215-225)
             loop {
                 dcv = cross_lane_shift_epi16(dcv);
-                let mut any = false;
+                let mut broke = false;
                 for q in 0..q_count {
                     let cmp = _mm256_cmpgt_epi16(dcv, dmx!(q));
-                    if _mm256_movemask_epi8(cmp) != 0 {
-                        any = true;
-                        dmx!(q) = _mm256_max_epi16(dcv, dmx!(q));
-                        let tdd =
-                            _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
-                        dcv = _mm256_adds_epi16(dmx!(q), tdd);
-                    } else {
+                    if _mm256_movemask_epi8(cmp) == 0 {
+                        broke = true;
                         break;
                     }
+                    dmx!(q) = _mm256_max_epi16(dcv, dmx!(q));
+                    let tdd =
+                        _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
+                    dcv = _mm256_adds_epi16(dmx!(q), tdd);
                 }
-                if !any {
+                if broke {
                     break;
                 }
             }
@@ -326,4 +330,69 @@ unsafe fn hmax_epi16_avx2(v: __m256i) -> i16 {
     let max128 = _mm_max_epi16(max128, _mm_shufflelo_epi16::<0x4E>(max128));
     let max128 = _mm_max_epi16(max128, _mm_srli_epi32::<16>(max128));
     _mm_cvtsi128_si32(max128) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::Alphabet;
+    use crate::bg::Bg;
+    use std::path::Path;
+
+    /// Verifies `cross_lane_shift_epi16` is a true whole-vector word up-shift across
+    /// the 128-bit lane boundary: `[a0..a15] -> [-32768, a0..a14]` (a15 dropped).
+    #[test]
+    fn test_avx2_vit_cross_lane_shift() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        unsafe {
+            let v = _mm256_set_epi16(
+                15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+            );
+            let shifted = cross_lane_shift_epi16(v);
+            let mut out = [0i16; 16];
+            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, shifted);
+            assert_eq!(
+                out,
+                [-32768, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            );
+        }
+    }
+
+    /// Cross-checks the AVX2 Viterbi filter against the SSE2 reference within 1e-3.
+    #[test]
+    fn test_avx2_vit_matches_sse() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let abc = Alphabet::new(hmm.abc_type);
+        let bg = Bg::new(&abc);
+        let mut gm = Profile::new(hmm.m, &abc);
+        profile_config(&hmm, &bg, &mut gm, 400, P7_LOCAL);
+        let om = OProfile::convert(&gm);
+        let avx_om = OProfileAvx2Vit::from_oprofile(&om);
+        let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY");
+        let l = dsq.len() - 2;
+        let sse = match unsafe { crate::simd::vit_filter::viterbi_filter(&dsq, l, &om) } {
+            crate::simd::vit_filter::VitResult::Ok(sc) => sc,
+            crate::simd::vit_filter::VitResult::Overflow => return,
+        };
+        let avx = match unsafe { avx2_viterbi_filter(&dsq, l, &avx_om) } {
+            Avx2VitResult::Ok(sc) => sc,
+            Avx2VitResult::Overflow => return,
+        };
+        assert!(
+            (sse - avx).abs() < 1.0e-3,
+            "SSE Viterbi {sse} and AVX2 Viterbi {avx} differ"
+        );
+    }
 }

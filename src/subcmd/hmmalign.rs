@@ -297,6 +297,34 @@ fn open_seq_file_maybe_stdin(
 /// `#=GC PP_cons`, `#=GC RF`, and optional `#=GS <name> AC/DE`. Stockholm format
 /// wraps the alignment in 200-column blocks; the left margin width matches C's
 /// `margin` computation so sequence, GR, and GC lines stay in register.
+///
+/// ## Intentional annotation scope — why no SS/SA/MM/#=GF lines
+///
+/// `hmmalign` builds its MSA via `p7_tracealign_Seqs()` in tracealign.c, which
+/// calls three annotation helpers and then sets per-sequence names/accessions/descs:
+///
+///   1. `annotate_rf()` → sets `msa->rf` ('x'/'.' column mask) — **emitted** as `#=GC RF`
+///   2. `annotate_mm()` → sets `msa->mm` only when `hmm->mm != NULL` (model mask).
+///      Standard HMMs from `hmmbuild` never carry a model mask, so `msa->mm` is NULL
+///      in practice for all `hmmalign` runs; the `#=GC MM` line is therefore never
+///      produced. **Not emitted** (correctly).
+///   3. `annotate_posterior_probability()` → sets `msa->pp[i]` per sequence and
+///      `msa->pp_cons` — **emitted** as `#=GR <name> PP` and `#=GC PP_cons`.
+///
+/// Fields that `p7_tracealign_Seqs()` never sets on the output MSA for `hmmalign`:
+///   - `msa->name/acc/desc/au` → NULL  → no `#=GF ID/AC/DE/AU` lines (correct)
+///   - `msa->ss_cons/sa_cons`  → NULL  → no `#=GC SS_cons/SA_cons` lines (correct)
+///   - `msa->ss[i]/sa[i]`      → NULL  → no `#=GR <name> SS/SA` lines (correct)
+///   - `msa->cutset[]`         → unset → no `#=GF GA/TC/NC` lines (correct)
+///
+/// The per-sequence `sqacc` and `sqdesc` arrays are set from `sq[i]->acc` and
+/// `sq[i]->desc`, which come from the input FASTA/sequence headers — **emitted** as
+/// `#=GS <name> AC` / `#=GS <name> DE` when non-empty.
+///
+/// Conclusion: the Rust writers emit exactly what C's `hmmalign` + `stockholm_write`
+/// would emit given the annotation that `p7_tracealign_Seqs()` places on the MSA.
+/// The "missing" SS/SA/MM/GF-cutoff lines are absent because `hmmalign` itself never
+/// produces them — this is a non-gap, not an omission in the Rust port.
 fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
     write_stockholm_blocked(out, msa, 200);
 }
