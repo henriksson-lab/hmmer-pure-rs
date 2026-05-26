@@ -8,13 +8,14 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
 use hmmer_pure_rs::seqmodel;
-use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
-use hmmer_pure_rs::tophits::TopHits;
+use hmmer_pure_rs::tophits::{Hit, TopHits};
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +27,18 @@ struct Args {
     seqfile: PathBuf,
     /// Target sequence database (FASTA)
     seqdb: PathBuf,
+
+    /// Direct output to file, not stdout
+    #[arg(short = 'o')]
+    output: Option<PathBuf>,
+
+    /// Assert query sequence file format
+    #[arg(long = "qformat")]
+    qformat: Option<String>,
+
+    /// Assert target sequence file format
+    #[arg(long = "tformat")]
+    tformat: Option<String>,
 
     /// Report sequences <= this E-value threshold
     #[arg(
@@ -79,6 +92,63 @@ struct Args {
     #[arg(long = "incdomT", conflicts_with = "inc_dome")]
     inc_dom_t: Option<f32>,
 
+    /// Hidden C-compatible model gathering cutoff flag
+    #[arg(
+        long = "cut_ga",
+        hide = true,
+        conflicts_with_all = [
+            "cut_tc",
+            "cut_nc",
+            "e_value",
+            "score_threshold",
+            "dom_e",
+            "dom_t",
+            "inc_e",
+            "inc_t",
+            "inc_dome",
+            "inc_dom_t"
+        ]
+    )]
+    cut_ga: bool,
+
+    /// Hidden C-compatible model noise cutoff flag
+    #[arg(
+        long = "cut_nc",
+        hide = true,
+        conflicts_with_all = [
+            "cut_ga",
+            "cut_tc",
+            "e_value",
+            "score_threshold",
+            "dom_e",
+            "dom_t",
+            "inc_e",
+            "inc_t",
+            "inc_dome",
+            "inc_dom_t"
+        ]
+    )]
+    cut_nc: bool,
+
+    /// Hidden C-compatible model trusted cutoff flag
+    #[arg(
+        long = "cut_tc",
+        hide = true,
+        conflicts_with_all = [
+            "cut_ga",
+            "cut_nc",
+            "e_value",
+            "score_threshold",
+            "dom_e",
+            "dom_t",
+            "inc_e",
+            "inc_t",
+            "inc_dome",
+            "inc_dom_t"
+        ]
+    )]
+    cut_tc: bool,
+
     /// Gap open probability
     #[arg(long = "popen", default_value = "0.02", value_parser = parse_popen)]
     popen: f32,
@@ -86,6 +156,14 @@ struct Args {
     /// Gap extend probability
     #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
     pextend: f32,
+
+    /// Substitution score matrix choice
+    #[arg(long = "mx", default_value = "BLOSUM62", conflicts_with = "mxfile")]
+    matrix: String,
+
+    /// Read substitution score matrix from file
+    #[arg(long = "mxfile")]
+    mxfile: Option<PathBuf>,
 
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
@@ -127,6 +205,26 @@ struct Args {
     #[arg(long = "pfamtblout")]
     pfamtblout: Option<PathBuf>,
 
+    /// Save multiple alignment of hits to file
+    #[arg(short = 'A')]
+    ali_outfile: Option<PathBuf>,
+
+    /// Omit alignments from the main output
+    #[arg(long = "noali")]
+    noali: bool,
+
+    /// Prefer accessions over names in output
+    #[arg(long = "acc")]
+    show_acc: bool,
+
+    /// Do not line-wrap the main text output
+    #[arg(long = "notextw", conflicts_with = "textw")]
+    notextw: bool,
+
+    /// Set the target line width for the main text output
+    #[arg(long = "textw", default_value = "120", value_parser = parse_textw)]
+    textw: usize,
+
     /// Set number of comparisons for E-value calculation
     #[arg(short = 'Z', value_parser = parse_positive_f64)]
     z_value: Option<f64>,
@@ -138,6 +236,46 @@ struct Args {
     /// Set RNG seed
     #[arg(long = "seed", default_value = "42")]
     seed: u32,
+
+    /// Start restricted target search at this sequence key
+    #[arg(long = "restrictdb_stkey", hide = true)]
+    restrictdb_stkey: Option<String>,
+
+    /// Search only this many target sequences from the restricted start
+    #[arg(long = "restrictdb_n", value_parser = parse_positive_usize, hide = true)]
+    restrictdb_n: Option<usize>,
+
+    /// SSI index file for C-compatible restricted database options
+    #[arg(long = "ssifile", hide = true)]
+    ssifile: Option<PathBuf>,
+
+    /// Length of sequences for MSV Gumbel mu fit
+    #[arg(long = "EmL", default_value = "200", value_parser = parse_positive_usize)]
+    em_l: usize,
+
+    /// Number of sequences for MSV Gumbel mu fit
+    #[arg(long = "EmN", default_value = "200", value_parser = parse_positive_usize)]
+    em_n: usize,
+
+    /// Length of sequences for Viterbi Gumbel mu fit
+    #[arg(long = "EvL", default_value = "200", value_parser = parse_positive_usize)]
+    ev_l: usize,
+
+    /// Number of sequences for Viterbi Gumbel mu fit
+    #[arg(long = "EvN", default_value = "200", value_parser = parse_positive_usize)]
+    ev_n: usize,
+
+    /// Length of sequences for Forward exp tail tau fit
+    #[arg(long = "EfL", default_value = "100", value_parser = parse_positive_usize)]
+    ef_l: usize,
+
+    /// Number of sequences for Forward exp tail tau fit
+    #[arg(long = "EfN", default_value = "200", value_parser = parse_positive_usize)]
+    ef_n: usize,
+
+    /// Tail mass for Forward exponential tail tau fit
+    #[arg(long = "Eft", default_value = "0.04", value_parser = parse_open_unit_f64)]
+    eft: f64,
 }
 
 fn parse_positive_f64(s: &str) -> Result<f64, String> {
@@ -148,6 +286,39 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
         Ok(value)
     } else {
         Err("value must be > 0".to_string())
+    }
+}
+
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid positive integer: {e}"))?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0".to_string())
+    }
+}
+
+fn parse_open_unit_f64(s: &str) -> Result<f64, String> {
+    let value = s
+        .parse::<f64>()
+        .map_err(|e| format!("invalid probability: {e}"))?;
+    if value > 0.0 && value < 1.0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0 and < 1".to_string())
+    }
+}
+
+fn parse_textw(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid text width: {e}"))?;
+    if value >= 120 {
+        Ok(value)
+    } else {
+        Err("--textw must be >= 120".to_string())
     }
 }
 
@@ -183,15 +354,67 @@ fn parse_pextend(s: &str) -> Result<f32, String> {
 /// Optional `--tblout` is delegated to `hmmsearch::write_tblout`. Corresponds
 /// to `serial_master()` in hmmer/src/phmmer.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let cmdline = args.join(" ");
+    let cpu_was_requested = args
+        .iter()
+        .any(|arg| arg == "--cpu" || arg.starts_with("--cpu="))
+        || std::env::var_os("HMMER_NCPU").is_some();
+    let matrix_was_requested = args
+        .iter()
+        .any(|arg| arg == "--mx" || arg.starts_with("--mx="));
+    let mxfile_was_requested = args
+        .iter()
+        .any(|arg| arg == "--mxfile" || arg.starts_with("--mxfile="));
+    let popen_was_requested = args
+        .iter()
+        .any(|arg| arg == "--popen" || arg.starts_with("--popen="));
+    let pextend_was_requested = args
+        .iter()
+        .any(|arg| arg == "--pextend" || arg.starts_with("--pextend="));
+    let em_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EmL" || arg.starts_with("--EmL="));
+    let em_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EmN" || arg.starts_with("--EmN="));
+    let ev_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EvL" || arg.starts_with("--EvL="));
+    let ev_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EvN" || arg.starts_with("--EvN="));
+    let ef_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EfL" || arg.starts_with("--EfL="));
+    let ef_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EfN" || arg.starts_with("--EfN="));
+    let eft_was_requested = args
+        .iter()
+        .any(|arg| arg == "--Eft" || arg.starts_with("--Eft="));
+    let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
+    validate_sequence_format("phmmer --qformat", args.qformat.as_deref());
+    validate_sequence_format("phmmer --tformat", args.tformat.as_deref());
+    let score_matrix = if let Some(mxfile) = args.mxfile.as_ref() {
+        seqmodel::ScoreMatrix::from_file(mxfile)
+    } else {
+        seqmodel::ScoreMatrix::builtin(&args.matrix)
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("Error: phmmer {e}");
+        std::process::exit(1);
+    });
 
     logsum::p7_flogsuminit();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.cpu)
-        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
-        .build_global()
-        .ok();
+    if args.cpu > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cpu)
+            .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
+            .build_global()
+            .ok();
+    }
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
@@ -206,27 +429,42 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     }
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-
     let mut tblout_file = args.tblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating tblout file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-seq output file {path} for writing",
+        )
     });
     let mut domtblout_file = args.domtblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating domtblout file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-dom output file {path} for writing",
+        )
     });
     let mut pfamtblout_file = args.pfamtblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating pfamtblout file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open pfam-style tabular output file {path} for writing",
+        )
     });
+    let mut ali_file = args.ali_outfile.as_ref().map(|p| {
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open alignment output file {path} for writing",
+        )
+    });
+    let mut output_file = args.output.as_ref().map(|p| {
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open output file {path} for writing",
+        )
+    });
+    let stdout = std::io::stdout();
+    let mut stdout_lock = stdout.lock();
+    let mut out: &mut dyn Write = match output_file {
+        Some(ref mut file) => file,
+        None => &mut stdout_lock,
+    };
 
     writeln!(
         out,
@@ -257,6 +495,130 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         args.seqdb.display()
     )
     .unwrap();
+    if let Some(output) = &args.output {
+        writeln!(
+            out,
+            "# output directed to file:         {}",
+            output.display()
+        )
+        .unwrap();
+    }
+    if let Some(format) = args.qformat.as_deref() {
+        writeln!(out, "# query <seqfile> format asserted: {format}").unwrap();
+    }
+    if let Some(format) = args.tformat.as_deref() {
+        writeln!(out, "# target <seqdb> format asserted:  {format}").unwrap();
+    }
+    if let Some(tblout) = &args.tblout {
+        writeln!(
+            out,
+            "# per-seq hits tabular output:     {}",
+            tblout.display()
+        )
+        .unwrap();
+    }
+    if let Some(domtblout) = &args.domtblout {
+        writeln!(
+            out,
+            "# per-dom hits tabular output:     {}",
+            domtblout.display()
+        )
+        .unwrap();
+    }
+    if let Some(pfamtblout) = &args.pfamtblout {
+        writeln!(
+            out,
+            "# pfam-style tabular hit output:   {}",
+            pfamtblout.display()
+        )
+        .unwrap();
+    }
+    if let Some(ali_outfile) = &args.ali_outfile {
+        writeln!(
+            out,
+            "# MSA of hits saved to file:       {}",
+            ali_outfile.display()
+        )
+        .unwrap();
+    }
+    if args.noali {
+        writeln!(out, "# show alignments in output:       no").unwrap();
+    }
+    if args.show_acc {
+        writeln!(out, "# prefer accessions over names:    yes").unwrap();
+    }
+    if matrix_was_requested {
+        writeln!(
+            out,
+            "# subst score matrix (built-in):   {}",
+            score_matrix.name()
+        )
+        .unwrap();
+    }
+    if mxfile_was_requested {
+        writeln!(
+            out,
+            "# subst score matrix (file):       {}",
+            args.mxfile.as_ref().unwrap().display()
+        )
+        .unwrap();
+    }
+    if popen_was_requested {
+        writeln!(out, "# gap open probability:            {:.6}", args.popen).unwrap();
+    }
+    if pextend_was_requested {
+        writeln!(
+            out,
+            "# gap extend probability:          {:.6}",
+            args.pextend
+        )
+        .unwrap();
+    }
+    write_phmmer_option_header(&mut out, &args, &cmdline);
+    let textw = if args.notextw { 0 } else { args.textw };
+    if args.notextw {
+        writeln!(out, "# max ASCII text line length:      unlimited").unwrap();
+    } else if args.textw != 120 {
+        writeln!(out, "# max ASCII text line length:      {}", args.textw).unwrap();
+    }
+    if cpu_was_requested {
+        writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
+    }
+    if let Some(stkey) = &args.restrictdb_stkey {
+        writeln!(out, "# Restrict db to start at seq key: {}", stkey).unwrap();
+    }
+    if let Some(n) = args.restrictdb_n {
+        writeln!(out, "# Restrict db to # target seqs:    {}", n).unwrap();
+    }
+    if let Some(ssifile) = &args.ssifile {
+        writeln!(
+            out,
+            "# Override ssi file to:            {}",
+            ssifile.display()
+        )
+        .unwrap();
+    }
+    if em_l_was_requested {
+        writeln!(out, "# seq length, MSV Gumbel mu fit:   {}", args.em_l).unwrap();
+    }
+    if em_n_was_requested {
+        writeln!(out, "# seq number, MSV Gumbel mu fit:   {}", args.em_n).unwrap();
+    }
+    if ev_l_was_requested {
+        writeln!(out, "# seq length, Vit Gumbel mu fit:   {}", args.ev_l).unwrap();
+    }
+    if ev_n_was_requested {
+        writeln!(out, "# seq number, Vit Gumbel mu fit:   {}", args.ev_n).unwrap();
+    }
+    if ef_l_was_requested {
+        writeln!(out, "# seq length, Fwd exp tau fit:     {}", args.ef_l).unwrap();
+    }
+    if ef_n_was_requested {
+        writeln!(out, "# seq number, Fwd exp tau fit:     {}", args.ef_n).unwrap();
+    }
+    if eft_was_requested {
+        writeln!(out, "# tail mass for Fwd exp tau fit:   {:.6}", args.eft).unwrap();
+    }
     writeln!(
         out,
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
@@ -268,11 +630,22 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
 
+    let calibration_config = CalibrationConfig {
+        em_l: args.em_l,
+        em_n: args.em_n,
+        ev_l: args.ev_l,
+        ev_n: args.ev_n,
+        ef_l: args.ef_l,
+        ef_n: args.ef_n,
+        eft: args.eft,
+    };
+
     // Read query sequences
-    let mut query_sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
-        eprintln!("Error opening query file: {}", e);
-        std::process::exit(1);
-    });
+    let mut query_sqf = open_sequence_file(&args.seqfile, &abc, args.qformat.as_deref())
+        .unwrap_or_else(|e| {
+            eprintln!("Error opening query file: {}", e);
+            std::process::exit(1);
+        });
 
     let mut query_sq = Sequence::new();
     let mut n_queries = 0usize;
@@ -282,15 +655,22 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     }) {
         n_queries += 1;
         // Build HMM from query sequence
-        let hmm = seqmodel::build_single_seq_hmm(
+        let hmm = seqmodel::build_single_seq_hmm_with_matrix_and_calibration(
             &query_sq.name,
             &query_sq.dsq,
             query_sq.n,
             &abc,
             &bg,
+            &score_matrix,
             args.popen,
             args.pextend,
-        );
+            args.seed,
+            calibration_config,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Error: phmmer failed to set single query seq score system: {e}");
+            std::process::exit(1);
+        });
 
         let mut local_bg = bg.clone();
         local_bg.set_filter(hmm.m, &hmm.compo);
@@ -315,15 +695,51 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut sequences = Vec::new();
         let mut total_residues: u64 = 0; // used for statistics
         {
-            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-                eprintln!("Error opening target database: {}", e);
-                std::process::exit(1);
-            });
+            let mut sqf = open_sequence_file(&args.seqdb, &abc, args.tformat.as_deref())
+                .unwrap_or_else(|e| {
+                    eprintln!("Error opening target database: {}", e);
+                    std::process::exit(1);
+                });
+            let mut restrict_started = args.restrictdb_stkey.is_none();
+            if let Some(stkey) = args.restrictdb_stkey.as_deref() {
+                sqf = crate::subcmd::hmmsearch::open_restricted_target_seq_file(
+                    &args.seqdb,
+                    &abc,
+                    args.tformat.as_deref(),
+                    stkey,
+                    args.ssifile.as_deref(),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("Error opening restricted target database: {}", e);
+                    std::process::exit(1);
+                });
+                restrict_started = true;
+            }
             let mut sq = Sequence::new();
+            let mut restrict_seen = 0usize;
             while sqf.read(&mut sq).unwrap_or_else(|e| {
                 eprintln!("Error reading target database: {}", e);
                 std::process::exit(1);
             }) {
+                if !restrict_started {
+                    if args
+                        .restrictdb_stkey
+                        .as_deref()
+                        .is_some_and(|key| sq.name == key)
+                    {
+                        restrict_started = true;
+                    } else {
+                        sq.reuse();
+                        continue;
+                    }
+                }
+                if args
+                    .restrictdb_n
+                    .is_some_and(|limit| restrict_seen >= limit)
+                {
+                    break;
+                }
+                restrict_seen += 1;
                 total_residues += sq.n as u64;
                 sequences.push(sq.clone());
                 sq.reuse();
@@ -336,9 +752,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         // Search in parallel
         use rayon::prelude::*;
-        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = sequences
+        let scored: Vec<(Option<Hit>, u64, u64, u64, u64)> = sequences
             .par_iter()
-            .filter_map(|sq| {
+            .map(|sq| {
+                hmmer_pure_rs::util::simd_env::init();
                 let mut lb = local_bg.clone();
                 let mut lgm = gm.clone();
                 let mut lom = om.clone();
@@ -349,105 +766,91 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 lpli.do_max = args.max;
                 lpli.do_biasfilter = !args.nobias;
                 lpli.do_null2 = !args.nonull2;
+                let wants_alignment_file = args.ali_outfile.is_some();
+                lpli.do_alignment = !args.noali
+                    || args.domtblout.is_some()
+                    || args.pfamtblout.is_some()
+                    || wants_alignment_file;
+                lpli.do_alignment_display = !args.noali || wants_alignment_file;
                 lpli.seed = args.seed;
                 lpli.new_model(&lgm);
+                configure_thresholds(&mut lpli, &args);
+                apply_model_thresholds_or_exit(&mut lpli, &hmm);
 
                 lb.set_length(sq.n);
 
                 let mut lth = TopHits::new();
-                if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
+                let hit = if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
                     lth.hits.into_iter().next()
                 } else {
                     None
-                }
+                };
+                (
+                    hit,
+                    lpli.n_past_msv,
+                    lpli.n_past_bias,
+                    lpli.n_past_vit,
+                    lpli.n_past_fwd,
+                )
             })
             .collect();
 
         let mut th = TopHits::new();
-        th.hits = all_hits;
+        let mut stats = PipelineStats::default();
+        th.hits = scored
+            .into_iter()
+            .filter_map(|(hit, msv, bias, vit, fwd)| {
+                stats.n_past_msv += msv;
+                stats.n_past_bias += bias;
+                stats.n_past_vit += vit;
+                stats.n_past_fwd += fwd;
+                hit
+            })
+            .collect();
         let z = args.z_value.unwrap_or(sequences.len() as f64);
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
             configure_thresholds(&mut tmp_pli, &args);
+            apply_model_thresholds_or_exit(&mut tmp_pli, &hmm);
             tmp_pli.do_biasfilter = !args.nobias;
             tmp_pli.do_null2 = !args.nonull2;
             th.threshold(&tmp_pli, z, z);
-            let domz = args.domz_value.unwrap_or(th.nreported.max(1) as f64);
+            let domz = args.domz_value.unwrap_or(th.nreported as f64);
             if domz != z {
                 th.threshold(&tmp_pli, z, domz);
             }
         }
-        let domz = args.domz_value.unwrap_or(th.nreported.max(1) as f64);
+        let domz = args.domz_value.unwrap_or(th.nreported as f64);
 
-        writeln!(
-            out,
-            "Scores for complete sequences (score includes all domains):"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
-        )
-        .unwrap();
-
-        let mut have_printed_incthresh = false;
-        for hit in &th.hits {
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
-                continue;
-            }
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 && !have_printed_incthresh {
-                writeln!(out, "  ------ inclusion threshold ------").unwrap();
-                have_printed_incthresh = true;
-            }
-            let evalue = z * hit.lnp.exp();
-            let best_dom = crate::subcmd::hmmsearch::best_domain(hit);
-            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
-            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
-            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
-            writeln!(
-                out,
-                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
-                hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score,
-                hit.bias,
-                hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score,
-                dom_bias,
-                hit.nexpected,
-                hit.nreported,
-                hit.name,
-                if hit.desc.is_empty() { "" } else { &hit.desc },
-            )
-            .unwrap();
-        }
-
-        if th.nreported == 0 {
-            writeln!(
-                out,
-                "\n   [No hits detected that satisfy reporting thresholds]"
-            )
-            .unwrap();
-        }
-
-        writeln!(out).unwrap();
-        writeln!(
-            out,
-            "# Searched {} sequences ({} residues)",
-            sequences.len(),
-            total_residues
-        )
-        .unwrap();
+        crate::subcmd::hmmsearch::write_standard_stdout_tables(
+            &mut out,
+            &th,
+            &hmm.name,
+            hmm.m,
+            hmm.cs.as_deref(),
+            z,
+            domz,
+            textw,
+            args.show_acc,
+            args.noali,
+            false,
+        );
+        write_pipeline_stats(
+            &mut out,
+            hmm.m,
+            sequences.len() as u64,
+            total_residues,
+            th.nreported as u64,
+            z,
+            domz,
+            args.z_value.is_some(),
+            args.domz_value.is_some(),
+            &stats,
+            args.f1,
+            args.f2,
+            args.f3,
+        );
         writeln!(out, "//").unwrap();
 
         if let Some(ref mut f) = tblout_file {
@@ -457,7 +860,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 Some(&query_sq.acc),
                 &th,
                 z,
-                true,
+                n_queries == 1,
             );
         }
         if let Some(ref mut f) = domtblout_file {
@@ -469,7 +872,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &th,
                 z,
                 domz,
-                true,
+                n_queries == 1,
             );
         }
         if let Some(ref mut f) = pfamtblout_file {
@@ -483,12 +886,47 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 domz,
             );
         }
+        if let Some(ref mut f) = ali_file {
+            crate::subcmd::hmmsearch::write_ali_output(f, &hmm, &th, domz, textw);
+        }
 
         query_sq.reuse();
     }
     if n_queries == 0 {
         eprintln!("Error: no sequences found in {}", args.seqfile.display());
         std::process::exit(1);
+    }
+
+    let table_cmdline = normalize_phmmer_table_cmdline(&cmdline);
+    if let Some(ref mut f) = tblout_file {
+        crate::subcmd::hmmsearch::write_table_footer(
+            f,
+            "phmmer",
+            "SEARCH",
+            &args.seqfile,
+            &args.seqdb,
+            &table_cmdline,
+        );
+    }
+    if let Some(ref mut f) = domtblout_file {
+        crate::subcmd::hmmsearch::write_table_footer(
+            f,
+            "phmmer",
+            "SEARCH",
+            &args.seqfile,
+            &args.seqdb,
+            &table_cmdline,
+        );
+    }
+    if let Some(ref mut f) = pfamtblout_file {
+        crate::subcmd::hmmsearch::write_table_footer(
+            f,
+            "phmmer",
+            "SEARCH",
+            &args.seqfile,
+            &args.seqdb,
+            &table_cmdline,
+        );
     }
 
     if let Some(ref mut f) = tblout_file {
@@ -503,6 +941,161 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(out, "[ok]").unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+fn write_phmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
+    if command_line_has_option(cmdline, "-E") {
+        writeln!(
+            out,
+            "# sequence reporting threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.e_value)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.score_threshold {
+        writeln!(
+            out,
+            "# sequence reporting threshold:    score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--domE") {
+        writeln!(
+            out,
+            "# domain reporting threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.dom_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.dom_t {
+        writeln!(
+            out,
+            "# domain reporting threshold:      score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incE") {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.inc_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_t {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incdomE") {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.inc_dome)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_dom_t {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if args.max {
+        writeln!(
+            out,
+            "# Max sensitivity mode:            on [all heuristic filters off]"
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F1") {
+        writeln!(
+            out,
+            "# MSV filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f1)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F2") {
+        writeln!(
+            out,
+            "# Vit filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f2)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F3") {
+        writeln!(
+            out,
+            "# Fwd filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f3)
+        )
+        .unwrap();
+    }
+    if args.nobias {
+        writeln!(out, "# biased composition HMM filter:   off").unwrap();
+    }
+    if args.nonull2 {
+        writeln!(out, "# null2 bias corrections:          off").unwrap();
+    }
+    if let Some(z) = args.z_value {
+        writeln!(
+            out,
+            "# sequence search space set to:    {}",
+            hmmer_pure_rs::output::fmt_fixed0(z)
+        )
+        .unwrap();
+    }
+    if let Some(domz) = args.domz_value {
+        writeln!(
+            out,
+            "# domain search space set to:      {}",
+            hmmer_pure_rs::output::fmt_fixed0(domz)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--seed") {
+        if args.seed == 0 {
+            writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
+        } else {
+            writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
+        }
+    }
+}
+
+fn command_line_has_option(cmdline: &str, option: &str) -> bool {
+    let compact_short = option
+        .strip_prefix('-')
+        .filter(|rest| !rest.starts_with('-') && rest.chars().count() == 1)
+        .map(|_| option);
+    cmdline.split_whitespace().any(|token| {
+        token == option
+            || token.starts_with(&format!("{option}="))
+            || compact_short
+                .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
+    })
+}
+
+fn normalize_phmmer_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some(_wrapper), Some("phmmer")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "phmmer".to_string()
+            } else {
+                format!("phmmer {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
 }
 
 fn count_query_sequences(path: &std::path::Path, abc: &Alphabet) -> usize {
@@ -545,5 +1138,191 @@ fn configure_thresholds(pli: &mut Pipeline, args: &Args) {
     if let Some(t) = args.inc_dom_t {
         pli.inc_dom_t = Some(t);
         pli.incdom_by_e = false;
+    }
+    if args.cut_ga {
+        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::GA;
+    } else if args.cut_tc {
+        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::TC;
+    } else if args.cut_nc {
+        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::NC;
+    }
+}
+
+fn apply_model_thresholds_or_exit(pli: &mut Pipeline, hmm: &hmmer_pure_rs::hmm::Hmm) {
+    if pli.use_bit_cutoffs == hmmer_pure_rs::pipeline::BitCutoff::None {
+        return;
+    }
+    if let Err(e) = pli.new_model_thresholds(&hmm.cutoff) {
+        eprintln!("Error: {} for model {}", e, hmm.name);
+        std::process::exit(1);
+    }
+}
+
+fn validate_sequence_format(label: &str, format: Option<&str>) {
+    if let Some(format) = format {
+        if SequenceFormat::from_name(format).is_none() {
+            eprintln!("{label}={format} is not a recognized input sequence file format");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn open_sequence_file(
+    path: &std::path::Path,
+    abc: &Alphabet,
+    format: Option<&str>,
+) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn std::io::Read>>> {
+    if let Some(format) = format {
+        sequence::open_seq_file_with_format(path, abc, SequenceFormat::from_name(format).unwrap())
+    } else {
+        sequence::open_seq_file(path, abc)
+    }
+}
+
+#[derive(Default)]
+struct PipelineStats {
+    n_past_msv: u64,
+    n_past_bias: u64,
+    n_past_vit: u64,
+    n_past_fwd: u64,
+}
+
+fn write_pipeline_stats<W: Write>(
+    out: &mut W,
+    model_len: usize,
+    n_targets: u64,
+    total_residues: u64,
+    _nreported: u64,
+    z: f64,
+    domz: f64,
+    z_from_option: bool,
+    domz_from_option: bool,
+    stats: &PipelineStats,
+    f1: f64,
+    f2: f64,
+    f3: f64,
+) {
+    let expected_msv = (f1 * n_targets as f64).max(0.0);
+    let expected_vit = (f2 * n_targets as f64).max(0.0);
+    let expected_fwd = (f3 * n_targets as f64).max(0.0);
+    let frac = |n: u64| {
+        if n_targets > 0 {
+            n as f64 / n_targets as f64
+        } else {
+            0.0
+        }
+    };
+
+    writeln!(out, "Internal pipeline statistics summary:").unwrap();
+    writeln!(out, "-------------------------------------").unwrap();
+    writeln!(
+        out,
+        "Query model(s):                  {:>11}  ({} nodes)",
+        1, model_len
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Target sequences:                {:>11}  ({} residues searched)",
+        n_targets, total_residues
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed MSV filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_msv,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_msv)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+        hmmer_pure_rs::output::fmt_g(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed bias filter:              {:>11}  ({}); expected {} ({})",
+        stats.n_past_bias,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_bias)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+        hmmer_pure_rs::output::fmt_g(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed Vit filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_vit,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_vit)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_vit),
+        hmmer_pure_rs::output::fmt_g(f2)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed Fwd filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_fwd,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_fwd)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_fwd),
+        hmmer_pure_rs::output::fmt_g(f3)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Initial search space (Z):        {}  {}",
+        hmmer_pure_rs::output::fmt_width11_0(z),
+        if z_from_option {
+            "[as set by --Z on cmdline]"
+        } else {
+            "[actual number of targets]"
+        }
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Domain search space  (domZ):     {}  {}",
+        hmmer_pure_rs::output::fmt_width11_0(domz),
+        if domz_from_option {
+            "[as set by --domZ on cmdline]"
+        } else {
+            "[number of targets reported over threshold]"
+        }
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phmmer_parses_single_sequence_calibration_options() {
+        let args = Args::try_parse_from([
+            "phmmer",
+            "--seed",
+            "7",
+            "--EmL",
+            "101",
+            "--EmN",
+            "20",
+            "--EvL",
+            "102",
+            "--EvN",
+            "21",
+            "--EfL",
+            "103",
+            "--EfN",
+            "22",
+            "--Eft",
+            "0.03",
+            "query.fa",
+            "targets.fa",
+        ])
+        .unwrap();
+
+        assert_eq!(args.seed, 7);
+        assert_eq!(args.em_l, 101);
+        assert_eq!(args.em_n, 20);
+        assert_eq!(args.ev_l, 102);
+        assert_eq!(args.ev_n, 21);
+        assert_eq!(args.ef_l, 103);
+        assert_eq!(args.ef_n, 22);
+        assert_eq!(args.eft, 0.03);
     }
 }

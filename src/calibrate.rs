@@ -12,7 +12,33 @@ use crate::profile::*;
 use crate::simd::oprofile::OProfile;
 use crate::stats;
 
+use crate::util::cmath::{c_log_f64, ESL_CONST_LOG2, ESL_CONST_LOG2R};
 use crate::util::random::MersenneTwister;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationConfig {
+    pub em_l: usize,
+    pub em_n: usize,
+    pub ev_l: usize,
+    pub ev_n: usize,
+    pub ef_l: usize,
+    pub ef_n: usize,
+    pub eft: f64,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self {
+            em_l: 200,
+            em_n: 200,
+            ev_l: 200,
+            ev_n: 200,
+            ef_l: 100,
+            ef_n: 200,
+            eft: 0.04,
+        }
+    }
+}
 
 /// Sample an iid digital sequence of length `l` from background frequencies `bg_f`.
 /// Sentinels are added at positions 0 and l+1 so the result is 1-based.
@@ -27,7 +53,7 @@ fn random_seq(rng: &mut MersenneTwister, l: usize, bg_f: &[f32]) -> Vec<Dsq> {
 }
 
 fn simulated_bitscore(sc: f32, null_sc: f32) -> f64 {
-    (sc as f64 - null_sc as f64) / std::f64::consts::LN_2
+    (sc as f64 - null_sc as f64) / ESL_CONST_LOG2
 }
 
 fn msv_overflow_maxsc(base_b: u8, scale_b: f32) -> f32 {
@@ -55,7 +81,7 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
             let p = hmm.mat[node][x] as f64;
             let f = bg.f[x] as f64;
             if p > 0.0 && f > 0.0 {
-                node_h += p * (p / f).log2();
+                node_h += p * c_log_f64(p / f) * ESL_CONST_LOG2R;
             }
         }
         h += node_h;
@@ -63,8 +89,7 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
     h /= hmm.m as f64;
 
     // lambda with edge-correction: log(2) + 1.44 / (M * H)
-    let log2 = std::f64::consts::LN_2;
-    (log2 + 1.44 / (hmm.m as f64 * h)) as f32
+    (ESL_CONST_LOG2 + 1.44 / (hmm.m as f64 * h)) as f32
 }
 
 /// Calibrate E-value parameters for an HMM by simulation.
@@ -74,23 +99,49 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
 /// Stores results in `hmm.evparam[]` and sets P7H_STATS.
 /// Counterpart to C's `p7_Calibrate()`.
 pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
+    calibrate_with_seed(hmm, abc, bg, 42);
+}
+
+/// Calibrate E-value parameters with a caller-selected Easel fast RNG seed.
+pub fn calibrate_with_seed(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg, seed: u32) {
+    calibrate_with_config(hmm, abc, bg, seed, CalibrationConfig::default());
+}
+
+/// Calibrate E-value parameters with caller-selected simulation lengths,
+/// counts, Forward tail mass, and Easel fast RNG seed.
+pub fn calibrate_with_config(
+    hmm: &mut Hmm,
+    abc: &Alphabet,
+    bg: &Bg,
+    seed: u32,
+    config: CalibrationConfig,
+) {
     crate::logsum::p7_flogsuminit();
 
     let lambda = p7_lambda(hmm, bg);
-    let mut rng = MersenneTwister::new(42);
+    let mut rng = MersenneTwister::new(seed);
 
     // MSV calibration
-    let mmu = calibrate_msv(hmm, abc, bg, lambda, &mut rng);
+    let mmu = calibrate_msv(hmm, abc, bg, lambda, config.em_l, config.em_n, &mut rng);
     hmm.evparam[P7_MMU] = mmu;
     hmm.evparam[P7_MLAMBDA] = lambda;
 
     // Viterbi calibration
-    let vmu = calibrate_viterbi(hmm, abc, bg, lambda, &mut rng);
+    let vmu = calibrate_viterbi(hmm, abc, bg, lambda, config.ev_l, config.ev_n, &mut rng);
     hmm.evparam[P7_VMU] = vmu;
     hmm.evparam[P7_VLAMBDA] = lambda;
 
     // Forward calibration
-    let (ftau, flambda) = calibrate_forward(hmm, abc, bg, lambda, &mut rng);
+    let (ftau, flambda) = calibrate_forward(
+        hmm,
+        abc,
+        bg,
+        lambda,
+        config.ef_l,
+        config.ef_n,
+        config.eft,
+        &mut rng,
+    );
     hmm.evparam[P7_FTAU] = ftau;
     hmm.evparam[P7_FLAMBDA] = flambda;
 
@@ -105,10 +156,10 @@ fn calibrate_msv(
     abc: &crate::alphabet::Alphabet,
     bg: &Bg,
     lambda: f32,
+    l: usize,
+    n: usize,
     rng: &mut MersenneTwister,
 ) -> f32 {
-    let n = 200;
-    let l = 200;
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -161,10 +212,10 @@ fn calibrate_viterbi(
     abc: &crate::alphabet::Alphabet,
     bg: &Bg,
     lambda: f32,
+    l: usize,
+    n: usize,
     rng: &mut MersenneTwister,
 ) -> f32 {
-    let n = 200;
-    let l = 200;
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -218,11 +269,11 @@ fn calibrate_forward(
     abc: &crate::alphabet::Alphabet,
     bg: &Bg,
     lambda: f32,
+    l: usize,
+    n: usize,
+    tailp: f64,
     rng: &mut MersenneTwister,
 ) -> (f32, f32) {
-    let n = 200; // EfN
-    let l = 100; // EfL
-    let tailp = 0.04_f64; // Eft
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -267,10 +318,9 @@ fn calibrate_forward(
     // C code: tau = esl_gumbel_invcdf(1.0-tailp, gmu, glam) + (log(tailp) / lambda)
     // First find x where Gumbel tail mass = tailp, then back up by log(tailp)/lambda
     // to set the origin of the exponential tail to 1.0 instead of tailp.
-    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam) + (tailp.ln() / lambda as f64);
+    let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam) + (c_log_f64(tailp) / lambda as f64);
 
     let tau = if tau.is_finite() { tau as f32 } else { -3.0 };
-    // C stores the HMM-derived lambda for all three: MLAMBDA = VLAMBDA = FLAMBDA = lambda
     (tau, lambda)
 }
 
@@ -283,7 +333,7 @@ mod tests {
     fn simulated_bitscore_uses_double_log2() {
         let sc = 12.75_f32;
         let null_sc = -3.125_f32;
-        let expected = (sc as f64 - null_sc as f64) / std::f64::consts::LN_2;
+        let expected = (sc as f64 - null_sc as f64) / ESL_CONST_LOG2;
 
         assert_eq!(
             simulated_bitscore(sc, null_sc).to_bits(),
@@ -294,12 +344,12 @@ mod tests {
     #[test]
     fn simd_overflow_max_scores_match_c_calibration_limits() {
         assert_eq!(
-            msv_overflow_maxsc(190, 3.0_f32 / std::f32::consts::LN_2).to_bits(),
-            ((255.0_f32 - 190.0_f32) / (3.0_f32 / std::f32::consts::LN_2)).to_bits()
+            msv_overflow_maxsc(190, (3.0 / ESL_CONST_LOG2) as f32).to_bits(),
+            ((255.0_f32 - 190.0_f32) / ((3.0 / ESL_CONST_LOG2) as f32)).to_bits()
         );
         assert_eq!(
-            viterbi_overflow_maxsc(12000, 500.0_f32 / std::f32::consts::LN_2).to_bits(),
-            ((32767.0_f32 - 12000.0_f32) / (500.0_f32 / std::f32::consts::LN_2)).to_bits()
+            viterbi_overflow_maxsc(12000, (500.0 / ESL_CONST_LOG2) as f32).to_bits(),
+            ((32767.0_f32 - 12000.0_f32) / ((500.0 / ESL_CONST_LOG2) as f32)).to_bits()
         );
     }
 
@@ -343,6 +393,7 @@ mod tests {
 mod lambda_test {
     use crate::alphabet::Alphabet;
     use crate::bg::Bg;
+    use crate::util::cmath::{c_log_f64, ESL_CONST_LOG2, ESL_CONST_LOG2R};
     use std::path::Path;
 
     #[test]
@@ -365,12 +416,12 @@ mod lambda_test {
                 let p = hmm.mat[node][x] as f64;
                 let f = bg.f[x] as f64;
                 if p > 0.0 && f > 0.0 {
-                    h += p * (p / f).log2();
+                    h += p * c_log_f64(p / f) * ESL_CONST_LOG2R;
                 }
             }
         }
         h /= hmm.m as f64;
-        let lambda = std::f64::consts::LN_2 + 1.44 / (hmm.m as f64 * h);
+        let lambda = ESL_CONST_LOG2 + 1.44 / (hmm.m as f64 * h);
         eprintln!("H={:.6} bits, lambda={:.5} (C expects 0.72049)", h, lambda);
 
         // Lambda should be close to C's 0.72049

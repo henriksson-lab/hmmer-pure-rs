@@ -1,6 +1,7 @@
 //! Search pipeline using SIMD MSV + Viterbi + Forward filters.
 
 use crate::bg::Bg;
+use crate::dp::gmx::Gmx;
 use crate::profile::*;
 use crate::sequence::Sequence;
 #[cfg(target_arch = "x86_64")]
@@ -10,6 +11,7 @@ use crate::simd::oprofile::OProfile;
 use crate::simd::vit_filter::{viterbi_filter, VitResult};
 use crate::stats;
 use crate::tophits::*;
+use crate::util::cmath::{c_exp_f64, c_log_f64, ESL_CONST_LOG2};
 
 /// Tracehash hook: record a single MSV/bias/Viterbi filter decision for cross-impl validation.
 #[cfg(feature = "tracehash")]
@@ -324,6 +326,41 @@ impl Pipeline {
         }
     }
 
+    pub fn target_reportable(&self, score: f32, lnp: f64) -> bool {
+        if self.by_e {
+            if self.long_target {
+                c_exp_f64(lnp) <= self.e_value_threshold
+            } else {
+                c_exp_f64(lnp) * self.current_target_z() <= self.e_value_threshold
+            }
+        } else if let Some(t) = self.t {
+            score >= t
+        } else {
+            c_exp_f64(lnp) * self.current_target_z() <= self.e_value_threshold
+        }
+    }
+
+    fn target_includable(&self, score: f32, lnp: f64) -> bool {
+        if self.inc_by_e {
+            if self.long_target {
+                c_exp_f64(lnp) <= self.inc_e
+            } else {
+                c_exp_f64(lnp) * self.current_target_z() <= self.inc_e
+            }
+        } else if let Some(t) = self.inc_t {
+            score >= t
+        } else {
+            c_exp_f64(lnp) * self.current_target_z() <= self.inc_e
+        }
+    }
+
+    fn current_target_z(&self) -> f64 {
+        match self.z_setby {
+            ZSetBy::Option => self.z.max(1.0),
+            ZSetBy::Ntargets => self.z.max(self.n_targets as f64).max(1.0),
+        }
+    }
+
     /// Apply model-specific bit-score cutoffs (--cut_ga, --cut_nc, --cut_tc).
     /// Called after new_model() when use_bit_cutoffs is set.
     /// Returns Err if the model doesn't have the requested cutoff annotation.
@@ -334,7 +371,7 @@ impl Pipeline {
         use crate::hmm::*;
         match self.use_bit_cutoffs {
             BitCutoff::GA => {
-                if cutoffs[P7_GA1] == CUTOFF_UNSET {
+                if cutoffs[P7_GA1] == CUTOFF_UNSET || cutoffs[P7_GA2] == CUTOFF_UNSET {
                     return Err("GA cutoff not set in model".to_string());
                 }
                 self.t = Some(cutoffs[P7_GA1]);
@@ -343,7 +380,7 @@ impl Pipeline {
                 self.inc_dom_t = Some(cutoffs[P7_GA2]);
             }
             BitCutoff::TC => {
-                if cutoffs[P7_TC1] == CUTOFF_UNSET {
+                if cutoffs[P7_TC1] == CUTOFF_UNSET || cutoffs[P7_TC2] == CUTOFF_UNSET {
                     return Err("TC cutoff not set in model".to_string());
                 }
                 self.t = Some(cutoffs[P7_TC1]);
@@ -352,7 +389,7 @@ impl Pipeline {
                 self.inc_dom_t = Some(cutoffs[P7_TC2]);
             }
             BitCutoff::NC => {
-                if cutoffs[P7_NC1] == CUTOFF_UNSET {
+                if cutoffs[P7_NC1] == CUTOFF_UNSET || cutoffs[P7_NC2] == CUTOFF_UNSET {
                     return Err("NC cutoff not set in model".to_string());
                 }
                 self.t = Some(cutoffs[P7_NC1]);
@@ -426,8 +463,8 @@ impl Pipeline {
         if !self.do_max && !self.long_target {
             let mut filter_p = 0.0_f64;
 
-            // Stage 1: SIMD MSV filter
-            let mut usc = f32::INFINITY;
+            // Stage 1: MSV filter
+            let usc: f32;
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("sse2") {
@@ -446,27 +483,34 @@ impl Pipeline {
                         MsvResult::Ok(sc) => sc,
                         MsvResult::Overflow => f32::INFINITY,
                     };
-
-                    if usc != f32::INFINITY {
-                        let msv_pval = msv_pvalue(usc, null_sc, &self.evparam);
-                        if msv_pval > self.f1 {
-                            #[cfg(feature = "tracehash")]
-                            trace_pipeline_decision(
-                                "pipeline_msv_decision",
-                                &sq.dsq,
-                                l,
-                                gm.m,
-                                usc,
-                                null_sc,
-                                msv_pval,
-                                true,
-                                false,
-                            );
-                            return false;
-                        }
-                        filter_p = msv_pval;
-                    }
+                } else {
+                    let mut gx = Gmx::new(gm.m, l);
+                    usc = crate::dp::generic_msv::g_msv(&sq.dsq, l, gm, &mut gx, 2.0);
                 }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let mut gx = Gmx::new(gm.m, l);
+                usc = crate::dp::generic_msv::g_msv(&sq.dsq, l, gm, &mut gx, 2.0);
+            }
+            if usc != f32::INFINITY {
+                let msv_pval = msv_pvalue(usc, null_sc, &self.evparam);
+                if msv_pval > self.f1 {
+                    #[cfg(feature = "tracehash")]
+                    trace_pipeline_decision(
+                        "pipeline_msv_decision",
+                        &sq.dsq,
+                        l,
+                        gm.m,
+                        usc,
+                        null_sc,
+                        msv_pval,
+                        true,
+                        false,
+                    );
+                    return false;
+                }
+                filter_p = msv_pval;
             }
             #[cfg(feature = "tracehash")]
             trace_pipeline_decision(
@@ -517,7 +561,7 @@ impl Pipeline {
             );
             self.n_past_bias += 1;
 
-            // Stage 2: SIMD Viterbi filter (uses filtersc as baseline, matching C)
+            // Stage 2: Viterbi filter (uses filtersc as baseline, matching C)
             #[cfg(feature = "tracehash")]
             let mut vit_ran = false;
             #[cfg(feature = "tracehash")]
@@ -525,45 +569,54 @@ impl Pipeline {
             #[cfg(feature = "tracehash")]
             let mut vit_p_for_trace = filter_p;
             if filter_p > self.f2 {
+                #[cfg(feature = "tracehash")]
+                {
+                    vit_ran = true;
+                }
+                let vit_sc: f32;
                 #[cfg(target_arch = "x86_64")]
                 {
                     if is_x86_feature_detected!("sse2") {
-                        #[cfg(feature = "tracehash")]
-                        {
-                            vit_ran = true;
-                        }
                         let vit_result = unsafe { viterbi_filter(&sq.dsq, l, om) };
-                        let vit_sc = match vit_result {
+                        vit_sc = match vit_result {
                             VitResult::Ok(sc) => sc,
                             VitResult::Overflow => f32::INFINITY,
                         };
-                        #[cfg(feature = "tracehash")]
-                        {
-                            vit_sc_for_trace = vit_sc;
-                        }
+                    } else {
+                        let mut gx = Gmx::new(gm.m, l);
+                        vit_sc = crate::dp::generic_viterbi::g_viterbi(&sq.dsq, l, gm, &mut gx);
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    let mut gx = Gmx::new(gm.m, l);
+                    vit_sc = crate::dp::generic_viterbi::g_viterbi(&sq.dsq, l, gm, &mut gx);
+                }
+                #[cfg(feature = "tracehash")]
+                {
+                    vit_sc_for_trace = vit_sc;
+                }
 
-                        if vit_sc != f32::INFINITY {
-                            let vit_pval = viterbi_pvalue(vit_sc, filtersc, &self.evparam);
-                            #[cfg(feature = "tracehash")]
-                            {
-                                vit_p_for_trace = vit_pval;
-                            }
-                            if vit_pval > self.f2 {
-                                #[cfg(feature = "tracehash")]
-                                trace_pipeline_decision(
-                                    "pipeline_vit_decision",
-                                    &sq.dsq,
-                                    l,
-                                    gm.m,
-                                    vit_sc_for_trace,
-                                    filtersc,
-                                    vit_p_for_trace,
-                                    vit_ran,
-                                    false,
-                                );
-                                return false;
-                            }
-                        }
+                if vit_sc != f32::INFINITY {
+                    let vit_pval = viterbi_pvalue(vit_sc, filtersc, &self.evparam);
+                    #[cfg(feature = "tracehash")]
+                    {
+                        vit_p_for_trace = vit_pval;
+                    }
+                    if vit_pval > self.f2 {
+                        #[cfg(feature = "tracehash")]
+                        trace_pipeline_decision(
+                            "pipeline_vit_decision",
+                            &sq.dsq,
+                            l,
+                            gm.m,
+                            vit_sc_for_trace,
+                            filtersc,
+                            vit_p_for_trace,
+                            vit_ran,
+                            false,
+                        );
+                        return false;
                     }
                 }
             }
@@ -618,13 +671,13 @@ impl Pipeline {
                 };
                 fwd_pmx_for_domains = Some(&self.fwd_pmx);
             } else {
-                let mut gx = crate::dp::gmx::Gmx::new(gm.m, l);
+                let mut gx = Gmx::new(gm.m, l);
                 fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            let mut gx = crate::dp::gmx::Gmx::new(gm.m, l);
+            let mut gx = Gmx::new(gm.m, l);
             fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
         }
 
@@ -658,6 +711,16 @@ impl Pipeline {
             );
         #[cfg(not(feature = "tracehash"))]
         let _ = seq_correction_sum;
+        if self.long_target {
+            domains.retain(|dom| {
+                let span = dom
+                    .ad
+                    .as_ref()
+                    .map(|ad| ad.sqfrom.abs_diff(ad.sqto) + 1)
+                    .unwrap_or_else(|| (dom.iali - dom.jali).unsigned_abs() as usize + 1);
+                span >= 8
+            });
+        }
         if domains.is_empty() {
             return false;
         }
@@ -666,10 +729,10 @@ impl Pipeline {
         // Match C HMMER's two sequence scores:
         // 1. the full-sequence Forward score corrected by summed n2sc[]
         // 2. a reconstruction score from individually rescored domains
-        let omega = 1.0_f32 / 256.0;
+        let omega = bg.omega;
         let mut pre_score = nats_to_bits_from_scores(fwd_sc, null_sc);
         #[cfg(feature = "tracehash")]
-        let seqbias_log_omega = (omega as f64).ln();
+        let seqbias_log_omega = c_log_f64(omega as f64);
         #[cfg(feature = "tracehash")]
         let seqbias_arg = if self.do_null2 {
             (seqbias_log_omega + pipeline_seq_correction_sum as f64) as f32
@@ -679,7 +742,7 @@ impl Pipeline {
         let seqbias = if self.do_null2 {
             crate::logsum::p7_flogsum(
                 0.0,
-                ((omega as f64).ln() + pipeline_seq_correction_sum as f64) as f32,
+                (c_log_f64(omega as f64) + pipeline_seq_correction_sum as f64) as f32,
             )
         } else {
             0.0
@@ -734,7 +797,10 @@ impl Pipeline {
         }
         let sum_score_nats = reconstruction_score_nats(sum_env, l, ld);
         let sum_bias = if self.do_null2 {
-            crate::logsum::p7_flogsum(0.0, ((omega as f64).ln() + sum_correction as f64) as f32)
+            crate::logsum::p7_flogsum(
+                0.0,
+                (c_log_f64(omega as f64) + sum_correction as f64) as f32,
+            )
         } else {
             0.0
         };
@@ -795,12 +861,15 @@ impl Pipeline {
             // dom.dombias is already in bits (see domaindef.rs).
             let best_bias = best.dombias.max(0.0);
             let pre = best_bitscore + best_bias;
-            let best_lnp = best.lnp as f32;
             let pre_lnp_lt = stats::exponential::logsurv(pre as f64, mu_f, lam_f);
-            (best_bitscore, pre, best_bias, best_lnp, pre_lnp_lt)
+            (best_bitscore, pre, best_bias, best.lnp, pre_lnp_lt)
         } else {
-            (seq_score, pre_score, seq_bias_bits, lnp as f32, pre_lnp)
+            (seq_score, pre_score, seq_bias_bits, lnp, pre_lnp)
         };
+
+        if !self.target_reportable(hit_score, hit_lnp) {
+            return false;
+        }
 
         let hit = th.create_next_hit();
         hit.name = sq.name.clone();
@@ -815,10 +884,10 @@ impl Pipeline {
         } else {
             sum_score
         };
-        hit.lnp = hit_lnp as f64;
+        hit.lnp = hit_lnp;
         hit.pre_lnp = hit_pre_lnp;
         hit.sum_lnp = if self.long_target {
-            hit_lnp as f64
+            hit_lnp
         } else {
             stats::exponential::logsurv(sum_score as f64, mu_f, lam_f)
         };
@@ -833,42 +902,35 @@ impl Pipeline {
 
         if self.use_bit_cutoffs != BitCutoff::None {
             let target_reported = if self.by_e {
-                (self.z.max(1.0)) * hit.lnp.exp() <= self.e_value_threshold
+                (self.z.max(1.0)) * c_exp_f64(hit.lnp) <= self.e_value_threshold
             } else if let Some(t) = self.t {
                 hit.score >= t
             } else {
-                (self.z.max(1.0)) * hit.lnp.exp() <= self.e_value_threshold
+                (self.z.max(1.0)) * c_exp_f64(hit.lnp) <= self.e_value_threshold
             };
             if target_reported {
                 hit.flags |= P7_IS_REPORTED;
-                let target_included = if self.inc_by_e {
-                    (self.z.max(1.0)) * hit.lnp.exp() <= self.inc_e
-                } else if let Some(t) = self.inc_t {
-                    hit.score >= t
-                } else {
-                    (self.z.max(1.0)) * hit.lnp.exp() <= self.inc_e
-                };
-                if target_included {
+                if self.target_includable(hit.score, hit.lnp) {
                     hit.flags |= P7_IS_INCLUDED;
                 }
             }
 
             for dom in &mut hit.dcl {
                 let dom_reported = if self.dom_by_e {
-                    (self.domz.max(1.0)) * dom.lnp.exp() <= self.dom_e_value_threshold
+                    (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.dom_e_value_threshold
                 } else if let Some(t) = self.dom_t {
                     dom.bitscore >= t
                 } else {
-                    (self.domz.max(1.0)) * dom.lnp.exp() <= self.dom_e_value_threshold
+                    (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.dom_e_value_threshold
                 };
                 if dom_reported {
                     dom.is_reported = true;
                     let dom_included = if self.incdom_by_e {
-                        (self.domz.max(1.0)) * dom.lnp.exp() <= self.inc_dome
+                        (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.inc_dome
                     } else if let Some(t) = self.inc_dom_t {
                         dom.bitscore >= t
                     } else {
-                        (self.domz.max(1.0)) * dom.lnp.exp() <= self.inc_dome
+                        (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.inc_dome
                     };
                     if dom_included {
                         dom.is_included = true;
@@ -908,7 +970,7 @@ fn forward_pvalue(fwd_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
 /// Convert a raw score (nats, relative to `baseline`) into bits via division by ln(2).
 #[inline]
 fn nats_to_bits_from_scores(score: f32, baseline: f32) -> f32 {
-    (((score - baseline) as f64) / std::f64::consts::LN_2) as f32
+    (((score - baseline) as f64) / ESL_CONST_LOG2) as f32
 }
 
 /// Sequence reconstruction score in nats: sum of envelope scores plus a
@@ -918,7 +980,7 @@ fn nats_to_bits_from_scores(score: f32, baseline: f32) -> f32 {
 fn reconstruction_score_nats(sum_env: f32, l: usize, ld: usize) -> f32 {
     let len_ratio = l as f32 / (l as f32 + 3.0);
     let uncovered = l as i64 - ld as i64;
-    (sum_env as f64 + uncovered as f64 * (len_ratio as f64).ln()) as f32
+    (sum_env as f64 + uncovered as f64 * c_log_f64(len_ratio as f64)) as f32
 }
 
 #[cfg(test)]
@@ -926,6 +988,28 @@ mod tests {
     use super::*;
     use crate::alphabet::Alphabet;
     use std::path::Path;
+
+    #[test]
+    fn target_reportable_uses_explicit_z_before_admitting_hit() {
+        let mut pli = Pipeline::new();
+        pli.z = 1_000.0;
+        pli.z_setby = ZSetBy::Option;
+        pli.e_value_threshold = 1.0;
+
+        assert!(!pli.target_reportable(10.0, (0.01_f64).ln()));
+        assert!(pli.target_reportable(10.0, (0.0001_f64).ln()));
+    }
+
+    #[test]
+    fn target_reportable_long_target_uses_prescaled_pvalue() {
+        let mut pli = Pipeline::new();
+        pli.long_target = true;
+        pli.z = 1_000.0;
+        pli.z_setby = ZSetBy::Option;
+        pli.e_value_threshold = 1.0;
+
+        assert!(pli.target_reportable(10.0, (0.01_f64).ln()));
+    }
 
     /// Smoke test: pipeline produces at least one positive-score hit on a perfectly matching dsq.
     #[test]
@@ -972,7 +1056,7 @@ mod tests {
     #[test]
     fn reconstruction_score_allows_domain_coverage_to_exceed_sequence_length() {
         let score = reconstruction_score_nats(12.0, 100, 140);
-        let expected = 12.0_f64 + (100_i64 - 140_i64) as f64 * ((100.0_f64 / 103.0_f64).ln());
+        let expected = 12.0_f64 + (100_i64 - 140_i64) as f64 * c_log_f64(100.0_f64 / 103.0_f64);
         assert!((score as f64 - expected).abs() < 1.0e-6);
         assert!(score.is_finite());
         assert!(score > 12.0);

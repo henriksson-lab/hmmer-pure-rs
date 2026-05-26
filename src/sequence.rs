@@ -3,6 +3,8 @@
 
 use crate::alphabet::{Alphabet, Dsq, DSQ_IGNORED, DSQ_ILLEGAL, DSQ_SENTINEL};
 use crate::errors::{HmmerError, HmmerResult};
+use crate::msa;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 
 /// A biological sequence (digital or text mode).
@@ -52,13 +54,57 @@ impl Sequence {
     }
 }
 
-/// FASTA sequence file reader.
+/// Unaligned sequence file formats that the Rust reader can parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceFormat {
+    Fasta,
+    UniProt,
+    GenBank,
+    Embl,
+    Ddbj,
+    Stockholm,
+}
+
+impl SequenceFormat {
+    pub fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("fasta") {
+            Some(Self::Fasta)
+        } else if name.eq_ignore_ascii_case("uniprot") {
+            Some(Self::UniProt)
+        } else if name.eq_ignore_ascii_case("genbank") {
+            Some(Self::GenBank)
+        } else if name.eq_ignore_ascii_case("embl") {
+            Some(Self::Embl)
+        } else if name.eq_ignore_ascii_case("ddbj") {
+            Some(Self::Ddbj)
+        } else if name.eq_ignore_ascii_case("stockholm")
+            || name.eq_ignore_ascii_case("sto")
+            || name.eq_ignore_ascii_case("pfam")
+        {
+            Some(Self::Stockholm)
+        } else {
+            None
+        }
+    }
+
+    fn matches_record_start(self, trimmed_line: &str) -> bool {
+        match self {
+            Self::Fasta => trimmed_line.starts_with('>'),
+            Self::UniProt | Self::Embl => trimmed_line.starts_with("ID "),
+            Self::GenBank | Self::Ddbj => trimmed_line.starts_with("LOCUS "),
+            Self::Stockholm => trimmed_line.starts_with("# STOCKHOLM"),
+        }
+    }
+}
+
+/// Sequence file reader.
 pub struct SeqFile<R: Read> {
     reader: BufReader<R>,
     abc: Alphabet,
-    fasta_only: bool,
+    asserted_format: Option<SequenceFormat>,
     /// Buffered line for look-ahead
     pending_header: Option<String>,
+    pending_msa_sequences: VecDeque<Sequence>,
     at_eof: bool,
 }
 
@@ -69,15 +115,22 @@ impl<R: Read> SeqFile<R> {
         SeqFile {
             reader: BufReader::new(reader),
             abc,
-            fasta_only: false,
+            asserted_format: None,
             pending_header: None,
+            pending_msa_sequences: VecDeque::new(),
             at_eof: false,
         }
     }
 
     /// Require FASTA input instead of using sequence format autodetection.
     pub fn with_fasta_only(mut self) -> Self {
-        self.fasta_only = true;
+        self.asserted_format = Some(SequenceFormat::Fasta);
+        self
+    }
+
+    /// Require a specific input format instead of using sequence format autodetection.
+    pub fn with_format(mut self, format: SequenceFormat) -> Self {
+        self.asserted_format = Some(format);
         self
     }
 
@@ -91,10 +144,18 @@ impl<R: Read> SeqFile<R> {
     /// Returns `Ok(false)` at EOF.
     pub fn read(&mut self, sq: &mut Sequence) -> HmmerResult<bool> {
         if self.at_eof {
+            if let Some(next) = self.pending_msa_sequences.pop_front() {
+                *sq = next;
+                return Ok(true);
+            }
             return Ok(false);
         }
 
         sq.reuse();
+        if let Some(next) = self.pending_msa_sequences.pop_front() {
+            *sq = next;
+            return Ok(true);
+        }
 
         // Find the start of a sequence record
         let first_line = if let Some(h) = self.pending_header.take() {
@@ -109,10 +170,7 @@ impl<R: Read> SeqFile<R> {
                     return Ok(false);
                 }
                 let trimmed = line.trim();
-                if trimmed.starts_with('>')
-                    || (!self.fasta_only
-                        && (trimmed.starts_with("ID ") || trimmed.starts_with("LOCUS ")))
-                {
+                if self.is_accepted_record_start(trimmed) {
                     break;
                 }
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -126,9 +184,29 @@ impl<R: Read> SeqFile<R> {
         };
 
         let trimmed = first_line.trim();
+        let mut allow_zero_length = false;
 
-        if trimmed.starts_with('>') {
+        if trimmed.starts_with("# STOCKHOLM") {
+            let mut text = first_line;
+            self.reader
+                .read_to_string(&mut text)
+                .map_err(HmmerError::Io)?;
+            self.at_eof = true;
+            let msas = msa::read_stockholm_from_reader(BufReader::new(text.as_bytes()))?;
+            for alignment in msas {
+                for idx in 0..alignment.nseq {
+                    self.pending_msa_sequences
+                        .push_back(self.sequence_from_msa_row(&alignment, idx)?);
+                }
+            }
+            if let Some(next) = self.pending_msa_sequences.pop_front() {
+                *sq = next;
+                return Ok(true);
+            }
+            return Ok(false);
+        } else if trimmed.starts_with('>') {
             // FASTA format
+            allow_zero_length = true;
             let after_gt = trimmed[1..].trim_start();
             if after_gt.is_empty() {
                 return Err(HmmerError::Format("no FASTA name found".to_string()));
@@ -136,7 +214,12 @@ impl<R: Read> SeqFile<R> {
             let parts: Vec<&str> = after_gt.splitn(2, char::is_whitespace).collect();
             sq.name = parts[0].to_string();
             if let Some(desc) = parts.get(1) {
-                sq.desc = desc.trim().to_string();
+                sq.desc = desc
+                    .as_bytes()
+                    .split(|&b| b == 0x01)
+                    .next()
+                    .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+                    .unwrap_or_default();
             }
 
             let mut line = String::new();
@@ -181,8 +264,12 @@ impl<R: Read> SeqFile<R> {
                     break; // end of record
                 }
 
-                if trimmed.starts_with("DE ") {
-                    let de = trimmed[5..].trim();
+                if line.starts_with("DE ") {
+                    let de = line
+                        .strip_prefix("DE   ")
+                        .unwrap_or_else(|| line.get(5..).unwrap_or(""))
+                        .trim_end_matches(['\r', '\n']);
+                    let de = de.trim();
                     if !de.is_empty() {
                         if !sq.desc.is_empty() {
                             sq.desc.push(' ');
@@ -285,7 +372,7 @@ impl<R: Read> SeqFile<R> {
         sq.n = sq.dsq.len() - 2;
         sq.l = sq.n;
 
-        if sq.n == 0 {
+        if sq.n == 0 && !allow_zero_length {
             return Err(HmmerError::Format(format!(
                 "zero-length sequence record '{}'",
                 sq.name
@@ -296,6 +383,41 @@ impl<R: Read> SeqFile<R> {
 
     fn digitize_fasta_residue(&self, ch: u8, seq_name: &str) -> HmmerResult<Option<Dsq>> {
         self.digitize_sequence_residue(ch, "FASTA sequence", seq_name)
+    }
+
+    fn is_accepted_record_start(&self, trimmed_line: &str) -> bool {
+        if let Some(format) = self.asserted_format {
+            return format.matches_record_start(trimmed_line);
+        }
+        trimmed_line.starts_with('>')
+            || trimmed_line.starts_with("ID ")
+            || trimmed_line.starts_with("LOCUS ")
+    }
+
+    fn sequence_from_msa_row(&self, alignment: &msa::Msa, idx: usize) -> HmmerResult<Sequence> {
+        let mut sq = Sequence::new();
+        sq.name = alignment.sqname[idx].clone();
+        sq.desc = alignment.sqdesc.get(idx).cloned().unwrap_or_default();
+        for &ch in &alignment.aseq[idx] {
+            if matches!(ch, b'-' | b'.' | b'_' | b'~') || ch.is_ascii_whitespace() {
+                continue;
+            }
+            if let Some(code) =
+                self.digitize_sequence_residue(ch, "Stockholm sequence", &sq.name)?
+            {
+                sq.dsq.push(code);
+            }
+        }
+        sq.dsq.push(DSQ_SENTINEL);
+        sq.n = sq.dsq.len() - 2;
+        sq.l = sq.n;
+        if sq.n == 0 {
+            return Err(HmmerError::Format(format!(
+                "zero-length sequence record '{}'",
+                sq.name
+            )));
+        }
+        Ok(sq)
     }
 
     fn digitize_sequence_residue(
@@ -337,7 +459,7 @@ pub fn open_seq_file(
     path: &std::path::Path,
     abc: &Alphabet,
 ) -> HmmerResult<SeqFile<Box<dyn Read>>> {
-    open_seq_file_inner(path, abc, false)
+    open_seq_file_inner(path, abc, None)
 }
 
 /// Open a sequence file and require FASTA records.
@@ -345,19 +467,28 @@ pub fn open_fasta_seq_file(
     path: &std::path::Path,
     abc: &Alphabet,
 ) -> HmmerResult<SeqFile<Box<dyn Read>>> {
-    open_seq_file_inner(path, abc, true)
+    open_seq_file_inner(path, abc, Some(SequenceFormat::Fasta))
+}
+
+/// Open a sequence file and require a specific supported format.
+pub fn open_seq_file_with_format(
+    path: &std::path::Path,
+    abc: &Alphabet,
+    format: SequenceFormat,
+) -> HmmerResult<SeqFile<Box<dyn Read>>> {
+    open_seq_file_inner(path, abc, Some(format))
 }
 
 fn open_seq_file_inner(
     path: &std::path::Path,
     abc: &Alphabet,
-    fasta_only: bool,
+    asserted_format: Option<SequenceFormat>,
 ) -> HmmerResult<SeqFile<Box<dyn Read>>> {
     if path == std::path::Path::new("-") {
         let reader: Box<dyn Read> = Box::new(std::io::stdin());
         let sqf = SeqFile::new(reader, abc.clone());
-        return Ok(if fasta_only {
-            sqf.with_fasta_only()
+        return Ok(if let Some(format) = asserted_format {
+            sqf.with_format(format)
         } else {
             sqf
         });
@@ -369,8 +500,8 @@ fn open_seq_file_inner(
         Box::new(file)
     };
     let sqf = SeqFile::new(reader, abc.clone());
-    Ok(if fasta_only {
-        sqf.with_fasta_only()
+    Ok(if let Some(format) = asserted_format {
+        sqf.with_format(format)
     } else {
         sqf
     })
@@ -498,6 +629,13 @@ mod tests {
     }
 
     #[test]
+    fn test_read_fasta_truncates_description_at_ctrl_a() {
+        let sq = read_fasta_text(">seq first description\x01second record title\nACDE\n").unwrap();
+        assert_eq!(sq.name, "seq");
+        assert_eq!(sq.desc, "first description");
+    }
+
+    #[test]
     fn test_read_fasta_rejects_preamble_text() {
         let fasta = b"not a sequence record\n>seq1\nACDE\n";
         let abc = Alphabet::amino();
@@ -510,9 +648,26 @@ mod tests {
     }
 
     #[test]
-    fn test_read_fasta_rejects_empty_record() {
-        let err = read_fasta_text(">empty\n").unwrap_err();
-        assert!(err.to_string().contains("zero-length sequence record"));
+    fn test_read_fasta_accepts_empty_record() {
+        let sq = read_fasta_text(">empty\n").unwrap();
+        assert_eq!(sq.name, "empty");
+        assert_eq!(sq.n, 0);
+        assert_eq!(sq.dsq, vec![DSQ_SENTINEL, DSQ_SENTINEL]);
+    }
+
+    #[test]
+    fn test_read_fasta_accepts_empty_record_before_next_header() {
+        let abc = Alphabet::amino();
+        let mut reader = SeqFile::new(&b">empty\n>seq\nACD\n"[..], abc);
+        let mut sq = Sequence::new();
+
+        assert!(reader.read(&mut sq).unwrap());
+        assert_eq!(sq.name, "empty");
+        assert_eq!(sq.n, 0);
+
+        assert!(reader.read(&mut sq).unwrap());
+        assert_eq!(sq.name, "seq");
+        assert_eq!(sq.n, 3);
     }
 
     #[test]
@@ -525,5 +680,28 @@ mod tests {
         assert_eq!(sq.desc, "first line second line");
         assert_eq!(sq.acc, "ABC123");
         assert_eq!(sq.n, 4);
+    }
+
+    #[test]
+    fn test_read_genbank_with_asserted_format() {
+        let genbank = b"LOCUS       seq1 4 bp DNA\nORIGIN\n        1 acgt\n//\n";
+        let abc = Alphabet::dna();
+        let mut reader = SeqFile::new(&genbank[..], abc).with_format(SequenceFormat::GenBank);
+        let mut sq = Sequence::new();
+        assert!(reader.read(&mut sq).unwrap());
+        assert_eq!(sq.name, "seq1");
+        assert_eq!(sq.n, 4);
+    }
+
+    #[test]
+    fn test_asserted_format_rejects_other_record_start() {
+        let uniprot = b"ID   seq1\nSQ   SEQUENCE 4 AA;\nACDE\n//\n";
+        let abc = Alphabet::amino();
+        let mut reader = SeqFile::new(&uniprot[..], abc).with_format(SequenceFormat::Fasta);
+        let mut sq = Sequence::new();
+        let err = reader.read(&mut sq).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unrecognized sequence file record start"));
     }
 }

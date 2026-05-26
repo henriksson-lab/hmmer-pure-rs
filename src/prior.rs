@@ -1,6 +1,15 @@
 //! Dirichlet mixture priors for HMM parameterization.
 //! Simplified port of p7_prior.c.
 
+use crate::util::cmath::{c_exp_f64, c_log_f64};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorStrategy {
+    Default,
+    None,
+    Laplace,
+}
+
 /// Add Dirichlet prior pseudocounts and return the posterior mean estimate.
 ///
 /// `counts[a]` are the observed pseudocounts and `alpha[a]` the Dirichlet
@@ -105,7 +114,7 @@ pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
         // log P(counts | component) ∝ log(q_k) + log Γ(alpha_sum) - log Γ(count_sum + alpha_sum)
         //   + sum_a [ log Γ(c_a + alpha_a) - log Γ(alpha_a) ]
         // Simplified: use log-gamma approximation
-        let mut log_p = SJOLANDER_Q[comp].ln();
+        let mut log_p = c_log_f64(SJOLANDER_Q[comp]);
         log_p += ln_gamma(alpha_sum) - ln_gamma(count_sum + alpha_sum);
         for a in 0..k {
             log_p += ln_gamma(counts_d[a] + SJOLANDER_ALPHA[comp][a])
@@ -162,7 +171,7 @@ fn ln_gamma(x: f64) -> f64 {
         value += cof / tmp;
         tmp -= 1.0;
     }
-    value.ln() + 0.918938533 + (xx + 0.5) * (tx + 0.5).ln() - (tx + 0.5)
+    c_log_f64(value) + 0.918938533 + (xx + 0.5) * c_log_f64(tx + 0.5) - (tx + 0.5)
 }
 
 /// Numerically stable `log(sum(exp(values)))` ("log-sum-exp"), terms with
@@ -175,10 +184,10 @@ fn dlog_sum(values: &[f64]) -> f64 {
     let mut sum = 0.0;
     for &value in values {
         if value > max - 500.0 {
-            sum += (value - max).exp();
+            sum += c_exp_f64(value - max);
         }
     }
-    sum.ln() + max
+    c_log_f64(sum) + max
 }
 
 /// Normalise a vector of log-probabilities in place to a probability
@@ -186,7 +195,7 @@ fn dlog_sum(values: &[f64]) -> f64 {
 fn dlog_norm(values: &mut [f64]) {
     let denom = dlog_sum(values);
     for value in values.iter_mut() {
-        *value = (*value - denom).exp();
+        *value = c_exp_f64(*value - denom);
     }
     dnorm(values);
 }
@@ -270,7 +279,7 @@ fn apply_mixture_dirichlet_with_components(
     let mut log_pk = vec![0.0_f64; q.len()];
     for comp in 0..q.len() {
         let alpha_sum: f64 = alpha[comp].iter().sum();
-        let mut log_p = q[comp].ln();
+        let mut log_p = c_log_f64(q[comp]);
         log_p += ln_gamma(alpha_sum) - ln_gamma(count_sum + alpha_sum);
         for a in 0..k {
             log_p += ln_gamma(counts_d[a] + alpha[comp][a]) - ln_gamma(alpha[comp][a]);
@@ -308,6 +317,18 @@ fn apply_mixture_dirichlet_with_components(
 /// for amino acids, the 4-component nucleic prior, or a Laplace fallback;
 /// insert emissions use the simple `amino_insert_alpha` / `nucleic_insert_alpha`.
 pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
+    apply_priors_with_strategy(hmm, PriorStrategy::Default);
+}
+
+pub fn apply_priors_with_strategy(hmm: &mut crate::hmm::Hmm, strategy: PriorStrategy) {
+    match strategy {
+        PriorStrategy::Default => apply_default_priors(hmm),
+        PriorStrategy::None => apply_none_priors(hmm),
+        PriorStrategy::Laplace => apply_laplace_priors(hmm),
+    }
+}
+
+fn apply_default_priors(hmm: &mut crate::hmm::Hmm) {
     use crate::hmm::*;
     let k = hmm.abc_k;
     let m = hmm.m;
@@ -372,6 +393,72 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
     for node in 0..=m {
         let ins_counts: Vec<f32> = hmm.ins[node][..k].to_vec();
         let ins_probs = apply_dirichlet_f64(&ins_counts, &ins_alpha);
+        hmm.ins[node][..k].copy_from_slice(&ins_probs);
+    }
+}
+
+fn apply_none_priors(hmm: &mut crate::hmm::Hmm) {
+    parameterize_with_uniform_alpha(hmm, 0.0);
+}
+
+fn apply_laplace_priors(hmm: &mut crate::hmm::Hmm) {
+    parameterize_with_uniform_alpha(hmm, 1.0);
+}
+
+fn parameterize_with_uniform_alpha(hmm: &mut crate::hmm::Hmm, alpha: f64) {
+    use crate::hmm::*;
+    let k = hmm.abc_k;
+    let m = hmm.m;
+
+    let mt_alpha = [alpha; 3];
+    let it_alpha = [alpha; 2];
+    let dt_alpha = [alpha; 2];
+
+    for node in 0..=m {
+        let mt_counts = [hmm.t[node][MM], hmm.t[node][MI], hmm.t[node][MD]];
+        let mt_probs = apply_dirichlet_f64(&mt_counts, &mt_alpha);
+        hmm.t[node][MM] = mt_probs[0];
+        hmm.t[node][MI] = mt_probs[1];
+        hmm.t[node][MD] = mt_probs[2];
+
+        let it_counts = [hmm.t[node][IM], hmm.t[node][II]];
+        let it_probs = apply_dirichlet_f64(&it_counts, &it_alpha);
+        hmm.t[node][IM] = it_probs[0];
+        hmm.t[node][II] = it_probs[1];
+    }
+    hmm.t[m][MD] = 0.0;
+    let msum = hmm.t[m][MM] + hmm.t[m][MI] + hmm.t[m][MD];
+    if msum > 0.0 {
+        hmm.t[m][MM] /= msum;
+        hmm.t[m][MI] /= msum;
+        hmm.t[m][MD] /= msum;
+    }
+
+    for node in 1..m {
+        let dt_counts = [hmm.t[node][DM], hmm.t[node][DD]];
+        let dt_probs = apply_dirichlet_f64(&dt_counts, &dt_alpha);
+        hmm.t[node][DM] = dt_probs[0];
+        hmm.t[node][DD] = dt_probs[1];
+    }
+    hmm.t[0][DM] = 1.0;
+    hmm.t[0][DD] = 0.0;
+    hmm.t[m][DM] = 1.0;
+    hmm.t[m][DD] = 0.0;
+
+    let emission_alpha = vec![alpha; k];
+    for node in 1..=m {
+        let match_counts: Vec<f32> = hmm.mat[node][..k].to_vec();
+        let match_probs = apply_dirichlet_f64(&match_counts, &emission_alpha);
+        hmm.mat[node][..k].copy_from_slice(&match_probs);
+    }
+    hmm.mat[0][..k].fill(0.0);
+    if k > 0 {
+        hmm.mat[0][0] = 1.0;
+    }
+
+    for node in 0..=m {
+        let ins_counts: Vec<f32> = hmm.ins[node][..k].to_vec();
+        let ins_probs = apply_dirichlet_f64(&ins_counts, &emission_alpha);
         hmm.ins[node][..k].copy_from_slice(&ins_probs);
     }
 }

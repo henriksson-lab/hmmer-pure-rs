@@ -1178,15 +1178,9 @@ pub fn pressed_db_exists(hmm_path: &Path) -> bool {
     pressed_sidecar_paths(hmm_path).iter().all(|p| p.exists())
 }
 
-pub fn pressed_h3m_path(hmm_path: &Path) -> PathBuf {
-    pressed_sidecar_paths(hmm_path)[3].clone()
-}
-
-/// Return `Ok(true)` only when a complete, minimally readable pressed database
-/// exists. Return an error for partial or malformed sidecar sets, because C
-/// HMMER treats those as pressed-database failures rather than silently falling
-/// back to the source HMM.
-pub fn pressed_db_available(hmm_path: &Path) -> HmmerResult<bool> {
+/// Return `Ok(true)` when every pressed-database sidecar exists, `Ok(false)`
+/// when none exist, and an error for partial sidecar sets.
+pub fn pressed_db_sidecars_complete(hmm_path: &Path) -> HmmerResult<bool> {
     let paths = pressed_sidecar_paths(hmm_path);
     let existing = paths.iter().filter(|p| p.exists()).count();
     if existing == 0 {
@@ -1198,6 +1192,22 @@ pub fn pressed_db_available(hmm_path: &Path) -> HmmerResult<bool> {
             hmm_path.display()
         )));
     }
+    Ok(true)
+}
+
+pub fn pressed_h3m_path(hmm_path: &Path) -> PathBuf {
+    pressed_sidecar_paths(hmm_path)[3].clone()
+}
+
+/// Return `Ok(true)` only when a complete, minimally readable pressed database
+/// exists. Return an error for partial or malformed sidecar sets, because C
+/// HMMER treats those as pressed-database failures rather than silently falling
+/// back to the source HMM.
+pub fn pressed_db_available(hmm_path: &Path) -> HmmerResult<bool> {
+    if !pressed_db_sidecars_complete(hmm_path)? {
+        return Ok(false);
+    }
+    let paths = pressed_sidecar_paths(hmm_path);
 
     let mut h3f = std::fs::File::open(&paths[0]).map_err(HmmerError::Io)?;
     let Some(msv) = read_h3f_record(&mut h3f)? else {

@@ -4,6 +4,7 @@
 use divsufsort::sort_in_place;
 
 /// A simple FM-index for DNA sequences.
+#[derive(Debug)]
 pub struct FmIndex {
     /// Burrows-Wheeler transform
     pub bwt: Vec<u8>,
@@ -13,6 +14,22 @@ pub struct FmIndex {
     pub c: [usize; 256],
     /// Length of the indexed text
     pub n: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FmInterval {
+    pub lo: usize,
+    pub hi: usize,
+}
+
+impl FmInterval {
+    pub fn len(self) -> usize {
+        self.hi.saturating_sub(self.lo)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.lo >= self.hi
+    }
 }
 
 impl FmIndex {
@@ -58,6 +75,79 @@ impl FmIndex {
         }
     }
 
+    /// Return the full suffix-array interval before any pattern characters are
+    /// applied.
+    pub fn root_interval(&self) -> FmInterval {
+        FmInterval {
+            lo: 0,
+            hi: self.bwt.len(),
+        }
+    }
+
+    /// Apply one backward-search step to an existing interval.
+    ///
+    /// This is the primitive C's FM trie search uses while recursively adding
+    /// bases and pruning empty suffix-array intervals before exploring deeper
+    /// seeds.
+    pub fn prepend_interval(&self, interval: FmInterval, ch: u8) -> Option<FmInterval> {
+        if ch == 0 || interval.is_empty() || interval.hi > self.bwt.len() {
+            return None;
+        }
+
+        let lo = self.c[ch as usize] + self.occ(ch, interval.lo);
+        let hi = self.c[ch as usize] + self.occ(ch, interval.hi);
+        (lo < hi).then_some(FmInterval { lo, hi })
+    }
+
+    /// Reconstruct an FM-index from serialized components.
+    ///
+    /// `text_len` is the length of the indexed text before the internal
+    /// sentinel. Serialized makehmmerdb container indexes store BWT/SA/C arrays
+    /// separately, so nhmmer uses this constructor when loading those records.
+    pub fn from_parts(
+        bwt: Vec<u8>,
+        sa: Vec<i32>,
+        c: [usize; 256],
+        text_len: usize,
+    ) -> Result<Self, String> {
+        let expected_len = text_len
+            .checked_add(1)
+            .ok_or_else(|| "FM-index text length overflows usize".to_string())?;
+        if bwt.len() != expected_len {
+            return Err(format!(
+                "FM-index BWT length {} does not match text length {} plus sentinel",
+                bwt.len(),
+                text_len
+            ));
+        }
+        if sa.len() != bwt.len() {
+            return Err(format!(
+                "FM-index suffix-array length {} does not match BWT length {}",
+                sa.len(),
+                bwt.len()
+            ));
+        }
+        if c[0] != 0 {
+            return Err("FM-index C table must start at zero".to_string());
+        }
+        if c.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err("FM-index C table is not monotonic".to_string());
+        }
+        if sa
+            .iter()
+            .any(|&pos| pos < 0 || pos as usize >= expected_len)
+        {
+            return Err("FM-index suffix-array entry is outside indexed text".to_string());
+        }
+
+        Ok(FmIndex {
+            bwt,
+            sa,
+            c,
+            n: text_len,
+        })
+    }
+
     /// Count exact occurrences of `pattern` in the indexed text by BWT
     /// backward search. Returns 0 when the pattern does not occur.
     /// Analog of C's `getSARangeReverse()` interval-shrinking loop.
@@ -96,21 +186,25 @@ impl FmIndex {
             return Vec::new();
         }
 
-        let bwt_len = self.bwt.len();
-        let mut lo = 0usize;
-        let mut hi = bwt_len;
+        let mut interval = self.root_interval();
 
         for &ch in pattern.iter().rev() {
-            let occ_lo = self.occ(ch, lo);
-            let occ_hi = self.occ(ch, hi);
-            lo = self.c[ch as usize] + occ_lo;
-            hi = self.c[ch as usize] + occ_hi;
-            if lo >= hi {
+            let Some(next) = self.prepend_interval(interval, ch) else {
                 return Vec::new();
-            }
+            };
+            interval = next;
         }
 
-        (lo..hi)
+        self.locate_interval(interval)
+    }
+
+    /// Locate all text positions in an already-computed suffix-array interval.
+    pub fn locate_interval(&self, interval: FmInterval) -> Vec<usize> {
+        if interval.is_empty() || interval.hi > self.sa.len() {
+            return Vec::new();
+        }
+
+        (interval.lo..interval.hi)
             .map(|i| self.sa[i] as usize)
             .filter(|&pos| pos < self.n)
             .collect()
@@ -158,5 +252,50 @@ mod tests {
 
         assert_eq!(fm.count(&[0]), 0);
         assert!(fm.locate(&[0]).is_empty());
+    }
+
+    #[test]
+    fn fm_index_reconstructs_from_serialized_parts() {
+        let original = FmIndex::build(b"ACGTACGT");
+        let rebuilt = FmIndex::from_parts(
+            original.bwt.clone(),
+            original.sa.clone(),
+            original.c,
+            original.n,
+        )
+        .unwrap();
+
+        let mut positions = rebuilt.locate(b"CGT");
+        positions.sort();
+        assert_eq!(positions, vec![1, 5]);
+    }
+
+    #[test]
+    fn fm_index_rejects_inconsistent_serialized_parts() {
+        let original = FmIndex::build(b"ACGT");
+        let err = FmIndex::from_parts(original.bwt, original.sa, original.c, 99).unwrap_err();
+
+        assert!(err.contains("BWT length"));
+    }
+
+    #[test]
+    fn fm_index_interval_steps_match_locate_and_prune_missing_prefixes() {
+        let fm = FmIndex::build(b"AACGTAACGT");
+        let interval = fm
+            .prepend_interval(fm.root_interval(), b'T')
+            .and_then(|iv| fm.prepend_interval(iv, b'G'))
+            .and_then(|iv| fm.prepend_interval(iv, b'C'))
+            .and_then(|iv| fm.prepend_interval(iv, b'A'))
+            .and_then(|iv| fm.prepend_interval(iv, b'A'))
+            .unwrap();
+
+        let mut via_interval = fm.locate_interval(interval);
+        via_interval.sort();
+        let mut via_pattern = fm.locate(b"AACGT");
+        via_pattern.sort();
+        assert_eq!(via_interval, via_pattern);
+
+        assert_eq!(interval.len(), 2);
+        assert!(fm.prepend_interval(interval, b'G').is_none());
     }
 }

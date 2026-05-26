@@ -137,6 +137,19 @@ pub fn g_forward(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     gx.xmx(l, P7G_C) + gm.xsc[P7P_C][P7P_MOVE]
 }
 
+/// The Hybrid algorithm: run Forward, then return the maximum Match-state
+/// value in the Forward matrix. Counterpart of `p7_GHybrid`.
+pub fn g_hybrid(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
+    let _fwd_sc = g_forward(dsq, l, gm, gx);
+    let mut hybrid = f32::NEG_INFINITY;
+    for i in 1..=l {
+        for k in 1..=gm.m {
+            hybrid = hybrid.max(gx.mmx(i, k));
+        }
+    }
+    hybrid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +187,34 @@ mod tests {
             fwd_sc,
             vit_sc
         );
+    }
+
+    #[test]
+    fn test_hybrid_matches_max_forward_match_cell() {
+        let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let abc = Alphabet::new(hmm.abc_type);
+        let bg = Bg::new(&abc);
+        let mut gm = Profile::new(hmm.m, &abc);
+        crate::profile::profile_config(&hmm, &bg, &mut gm, 20, P7_LOCAL);
+
+        let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");
+        let l = dsq.len() - 2;
+        let mut gx = Gmx::new(gm.m, l);
+        let hybrid = g_hybrid(&dsq, l, &gm, &mut gx);
+        let mut expected = f32::NEG_INFINITY;
+        for i in 1..=l {
+            for k in 1..=gm.m {
+                expected = expected.max(gx.mmx(i, k));
+            }
+        }
+        assert_eq!(hybrid, expected);
+        assert!(hybrid.is_finite());
     }
 }

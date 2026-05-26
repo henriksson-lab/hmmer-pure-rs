@@ -4,19 +4,21 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
 use hmmer_pure_rs::builder;
+use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::msa::Msa;
 use hmmer_pure_rs::pipeline::Pipeline;
+use hmmer_pure_rs::prior::PriorStrategy;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
 use hmmer_pure_rs::seqmodel;
-use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
-use hmmer_pure_rs::tophits::TopHits;
+use hmmer_pure_rs::tophits::{Hit, TopHits};
 use hmmer_pure_rs::trace::{State, Trace};
 
 const TARGET_BATCH_SIZE: usize = 256;
@@ -35,6 +37,14 @@ struct Args {
     seqfile: PathBuf,
     /// Target sequence database (FASTA)
     seqdb: PathBuf,
+
+    /// Assert query sequence file format
+    #[arg(long = "qformat")]
+    qformat: Option<String>,
+
+    /// Assert target sequence database format
+    #[arg(long = "tformat")]
+    tformat: Option<String>,
 
     /// Maximum number of iterations
     #[arg(short = 'N', default_value = "5", value_parser = parse_nonzero_usize)]
@@ -92,6 +102,18 @@ struct Args {
     #[arg(long = "incdomT", conflicts_with = "incdom_e")]
     incdom_t: Option<f32>,
 
+    /// Hidden C-compatible model gathering cutoff flag
+    #[arg(long = "cut_ga", hide = true)]
+    cut_ga: bool,
+
+    /// Hidden C-compatible model noise cutoff flag
+    #[arg(long = "cut_nc", hide = true)]
+    cut_nc: bool,
+
+    /// Hidden C-compatible model trusted cutoff flag
+    #[arg(long = "cut_tc", hide = true)]
+    cut_tc: bool,
+
     /// Turn all heuristic filters off
     #[arg(long = "max", conflicts_with_all = ["f1", "f2", "f3", "nobias"])]
     max: bool,
@@ -115,6 +137,94 @@ struct Args {
     /// Gap extend probability for the single-sequence query model
     #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
     pextend: f32,
+
+    /// Substitution score matrix choice
+    #[arg(long = "mx", default_value = "BLOSUM62", conflicts_with = "mxfile")]
+    matrix: String,
+
+    /// Read substitution score matrix from file
+    #[arg(long = "mxfile")]
+    mxfile: Option<PathBuf>,
+
+    /// Hidden C-compatible fast architecture option, prohibited by jackhmmer
+    #[arg(long = "fast", hide = true)]
+    fast: bool,
+
+    /// Hidden C-compatible hand architecture option, prohibited by jackhmmer
+    #[arg(long = "hand", hide = true)]
+    hand: bool,
+
+    /// Hidden C-compatible fast architecture threshold, prohibited by jackhmmer
+    #[arg(long = "symfrac", hide = true)]
+    symfrac: Option<f64>,
+
+    /// Henikoff position-based weights for post-round rebuilds (default)
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["wgsc", "wblosum", "wnone"])]
+    wpb: bool,
+
+    /// Gerstein/Sonnhammer/Chothia tree weights for post-round rebuilds
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["wpb", "wblosum", "wnone"])]
+    wgsc: bool,
+
+    /// Henikoff simple filter weights for post-round rebuilds
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["wpb", "wgsc", "wnone"])]
+    wblosum: bool,
+
+    /// No relative sequence weighting in post-round rebuilds
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["wpb", "wgsc", "wblosum"])]
+    wnone: bool,
+
+    /// Hidden C-compatible given-weight option, prohibited by jackhmmer
+    #[arg(long = "wgiven", hide = true)]
+    wgiven: bool,
+
+    /// For --wblosum: set identity cutoff
+    #[arg(long = "wid", default_value = "0.62", value_parser = parse_unit_f64)]
+    wid: f64,
+
+    /// Entropy effective sequence weighting for post-round rebuilds (default)
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["eentexp", "eclust", "enone", "eset"])]
+    eent: bool,
+
+    /// Entropy effective sequence weighting with exponent-based scaling
+    #[arg(long = "eentexp", action = ArgAction::SetTrue, conflicts_with_all = ["eent", "eclust", "enone", "eset"])]
+    eentexp: bool,
+
+    /// Set post-round effective sequence number to single-linkage cluster count
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["eent", "eentexp", "enone", "eset"])]
+    eclust: bool,
+
+    /// For --eclust: set identity cutoff
+    #[arg(long = "eid", default_value = "0.62", value_parser = parse_unit_f64)]
+    eid: f64,
+
+    /// No post-round effective sequence weighting; use the raw sequence count
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["eent", "eentexp", "eclust", "eset"])]
+    enone: bool,
+
+    /// Set post-round effective sequence number for all models
+    #[arg(long = "eset", conflicts_with_all = ["eent", "eentexp", "eclust", "enone"])]
+    eset: Option<f32>,
+
+    /// No post-round prior; use observed counts only
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "plaplace")]
+    pnone: bool,
+
+    /// Use a post-round Laplace +1 prior
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "pnone")]
+    plaplace: bool,
+
+    /// Minimum relative entropy target for post-round entropy weighting
+    #[arg(long = "ere", value_parser = parse_positive_f64)]
+    ere: Option<f64>,
+
+    /// Entropy target sigma parameter for post-round entropy weighting
+    #[arg(long = "esigma", default_value = "45.0", value_parser = parse_positive_f64)]
+    esigma: f64,
+
+    /// Sequence is called a fragment if L <= x*alignment_length
+    #[arg(long = "fragthresh", default_value = "0.5", value_parser = parse_unit_f32)]
+    fragthresh: f32,
 
     /// Number of CPU threads
     #[arg(long = "cpu", default_value = "2")]
@@ -140,6 +250,34 @@ struct Args {
     #[arg(long = "seed", default_value = "42")]
     seed: u32,
 
+    /// Length of sequences for MSV Gumbel mu fit
+    #[arg(long = "EmL", default_value = "200", value_parser = parse_nonzero_usize)]
+    em_l: usize,
+
+    /// Number of sequences for MSV Gumbel mu fit
+    #[arg(long = "EmN", default_value = "200", value_parser = parse_nonzero_usize)]
+    em_n: usize,
+
+    /// Length of sequences for Viterbi Gumbel mu fit
+    #[arg(long = "EvL", default_value = "200", value_parser = parse_nonzero_usize)]
+    ev_l: usize,
+
+    /// Number of sequences for Viterbi Gumbel mu fit
+    #[arg(long = "EvN", default_value = "200", value_parser = parse_nonzero_usize)]
+    ev_n: usize,
+
+    /// Length of sequences for Forward exp tail tau fit
+    #[arg(long = "EfL", default_value = "100", value_parser = parse_nonzero_usize)]
+    ef_l: usize,
+
+    /// Number of sequences for Forward exp tail tau fit
+    #[arg(long = "EfN", default_value = "200", value_parser = parse_nonzero_usize)]
+    ef_n: usize,
+
+    /// Tail mass for Forward exponential tail tau fit
+    #[arg(long = "Eft", default_value = "0.04", value_parser = parse_open_unit_f64)]
+    eft: f64,
+
     /// Save per-sequence hits to tabular file
     #[arg(long = "tblout")]
     tblout: Option<PathBuf>,
@@ -147,6 +285,26 @@ struct Args {
     /// Save per-domain hits to tabular file
     #[arg(long = "domtblout")]
     domtblout: Option<PathBuf>,
+
+    /// Save multiple alignment of hits to file
+    #[arg(short = 'A')]
+    ali_outfile: Option<PathBuf>,
+
+    /// Prefer accessions over names in output
+    #[arg(long = "acc")]
+    show_acc: bool,
+
+    /// Omit alignments from the main output
+    #[arg(long = "noali")]
+    noali: bool,
+
+    /// Do not line-wrap the main text output
+    #[arg(long = "notextw", conflicts_with = "textw")]
+    notextw: bool,
+
+    /// Set the target line width for the main text output
+    #[arg(long = "textw", default_value = "120", value_parser = parse_textw)]
+    textw: usize,
 
     /// Save HMM checkpoints to files <f>-<iteration>.hmm
     #[arg(long = "chkhmm")]
@@ -179,6 +337,50 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
     }
 }
 
+fn parse_unit_f64(s: &str) -> Result<f64, String> {
+    let value = s
+        .parse::<f64>()
+        .map_err(|e| format!("invalid probability: {e}"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("value must be >= 0 and <= 1".to_string())
+    }
+}
+
+fn parse_unit_f32(s: &str) -> Result<f32, String> {
+    let value = s
+        .parse::<f32>()
+        .map_err(|e| format!("invalid probability: {e}"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("value must be >= 0 and <= 1".to_string())
+    }
+}
+
+fn parse_open_unit_f64(s: &str) -> Result<f64, String> {
+    let value = s
+        .parse::<f64>()
+        .map_err(|e| format!("invalid probability: {e}"))?;
+    if value > 0.0 && value < 1.0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0 and < 1".to_string())
+    }
+}
+
+fn parse_textw(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid text width: {e}"))?;
+    if value >= 120 {
+        Ok(value)
+    } else {
+        Err("--textw must be >= 120".to_string())
+    }
+}
+
 fn parse_popen(s: &str) -> Result<f32, String> {
     let value = s
         .parse::<f32>()
@@ -201,26 +403,6 @@ fn parse_pextend(s: &str) -> Result<f32, String> {
     }
 }
 
-fn count_query_sequences(path: &std::path::Path, abc: &Alphabet) -> usize {
-    let mut sqf = sequence::open_seq_file(path, abc).unwrap_or_else(|e| {
-        eprintln!("Error opening query file: {}", e);
-        std::process::exit(1);
-    });
-    let mut sq = Sequence::new();
-    let mut count = 0usize;
-    while sqf.read(&mut sq).unwrap_or_else(|e| {
-        eprintln!("Error reading query file: {}", e);
-        std::process::exit(1);
-    }) {
-        count += 1;
-        if count > 1 {
-            break;
-        }
-        sq.reuse();
-    }
-    count
-}
-
 /// Entry point for `jackhmmer`: iteratively search a protein query against a
 /// protein database, rebuilding the HMM each round from included hits until
 /// convergence or `-N` iterations.
@@ -233,7 +415,136 @@ fn count_query_sequences(path: &std::path::Path, abc: &Alphabet) -> usize {
 /// `--chkhmm`/`--chkali`/`--tblout`/`--domtblout` checkpoints. Corresponds to
 /// `serial_master()` in hmmer/src/jackhmmer.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
+    let cmdline = args.join(" ");
+    let cpu_was_requested = args
+        .iter()
+        .any(|arg| arg == "--cpu" || arg.starts_with("--cpu="))
+        || std::env::var_os("HMMER_NCPU").is_some();
+    let matrix_was_requested = args
+        .iter()
+        .any(|arg| arg == "--mx" || arg.starts_with("--mx="));
+    let mxfile_was_requested = args
+        .iter()
+        .any(|arg| arg == "--mxfile" || arg.starts_with("--mxfile="));
+    let popen_was_requested = args
+        .iter()
+        .any(|arg| arg == "--popen" || arg.starts_with("--popen="));
+    let pextend_was_requested = args
+        .iter()
+        .any(|arg| arg == "--pextend" || arg.starts_with("--pextend="));
+    let wid_was_requested = args
+        .iter()
+        .any(|arg| arg == "--wid" || arg.starts_with("--wid="));
+    let eid_was_requested = args
+        .iter()
+        .any(|arg| arg == "--eid" || arg.starts_with("--eid="));
+    let em_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EmL" || arg.starts_with("--EmL="));
+    let em_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EmN" || arg.starts_with("--EmN="));
+    let ev_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EvL" || arg.starts_with("--EvL="));
+    let ev_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EvN" || arg.starts_with("--EvN="));
+    let ef_l_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EfL" || arg.starts_with("--EfL="));
+    let ef_n_was_requested = args
+        .iter()
+        .any(|arg| arg == "--EfN" || arg.starts_with("--EfN="));
+    let eft_was_requested = args
+        .iter()
+        .any(|arg| arg == "--Eft" || arg.starts_with("--Eft="));
+    let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
+    if args.cut_ga {
+        println!("Failed to parse command line: jackhmmer does not accept a --cut-ga option");
+        std::process::exit(1);
+    }
+    if args.cut_nc {
+        println!("Failed to parse command line: jackhmmer does not accept a --cut-nc option");
+        std::process::exit(1);
+    }
+    if args.cut_tc {
+        println!("Failed to parse command line: jackhmmer does not accept a --cut-tc option");
+        std::process::exit(1);
+    }
+    if args.fast {
+        println!("Failed to parse command line: jackhmmer does not accept a --fast option");
+        std::process::exit(1);
+    }
+    if args.hand {
+        println!("Failed to parse command line: jackhmmer does not accept a --hand option");
+        std::process::exit(1);
+    }
+    if args.symfrac.is_some() {
+        println!("Failed to parse command line: jackhmmer does not accept a --symfrac option");
+        std::process::exit(1);
+    }
+    if args.wgiven {
+        println!("Failed to parse command line: jackhmmer does not accept a --wgiven option");
+        std::process::exit(1);
+    }
+    if wid_was_requested && !args.wblosum {
+        eprintln!("Error: --wid only works in combination with --wblosum");
+        std::process::exit(1);
+    }
+    if eid_was_requested && !args.eclust {
+        eprintln!("Error: --eid only works in combination with --eclust");
+        std::process::exit(1);
+    }
+    validate_sequence_format("jackhmmer --qformat", args.qformat.as_deref());
+    validate_sequence_format("jackhmmer --tformat", args.tformat.as_deref());
+    let rebuild_weighting = if args.wnone {
+        builder::RelativeWeighting::None
+    } else if args.wgsc {
+        builder::RelativeWeighting::Gsc
+    } else if args.wblosum {
+        builder::RelativeWeighting::Blosum {
+            identity_cutoff: args.wid,
+        }
+    } else {
+        builder::RelativeWeighting::PositionBased
+    };
+    let rebuild_effn = if args.enone {
+        builder::EffectiveSeqNumber::None
+    } else if args.eclust {
+        builder::EffectiveSeqNumber::Cluster {
+            identity_cutoff: args.eid,
+        }
+    } else if let Some(eset) = args.eset {
+        builder::EffectiveSeqNumber::Set(eset)
+    } else if args.eentexp {
+        builder::EffectiveSeqNumber::EntropyExp {
+            target_re: args.ere,
+            target_sigma: Some(args.esigma),
+        }
+    } else {
+        builder::EffectiveSeqNumber::Entropy {
+            target_re: args.ere,
+            target_sigma: Some(args.esigma),
+        }
+    };
+    let rebuild_prior = if args.pnone {
+        PriorStrategy::None
+    } else if args.plaplace {
+        PriorStrategy::Laplace
+    } else {
+        PriorStrategy::Default
+    };
+    let score_matrix = if let Some(mxfile) = args.mxfile.as_ref() {
+        seqmodel::ScoreMatrix::from_file(mxfile)
+    } else {
+        seqmodel::ScoreMatrix::builtin(&args.matrix)
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("Error: jackhmmer {e}");
+        std::process::exit(1);
+    });
     if args.seqdb == PathBuf::from("-") {
         eprintln!("Error: target sequence database may not be '-' for jackhmmer");
         std::process::exit(1);
@@ -241,44 +552,46 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     logsum::p7_flogsuminit();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.cpu)
-        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
-        .build_global()
-        .ok();
+    if args.cpu > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cpu)
+            .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
+            .build_global()
+            .ok();
+    }
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
-    if args.seqfile != PathBuf::from("-") && count_query_sequences(&args.seqfile, &abc) > 1 {
-        eprintln!(
-            "Error: jackhmmer multi-query sequence input is not implemented yet; split the query FASTA or use C jackhmmer"
-        );
-        std::process::exit(1);
-    }
 
     let mut output_file = args.output.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating output file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open output file {path} for writing",
+        )
     });
     let stdout = std::io::stdout();
     let mut stdout_lock = stdout.lock();
-    let out: &mut dyn Write = match output_file {
+    let mut out: &mut dyn Write = match output_file {
         Some(ref mut file) => file,
         None => &mut stdout_lock,
     };
     let mut tblout_file = args.tblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating tblout file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-seq output file {path} for writing",
+        )
     });
     let mut domtblout_file = args.domtblout.as_ref().map(|p| {
-        std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating domtblout file: {}", e);
-            std::process::exit(1);
-        })
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-dom output file {path} for writing",
+        )
+    });
+    let mut ali_file = args.ali_outfile.as_ref().map(|p| {
+        crate::subcmd::hmmsearch::create_output_file_or_exit(
+            p,
+            "Failed to open alignment output file {path} for writing",
+        )
     });
 
     writeln!(
@@ -304,18 +617,32 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         args.seqfile.display()
     )
     .unwrap();
+    if let Some(format) = args.qformat.as_deref() {
+        writeln!(out, "# query <seqfile> format asserted: {format}").unwrap();
+    }
     writeln!(
         out,
         "# target sequence database:        {}",
         args.seqdb.display()
     )
     .unwrap();
+    if let Some(format) = args.tformat.as_deref() {
+        writeln!(out, "# target <seqdb> format asserted:  {format}").unwrap();
+    }
     writeln!(
         out,
         "# maximum iterations set to:       {}",
         args.max_iterations
     )
     .unwrap();
+    if let Some(output) = &args.output {
+        writeln!(
+            out,
+            "# output directed to file:         {}",
+            output.display()
+        )
+        .unwrap();
+    }
     if let Some(tblout) = &args.tblout {
         writeln!(
             out,
@@ -332,6 +659,54 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         )
         .unwrap();
     }
+    if let Some(ali_outfile) = &args.ali_outfile {
+        writeln!(
+            out,
+            "# MSA of hits saved to file:       {}",
+            ali_outfile.display()
+        )
+        .unwrap();
+    }
+    if args.show_acc {
+        writeln!(out, "# prefer accessions over names:    yes").unwrap();
+    }
+    if args.noali {
+        writeln!(out, "# show alignments in output:       no").unwrap();
+    }
+    if matrix_was_requested {
+        writeln!(
+            out,
+            "# subst score matrix (built-in):   {}",
+            score_matrix.name()
+        )
+        .unwrap();
+    }
+    if mxfile_was_requested {
+        writeln!(
+            out,
+            "# subst score matrix (file):       {}",
+            args.mxfile.as_ref().unwrap().display()
+        )
+        .unwrap();
+    }
+    if popen_was_requested {
+        writeln!(out, "# gap open probability:            {:.6}", args.popen).unwrap();
+    }
+    if pextend_was_requested {
+        writeln!(
+            out,
+            "# gap extend probability:          {:.6}",
+            args.pextend
+        )
+        .unwrap();
+    }
+    write_jackhmmer_option_header(&mut out, &args, &cmdline);
+    let textw = if args.notextw { 0 } else { args.textw };
+    if args.notextw {
+        writeln!(out, "# max ASCII text line length:      unlimited").unwrap();
+    } else if args.textw != 120 {
+        writeln!(out, "# max ASCII text line length:      {}", args.textw).unwrap();
+    }
     if args.max {
         writeln!(
             out,
@@ -339,14 +714,92 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         )
         .unwrap();
     }
-    if args.seed != 42 {
-        if args.seed == 0 {
-            writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
-        } else {
-            writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
-        }
+    if args.fragthresh != 0.5 {
+        writeln!(
+            out,
+            "# define fragments if <= x*alen:   {:.3}",
+            args.fragthresh
+        )
+        .unwrap();
     }
-    writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
+    if args.wpb {
+        writeln!(out, "# relative weighting scheme:       Henikoff PB").unwrap();
+    }
+    if args.wgsc {
+        writeln!(out, "# relative weighting scheme:       G/S/C").unwrap();
+    }
+    if args.wblosum {
+        writeln!(out, "# relative weighting scheme:       BLOSUM filter").unwrap();
+        writeln!(out, "# frac id cutoff for BLOSUM wgts:  {:.6}", args.wid).unwrap();
+    }
+    if args.wnone {
+        writeln!(out, "# relative weighting scheme:       none").unwrap();
+    }
+    if args.eent {
+        writeln!(out, "# effective seq number scheme:     entropy weighting").unwrap();
+    }
+    if args.eentexp {
+        writeln!(
+            out,
+            "# effective seq number scheme:     entropy weighting using exponent-based scaling"
+        )
+        .unwrap();
+    }
+    if args.eclust {
+        writeln!(
+            out,
+            "# effective seq number scheme:     single linkage clusters"
+        )
+        .unwrap();
+        writeln!(out, "# frac id cutoff for --eclust:     {:.6}", args.eid).unwrap();
+    }
+    if args.enone {
+        writeln!(out, "# effective seq number scheme:     none").unwrap();
+    }
+    if let Some(eset) = args.eset {
+        writeln!(out, "# effective seq number:            set to {:.6}", eset).unwrap();
+    }
+    if let Some(ere) = args.ere {
+        writeln!(out, "# minimum rel entropy target:      {:.6} bits", ere).unwrap();
+    }
+    if args.esigma != 45.0 {
+        writeln!(
+            out,
+            "# entropy target sigma parameter:  {:.6} bits",
+            args.esigma
+        )
+        .unwrap();
+    }
+    if args.pnone {
+        writeln!(out, "# prior scheme:                    none").unwrap();
+    }
+    if args.plaplace {
+        writeln!(out, "# prior scheme:                    Laplace +1").unwrap();
+    }
+    if cpu_was_requested {
+        writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
+    }
+    if em_l_was_requested {
+        writeln!(out, "# seq length, MSV Gumbel mu fit:   {}", args.em_l).unwrap();
+    }
+    if em_n_was_requested {
+        writeln!(out, "# seq number, MSV Gumbel mu fit:   {}", args.em_n).unwrap();
+    }
+    if ev_l_was_requested {
+        writeln!(out, "# seq length, Vit Gumbel mu fit:   {}", args.ev_l).unwrap();
+    }
+    if ev_n_was_requested {
+        writeln!(out, "# seq number, Vit Gumbel mu fit:   {}", args.ev_n).unwrap();
+    }
+    if ef_l_was_requested {
+        writeln!(out, "# seq length, Fwd exp tau fit:     {}", args.ef_l).unwrap();
+    }
+    if ef_n_was_requested {
+        writeln!(out, "# seq number, Fwd exp tau fit:     {}", args.ef_n).unwrap();
+    }
+    if eft_was_requested {
+        writeln!(out, "# tail mass for Fwd exp tau fit:   {:.6}", args.eft).unwrap();
+    }
     writeln!(
         out,
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
@@ -354,348 +807,726 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     .unwrap();
     writeln!(out).unwrap();
 
-    // Read query sequence
-    let mut query_sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
+    let table_cmdline = normalize_jackhmmer_table_cmdline(&cmdline);
+    let calibration_config = CalibrationConfig {
+        em_l: args.em_l,
+        em_n: args.em_n,
+        ev_l: args.ev_l,
+        ev_n: args.ev_n,
+        ef_l: args.ef_l,
+        ef_n: args.ef_n,
+        eft: args.eft,
+    };
+
+    // Read query sequences. C jackhmmer runs the full iterative search once
+    // for each FASTA record and keeps the outer report/footer shared.
+    let mut query_sqf = open_sequence_file(&args.seqfile, &abc, args.qformat.as_deref())
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        });
     let mut query_sq = Sequence::new();
-    if !query_sqf.read(&mut query_sq).unwrap_or_else(|e| {
-        eprintln!("Error reading query file: {}", e);
-        std::process::exit(1);
-    }) {
-        eprintln!("Error: no query sequence found");
-        std::process::exit(1);
-    }
-
-    writeln!(out, "Query:       {}  [L={}]", query_sq.name, query_sq.n).unwrap();
-    if !query_sq.acc.is_empty() {
-        writeln!(out, "Accession:   {}", query_sq.acc).unwrap();
-    }
-    if !query_sq.desc.is_empty() {
-        writeln!(out, "Description: {}", query_sq.desc).unwrap();
-    }
-    writeln!(out).unwrap();
-
-    let query_tr = exact_match_query_trace(query_sq.n);
-
-    let mut prev_included_names: Vec<String> = Vec::new();
-    let mut prev_msa_nseq = 1usize;
-    let mut prev_hmm: Option<hmmer_pure_rs::hmm::Hmm> = None;
-    let mut final_hits: Option<TopHits> = None;
-    let mut final_z: Option<f64> = None;
-    let mut final_domz: Option<f64> = None;
-    let mut final_model_len: Option<usize> = None;
-
-    for iteration in 1..=args.max_iterations {
-        // Build HMM for this iteration
-        let hmm = if iteration == 1 {
-            // First iteration: single-sequence HMM (phmmer-style)
-            seqmodel::build_single_seq_hmm(
-                &query_sq.name,
-                &query_sq.dsq,
-                query_sq.n,
-                &abc,
-                &bg,
-                args.popen,
-                args.pextend,
-            )
-        } else {
-            let prev_hmm = prev_hmm
-                .as_ref()
-                .expect("jackhmmer rebuild requested without previous-round HMM");
-            let prev_hits = final_hits
-                .as_ref()
-                .expect("jackhmmer rebuild requested without previous-round hits");
-            let msa = hmmer_pure_rs::tophits::included_alignment(
-                prev_hits,
-                &abc,
-                prev_hmm.m,
-                Some((&query_sq, &query_tr)),
-                &format!("{}-i{}", query_sq.name, iteration - 1),
-            );
-
-            let Some(mut msa) = msa else {
-                writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
-                break;
-            };
-            if !query_sq.desc.is_empty() {
-                msa.desc = Some(query_sq.desc.clone());
+    let mut saw_query = false;
+    let mut wrote_tblout_header = false;
+    let mut wrote_domtblout_header = false;
+    loop {
+        query_sq.reuse();
+        if !query_sqf.read(&mut query_sq).unwrap_or_else(|e| {
+            eprintln!("Error reading query file: {}", e);
+            std::process::exit(1);
+        }) {
+            if !saw_query {
+                eprintln!("Error: no query sequence found");
+                std::process::exit(1);
             }
-            msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
-            let mut hmm = builder::build_hmm_from_msa(&msa, &abc, &bg, 0.5, true);
-            if !query_sq.desc.is_empty() {
-                hmm.desc = Some(query_sq.desc.clone());
-                hmm.flags |= hmmer_pure_rs::hmm::P7H_DESC;
-            }
-            writeln!(out, "@@").unwrap();
-            writeln!(out, "@@ Round:                  {}", iteration).unwrap();
-            writeln!(
+            break;
+        }
+        saw_query = true;
+
+        writeln!(out, "Query:       {}  [L={}]", query_sq.name, query_sq.n).unwrap();
+        if !query_sq.acc.is_empty() {
+            writeln!(out, "Accession:   {}", query_sq.acc).unwrap();
+        }
+        if !query_sq.desc.is_empty() {
+            writeln!(out, "Description: {}", query_sq.desc).unwrap();
+        }
+        writeln!(out).unwrap();
+
+        let query_tr = exact_match_query_trace(query_sq.n);
+
+        let mut prev_included_names: Vec<String> = Vec::new();
+        let mut prev_msa_nseq = 1usize;
+        let mut prev_hmm: Option<hmmer_pure_rs::hmm::Hmm> = None;
+        let mut final_hits: Option<TopHits> = None;
+        let mut final_z: Option<f64> = None;
+        let mut final_domz: Option<f64> = None;
+        let mut final_model_len: Option<usize> = None;
+        let mut final_iteration: Option<usize> = None;
+
+        for iteration in 1..=args.max_iterations {
+            final_iteration = Some(iteration);
+            // Build HMM for this iteration
+            let hmm = if iteration == 1 {
+                // First iteration: single-sequence HMM (phmmer-style)
+                seqmodel::build_single_seq_hmm_with_matrix_and_calibration(
+                    &query_sq.name,
+                    &query_sq.dsq,
+                    query_sq.n,
+                    &abc,
+                    &bg,
+                    &score_matrix,
+                    args.popen,
+                    args.pextend,
+                    args.seed,
+                    calibration_config,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: jackhmmer failed to set single query seq score system: {e}");
+                    std::process::exit(1);
+                })
+            } else {
+                let prev_hmm = prev_hmm
+                    .as_ref()
+                    .expect("jackhmmer rebuild requested without previous-round HMM");
+                let prev_hits = final_hits
+                    .as_ref()
+                    .expect("jackhmmer rebuild requested without previous-round hits");
+                let msa = hmmer_pure_rs::tophits::included_alignment(
+                    prev_hits,
+                    &abc,
+                    prev_hmm.m,
+                    Some((&query_sq, &query_tr)),
+                    &format!("{}-i{}", query_sq.name, iteration - 1),
+                );
+
+                let Some(mut msa) = msa else {
+                    writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
+                    break;
+                };
+                if !query_sq.desc.is_empty() {
+                    msa.desc = Some(query_sq.desc.clone());
+                }
+                msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+                let mut hmm = builder::build_hmm_from_msa_with_prior(
+                    &msa,
+                    &abc,
+                    &bg,
+                    0.5,
+                    args.fragthresh,
+                    true,
+                    rebuild_weighting,
+                    rebuild_effn,
+                    rebuild_prior,
+                    CalibrationConfig::default(),
+                    args.seed,
+                );
+                if !query_sq.desc.is_empty() {
+                    hmm.desc = Some(query_sq.desc.clone());
+                    hmm.flags |= hmmer_pure_rs::hmm::P7H_DESC;
+                }
+                writeln!(out, "@@").unwrap();
+                writeln!(out, "@@ Round:                  {}", iteration).unwrap();
+                writeln!(
                 out,
                 "@@ Included in MSA:        {} subsequences (query + {} subseqs from {} targets)",
                 msa.nseq,
                 msa.nseq.saturating_sub(1),
                 prev_included_names.len()
             )
-            .unwrap();
-            writeln!(out, "@@ Model size:             {} positions", hmm.m).unwrap();
-            writeln!(out, "@@").unwrap();
-            writeln!(out).unwrap();
-            hmm
-        };
+                .unwrap();
+                writeln!(out, "@@ Model size:             {} positions", hmm.m).unwrap();
+                writeln!(out, "@@").unwrap();
+                writeln!(out).unwrap();
+                hmm
+            };
 
-        if let Some(prefix) = &args.chkhmm {
-            write_hmm_checkpoint(prefix, iteration, &hmm);
-        }
+            if let Some(prefix) = &args.chkhmm {
+                write_hmm_checkpoint(prefix, iteration, &hmm);
+            }
 
-        // Configure profile and search
-        let mut local_bg = bg.clone();
-        local_bg.set_filter(hmm.m, &hmm.compo);
-        let mut gm = Profile::new(hmm.m, &abc);
-        profile::profile_config(&hmm, &local_bg, &mut gm, 400, P7_LOCAL);
-        let om = OProfile::convert(&gm);
+            // Configure profile and search
+            let mut local_bg = bg.clone();
+            local_bg.set_filter(hmm.m, &hmm.compo);
+            let mut gm = Profile::new(hmm.m, &abc);
+            profile::profile_config(&hmm, &local_bg, &mut gm, 400, P7_LOCAL);
+            let om = OProfile::convert(&gm);
 
-        // Search the target DB in bounded batches so RSS scales with
-        // the batch size instead of the full database size.
-        use rayon::prelude::*;
-        let mut all_hits = Vec::new();
-        let mut z = 0usize;
-        {
-            let mut sqf = sequence::open_seq_file(&args.seqdb, &abc).unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            });
-            let mut sq = Sequence::new();
-            let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
+            // Search the target DB in bounded batches so RSS scales with
+            // the batch size instead of the full database size.
+            use rayon::prelude::*;
+            let mut all_hits = Vec::new();
+            let mut z = 0usize;
+            let mut total_residues = 0u64;
+            let mut stats = PipelineStats::default();
+            {
+                let mut sqf = open_sequence_file(&args.seqdb, &abc, args.tformat.as_deref())
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    });
+                let mut sq = Sequence::new();
+                let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
 
-            loop {
-                while batch.len() < TARGET_BATCH_SIZE {
-                    match sqf.read(&mut sq) {
-                        Ok(true) => {
-                            batch.push(sq.clone());
-                            z += 1;
-                            sq.reuse();
-                        }
-                        Ok(false) => break,
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            std::process::exit(1);
+                loop {
+                    while batch.len() < TARGET_BATCH_SIZE {
+                        match sqf.read(&mut sq) {
+                            Ok(true) => {
+                                total_residues += sq.n as u64;
+                                batch.push(sq.clone());
+                                z += 1;
+                                sq.reuse();
+                            }
+                            Ok(false) => break,
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                std::process::exit(1);
+                            }
                         }
                     }
-                }
 
-                if batch.is_empty() {
-                    break;
-                }
+                    if batch.is_empty() {
+                        break;
+                    }
 
-                let batch_hits: Vec<hmmer_pure_rs::tophits::Hit> = batch
-                    .par_iter()
-                    .filter_map(|sq| {
-                        let mut lb = local_bg.clone();
-                        let mut lgm = gm.clone();
-                        let mut lom = om.clone();
-                        let mut lpli = Pipeline::new();
-                        configure_pipeline(&mut lpli, &args);
-                        lpli.do_biasfilter = !args.nobias;
-                        lpli.do_null2 = !args.nonull2;
-                        lpli.seed = args.seed;
-                        lpli.new_model(&lgm);
+                    let batch_hits: Vec<(Option<Hit>, u64, u64, u64, u64)> = batch
+                        .par_iter()
+                        .map(|sq| {
+                            hmmer_pure_rs::util::simd_env::init();
+                            let mut lb = local_bg.clone();
+                            let mut lgm = gm.clone();
+                            let mut lom = om.clone();
+                            let mut lpli = Pipeline::new();
+                            configure_pipeline(&mut lpli, &args);
+                            lpli.do_biasfilter = !args.nobias;
+                            lpli.do_null2 = !args.nonull2;
+                            lpli.seed = args.seed;
+                            lpli.new_model(&lgm);
 
-                        lb.set_length(sq.n);
+                            lb.set_length(sq.n);
 
-                        let mut lth = TopHits::new();
-                        if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
-                            lth.hits.into_iter().next()
-                        } else {
-                            None
+                            let mut lth = TopHits::new();
+                            let hit = if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
+                                lth.hits.into_iter().next()
+                            } else {
+                                None
+                            };
+                            (
+                                hit,
+                                lpli.n_past_msv,
+                                lpli.n_past_bias,
+                                lpli.n_past_vit,
+                                lpli.n_past_fwd,
+                            )
+                        })
+                        .collect();
+                    for (hit, msv, bias, vit, fwd) in batch_hits {
+                        stats.n_past_msv += msv;
+                        stats.n_past_bias += bias;
+                        stats.n_past_vit += vit;
+                        stats.n_past_fwd += fwd;
+                        if let Some(hit) = hit {
+                            all_hits.push(hit);
                         }
-                    })
-                    .collect();
-                all_hits.extend(batch_hits);
-                batch.clear();
-            }
-        }
-
-        let mut th = TopHits::new();
-        th.hits = all_hits;
-        let z = args.z_value.unwrap_or(z as f64);
-        final_z = Some(z);
-        th.sort_by_sortkey();
-        {
-            let mut tmp_pli = Pipeline::new();
-            configure_pipeline(&mut tmp_pli, &args);
-            tmp_pli.do_biasfilter = !args.nobias;
-            tmp_pli.do_null2 = !args.nonull2;
-            tmp_pli.seed = args.seed;
-            th.threshold(&tmp_pli, z, z);
-            let domz = args.domz_value.unwrap_or(th.nreported.max(1) as f64);
-            if domz != z {
-                th.threshold(&tmp_pli, z, domz);
-            }
-            final_domz = Some(domz);
-        }
-        // Output results for this round
-        if iteration > 1 {
-            writeln!(out, "Query:       {}  [M={}]", hmm.name, hmm.m).unwrap();
-            if !query_sq.acc.is_empty() {
-                writeln!(out, "Accession:   {}", query_sq.acc).unwrap();
-            }
-            if !query_sq.desc.is_empty() {
-                writeln!(out, "Description: {}", query_sq.desc).unwrap();
-            }
-            writeln!(out).unwrap();
-        }
-        writeln!(
-            out,
-            "Scores for complete sequences (score includes all domains):"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
-        )
-        .unwrap();
-
-        let mut new_included_names = Vec::new();
-        let mut have_printed_incthresh = false;
-        for hit in &th.hits {
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
-                continue;
-            }
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 && !have_printed_incthresh {
-                writeln!(out, "  ------ inclusion threshold ------").unwrap();
-                have_printed_incthresh = true;
-            }
-            let evalue = z * hit.lnp.exp();
-            let best_dom = crate::subcmd::hmmsearch::best_domain(hit);
-            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
-            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
-            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
-            writeln!(
-                out,
-                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
-                hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score,
-                hit.bias,
-                hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score,
-                dom_bias,
-                hit.nexpected,
-                hit.nreported,
-                hit.name,
-                if hit.desc.is_empty() { "" } else { &hit.desc },
-            )
-            .unwrap();
-
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0 {
-                new_included_names.push(hit.name.clone());
-            }
-        }
-
-        if th.nreported == 0 {
-            writeln!(
-                out,
-                "   [No hits detected that satisfy reporting thresholds]"
-            )
-            .unwrap();
-        }
-        writeln!(out).unwrap();
-        final_hits = Some(th);
-        final_model_len = Some(hmm.m);
-        prev_hmm = Some(hmm.clone());
-
-        if let Some(prefix) = &args.chkali {
-            if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
-                final_hits.as_ref().unwrap(),
-                &abc,
-                hmm.m,
-                Some((&query_sq, &query_tr)),
-                &format!("{}-i{}", query_sq.name, iteration),
-            ) {
-                if !query_sq.desc.is_empty() {
-                    msa.desc = Some(query_sq.desc.clone());
+                    }
+                    batch.clear();
                 }
-                msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
-                write_msa_checkpoint(prefix, iteration, &msa);
+            }
+
+            let mut th = TopHits::new();
+            th.hits = all_hits;
+            let n_targets = z as u64;
+            let z = args.z_value.unwrap_or(n_targets as f64);
+            final_z = Some(z);
+            th.sort_by_sortkey();
+            {
+                let mut tmp_pli = Pipeline::new();
+                configure_pipeline(&mut tmp_pli, &args);
+                tmp_pli.do_biasfilter = !args.nobias;
+                tmp_pli.do_null2 = !args.nonull2;
+                tmp_pli.seed = args.seed;
+                th.threshold(&tmp_pli, z, z);
+                let domz = args.domz_value.unwrap_or(th.nreported as f64);
+                if domz != z {
+                    th.threshold(&tmp_pli, z, domz);
+                }
+                final_domz = Some(domz);
+            }
+            for hit in &mut th.hits {
+                if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0
+                    && !prev_included_names.iter().any(|prev| prev == &hit.name)
+                {
+                    hit.flags |= hmmer_pure_rs::tophits::P7_IS_NEW;
+                } else {
+                    hit.flags &= !hmmer_pure_rs::tophits::P7_IS_NEW;
+                }
+            }
+            crate::subcmd::hmmsearch::write_standard_stdout_tables(
+                &mut out,
+                &th,
+                &hmm.name,
+                hmm.m,
+                hmm.cs.as_deref(),
+                z,
+                final_domz.unwrap_or(z),
+                textw,
+                args.show_acc,
+                args.noali,
+                true,
+            );
+            write_pipeline_stats(
+                &mut out,
+                hmm.m,
+                n_targets,
+                total_residues,
+                th.nreported as u64,
+                z,
+                final_domz.unwrap_or(z),
+                args.z_value.is_some(),
+                args.domz_value.is_some(),
+                &stats,
+                args.f1,
+                args.f2,
+                args.f3,
+            );
+            writeln!(out).unwrap();
+            let new_included_names: Vec<String> = th
+                .hits
+                .iter()
+                .filter(|hit| hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0)
+                .map(|hit| hit.name.clone())
+                .collect();
+            let msa_nseq = th
+                .hits
+                .iter()
+                .filter(|hit| hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0)
+                .map(|hit| hit.dcl.iter().filter(|dom| dom.is_included).count())
+                .sum::<usize>()
+                + 1;
+            final_hits = Some(th);
+            final_model_len = Some(hmm.m);
+            prev_hmm = Some(hmm.clone());
+
+            if let Some(prefix) = &args.chkali {
+                if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
+                    final_hits.as_ref().unwrap(),
+                    &abc,
+                    hmm.m,
+                    Some((&query_sq, &query_tr)),
+                    &format!("{}-i{}", query_sq.name, iteration),
+                ) {
+                    if !query_sq.desc.is_empty() {
+                        msa.desc = Some(query_sq.desc.clone());
+                    }
+                    msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+                    write_msa_checkpoint(prefix, iteration, &msa);
+                }
+            }
+
+            // Check convergence
+            let n_new = new_included_names
+                .iter()
+                .filter(|name| !prev_included_names.iter().any(|prev| prev == *name))
+                .count();
+            writeln!(out, "@@ New targets included:   {}", n_new).unwrap();
+            writeln!(
+                out,
+                "@@ New alignment includes: {} subseqs (was {}), including original query",
+                msa_nseq, prev_msa_nseq
+            )
+            .unwrap();
+
+            if n_new == 0 && new_included_names.len() <= prev_included_names.len() && iteration > 1
+            {
+                writeln!(out, "@@").unwrap();
+                writeln!(out, "@@ CONVERGED (in {} rounds). ", iteration).unwrap();
+                writeln!(out, "@@").unwrap();
+                writeln!(out).unwrap();
+                break;
+            }
+
+            if iteration < args.max_iterations {
+                writeln!(out, "@@ Continuing to next round.").unwrap();
+                writeln!(out).unwrap();
+            }
+
+            prev_included_names = new_included_names;
+            prev_msa_nseq = msa_nseq;
+        }
+
+        if let Some(ref mut f) = tblout_file {
+            if let (Some(ref th), Some(z)) = (&final_hits, final_z) {
+                let show_header = !wrote_tblout_header;
+                crate::subcmd::hmmsearch::write_tblout(
+                    f,
+                    &query_sq.name,
+                    Some(&query_sq.acc),
+                    th,
+                    z,
+                    show_header,
+                );
+                wrote_tblout_header = true;
             }
         }
-
-        // Check convergence
-        let n_new = new_included_names
-            .iter()
-            .filter(|name| !prev_included_names.iter().any(|prev| prev == *name))
-            .count();
-        let msa_nseq = new_included_names.len() + 1;
-
-        writeln!(out, "@@ New targets included:   {}", n_new).unwrap();
-        writeln!(
-            out,
-            "@@ New alignment includes: {} subseqs (was {}), including original query",
-            msa_nseq, prev_msa_nseq
-        )
-        .unwrap();
-
-        if n_new == 0 && new_included_names.len() <= prev_included_names.len() && iteration > 1 {
-            writeln!(out, "@@").unwrap();
-            writeln!(out, "@@ CONVERGED (in {} rounds). ", iteration).unwrap();
-            writeln!(out, "@@").unwrap();
-            writeln!(out).unwrap();
-            break;
+        if let Some(ref mut f) = domtblout_file {
+            if let (Some(ref th), Some(z), Some(domz), Some(qlen)) =
+                (&final_hits, final_z, final_domz, final_model_len)
+            {
+                let show_header = !wrote_domtblout_header;
+                crate::subcmd::hmmsearch::write_domtblout(
+                    f,
+                    &query_sq.name,
+                    Some(&query_sq.acc),
+                    qlen,
+                    th,
+                    z,
+                    domz,
+                    show_header,
+                );
+                wrote_domtblout_header = true;
+            }
+        }
+        if let Some(ref mut f) = ali_file {
+            if let (Some(ref th), Some(qlen), Some(iteration)) =
+                (&final_hits, final_model_len, final_iteration)
+            {
+                if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
+                    th,
+                    &abc,
+                    qlen,
+                    Some((&query_sq, &query_tr)),
+                    &format!("{}-i{}", query_sq.name, iteration),
+                ) {
+                    if !query_sq.desc.is_empty() {
+                        msa.desc = Some(query_sq.desc.clone());
+                    }
+                    msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+                    write_stockholm_msa(f, &msa);
+                    writeln!(
+                        out,
+                        "# Alignment of {} hits saved to:  {}",
+                        msa.nseq.saturating_sub(1),
+                        args.ali_outfile.as_ref().unwrap().display()
+                    )
+                    .unwrap();
+                }
+            }
+            f.flush().unwrap();
         }
 
-        if iteration < args.max_iterations {
-            writeln!(out, "@@ Continuing to next round.").unwrap();
-            writeln!(out).unwrap();
-        }
-
-        prev_included_names = new_included_names;
-        prev_msa_nseq = msa_nseq;
+        writeln!(out, "//").unwrap();
     }
 
     if let Some(ref mut f) = tblout_file {
-        if let (Some(ref th), Some(z)) = (&final_hits, final_z) {
-            crate::subcmd::hmmsearch::write_tblout(
-                f,
-                &query_sq.name,
-                Some(&query_sq.acc),
-                th,
-                z,
-                true,
-            );
-        }
+        crate::subcmd::hmmsearch::write_table_footer(
+            f,
+            "jackhmmer",
+            "SEARCH",
+            &args.seqfile,
+            &args.seqdb,
+            &table_cmdline,
+        );
         f.flush().unwrap();
     }
     if let Some(ref mut f) = domtblout_file {
-        if let (Some(ref th), Some(z), Some(domz), Some(qlen)) =
-            (&final_hits, final_z, final_domz, final_model_len)
-        {
-            crate::subcmd::hmmsearch::write_domtblout(
-                f,
-                &query_sq.name,
-                Some(&query_sq.acc),
-                qlen,
-                th,
-                z,
-                domz,
-                true,
-            );
-        }
+        crate::subcmd::hmmsearch::write_table_footer(
+            f,
+            "jackhmmer",
+            "SEARCH",
+            &args.seqfile,
+            &args.seqdb,
+            &table_cmdline,
+        );
         f.flush().unwrap();
     }
 
-    writeln!(out, "//").unwrap();
     writeln!(out, "[ok]").unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+fn normalize_jackhmmer_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some(_wrapper), Some("jackhmmer")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "jackhmmer".to_string()
+            } else {
+                format!("jackhmmer {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
+}
+
+fn write_jackhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
+    if command_line_has_option(cmdline, "-E") {
+        writeln!(
+            out,
+            "# sequence reporting threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.e_value)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.score_threshold {
+        writeln!(
+            out,
+            // C jackhmmer prints "<=" here, despite score thresholds being minimums.
+            "# sequence reporting threshold:    score <= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--domE") {
+        writeln!(
+            out,
+            "# domain reporting threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.dom_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.dom_t {
+        writeln!(
+            out,
+            // C jackhmmer prints "<=" here, despite score thresholds being minimums.
+            "# domain reporting threshold:      score <= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incE") {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.inc_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_t {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incdomE") {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.incdom_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.incdom_t {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if args.max {
+        writeln!(
+            out,
+            "# Max sensitivity mode:            on [all heuristic filters off]"
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F1") {
+        writeln!(
+            out,
+            "# MSV filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f1)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F2") {
+        writeln!(
+            out,
+            "# Vit filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f2)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F3") {
+        writeln!(
+            out,
+            "# Fwd filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f3)
+        )
+        .unwrap();
+    }
+    if args.nobias {
+        writeln!(out, "# biased composition HMM filter:   off").unwrap();
+    }
+    if args.nonull2 {
+        writeln!(out, "# null2 bias corrections:          off").unwrap();
+    }
+    if let Some(z) = args.z_value {
+        writeln!(
+            out,
+            "# sequence search space set to:    {}",
+            hmmer_pure_rs::output::fmt_fixed0(z)
+        )
+        .unwrap();
+    }
+    if let Some(domz) = args.domz_value {
+        writeln!(
+            out,
+            "# domain search space set to:      {}",
+            hmmer_pure_rs::output::fmt_fixed0(domz)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--seed") {
+        if args.seed == 0 {
+            writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
+        } else {
+            writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
+        }
+    }
+}
+
+fn command_line_has_option(cmdline: &str, option: &str) -> bool {
+    let compact_short = option
+        .strip_prefix('-')
+        .filter(|rest| !rest.starts_with('-') && rest.chars().count() == 1)
+        .map(|_| option);
+    cmdline.split_whitespace().any(|token| {
+        token == option
+            || token.starts_with(&format!("{option}="))
+            || compact_short
+                .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
+    })
+}
+
+fn validate_sequence_format(label: &str, format: Option<&str>) {
+    if let Some(format) = format {
+        if SequenceFormat::from_name(format).is_none() {
+            eprintln!("{label}={format} is not a recognized input sequence file format");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn open_sequence_file(
+    path: &std::path::Path,
+    abc: &Alphabet,
+    format: Option<&str>,
+) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn std::io::Read>>> {
+    if let Some(format) = format {
+        sequence::open_seq_file_with_format(path, abc, SequenceFormat::from_name(format).unwrap())
+    } else {
+        sequence::open_seq_file(path, abc)
+    }
+}
+
+#[derive(Default)]
+struct PipelineStats {
+    n_past_msv: u64,
+    n_past_bias: u64,
+    n_past_vit: u64,
+    n_past_fwd: u64,
+}
+
+fn write_pipeline_stats<W: Write>(
+    out: &mut W,
+    model_len: usize,
+    n_targets: u64,
+    total_residues: u64,
+    _nreported: u64,
+    z: f64,
+    domz: f64,
+    z_from_option: bool,
+    domz_from_option: bool,
+    stats: &PipelineStats,
+    f1: f64,
+    f2: f64,
+    f3: f64,
+) {
+    let expected_msv = (f1 * n_targets as f64).max(0.0);
+    let expected_vit = (f2 * n_targets as f64).max(0.0);
+    let expected_fwd = (f3 * n_targets as f64).max(0.0);
+    let frac = |n: u64| {
+        if n_targets > 0 {
+            n as f64 / n_targets as f64
+        } else {
+            0.0
+        }
+    };
+
+    writeln!(out, "Internal pipeline statistics summary:").unwrap();
+    writeln!(out, "-------------------------------------").unwrap();
+    writeln!(
+        out,
+        "Query model(s):                  {:>11}  ({} nodes)",
+        1, model_len
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Target sequences:                {:>11}  ({} residues searched)",
+        n_targets, total_residues
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed MSV filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_msv,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_msv)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+        hmmer_pure_rs::output::fmt_g(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed bias filter:              {:>11}  ({}); expected {} ({})",
+        stats.n_past_bias,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_bias)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+        hmmer_pure_rs::output::fmt_g(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed Vit filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_vit,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_vit)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_vit),
+        hmmer_pure_rs::output::fmt_g(f2)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Passed Fwd filter:               {:>11}  ({}); expected {} ({})",
+        stats.n_past_fwd,
+        hmmer_pure_rs::output::fmt_g(frac(stats.n_past_fwd)),
+        hmmer_pure_rs::output::fmt_fixed1(expected_fwd),
+        hmmer_pure_rs::output::fmt_g(f3)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Initial search space (Z):        {}  {}",
+        hmmer_pure_rs::output::fmt_width11_0(z),
+        if z_from_option {
+            "[as set by --Z on cmdline]"
+        } else {
+            "[actual number of targets]"
+        }
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Domain search space  (domZ):     {}  {}",
+        hmmer_pure_rs::output::fmt_width11_0(domz),
+        if domz_from_option {
+            "[as set by --domZ on cmdline]"
+        } else {
+            "[number of targets reported over threshold]"
+        }
+    )
+    .unwrap();
 }
 
 /// Build a degenerate trace for the round-1 single-sequence query that simply
@@ -888,6 +1719,15 @@ mod tests {
     }
 
     #[test]
+    fn jackhmmer_parses_c_alignment_output_option() {
+        let args = Args::try_parse_from(["jackhmmer", "-A", "hits.sto", "query.fa", "targets.fa"])
+            .unwrap();
+        assert_eq!(args.ali_outfile, Some(PathBuf::from("hits.sto")));
+        assert_eq!(args.seqfile, PathBuf::from("query.fa"));
+        assert_eq!(args.seqdb, PathBuf::from("targets.fa"));
+    }
+
+    #[test]
     fn jackhmmer_parses_c_threshold_and_acceleration_options() {
         let args = Args::try_parse_from([
             "jackhmmer",
@@ -916,6 +1756,7 @@ mod tests {
         assert_eq!(args.z_value, Some(99.0));
         assert_eq!(args.domz_value, Some(7.0));
         assert_eq!(args.seed, 5);
+        assert_eq!(args.em_l, 200);
 
         let args = Args::try_parse_from([
             "jackhmmer",
@@ -932,5 +1773,40 @@ mod tests {
         assert_eq!(args.f1, 0.1);
         assert_eq!(args.f2, 0.2);
         assert_eq!(args.f3, 0.3);
+    }
+
+    #[test]
+    fn jackhmmer_parses_single_sequence_calibration_options() {
+        let args = Args::try_parse_from([
+            "jackhmmer",
+            "--seed",
+            "7",
+            "--EmL",
+            "101",
+            "--EmN",
+            "20",
+            "--EvL",
+            "102",
+            "--EvN",
+            "21",
+            "--EfL",
+            "103",
+            "--EfN",
+            "22",
+            "--Eft",
+            "0.03",
+            "query.fa",
+            "targets.fa",
+        ])
+        .unwrap();
+
+        assert_eq!(args.seed, 7);
+        assert_eq!(args.em_l, 101);
+        assert_eq!(args.em_n, 20);
+        assert_eq!(args.ev_l, 102);
+        assert_eq!(args.ev_n, 21);
+        assert_eq!(args.ef_l, 103);
+        assert_eq!(args.ef_n, 22);
+        assert_eq!(args.eft, 0.03);
     }
 }

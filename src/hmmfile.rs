@@ -1,16 +1,14 @@
 //! HMM file I/O: reading and writing HMMER3 format HMM files.
 //! Direct port of p7_hmmfile.c.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::alphabet::{Alphabet, AlphabetType};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
-
-unsafe extern "C" {
-    fn logf(x: f32) -> f32;
-}
+use crate::output::{fmt_fixed2, fmt_fixed4, fmt_fixed5, fmt_fixed6, fmt_hmm_prob};
+use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
 
 /// Open an HMM save file and read every HMM contained in it.
 ///
@@ -22,6 +20,87 @@ pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     read_hmms(reader)
 }
 
+/// Open an HMM save file and read every HMM, auto-dispatching ASCII vs binary
+/// from the leading magic bytes instead of relying on the filename.
+pub fn read_hmm_file_auto(path: &Path) -> HmmerResult<Vec<Hmm>> {
+    if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
+        crate::hmmfile_binary::read_binary_hmm_file(path)
+    } else {
+        read_hmm_file(path)
+    }
+}
+
+/// Open an HMM save file and read records without enforcing a single ASCII
+/// HMMER3 format tag across the whole file. This is only for legacy utility
+/// paths that operate record-by-record rather than validating a database.
+pub fn read_hmm_file_auto_allow_mixed_formats(path: &Path) -> HmmerResult<Vec<Hmm>> {
+    if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
+        crate::hmmfile_binary::read_binary_hmm_file(path)
+    } else {
+        let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+        read_hmms_allow_mixed_formats(BufReader::new(file))
+    }
+}
+
+/// Open an HMM save file and read only the first HMM record.
+pub fn read_first_hmm_file_auto(path: &Path) -> HmmerResult<Hmm> {
+    if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
+        return crate::hmmfile_binary::read_binary_hmm_file(path)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| HmmerError::Format("No HMM records found".to_string()));
+    }
+    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+    read_first_hmm(BufReader::new(file))
+}
+
+/// Seek to a record offset from an SSI index and read exactly one HMM record.
+pub fn read_hmm_file_record_at(path: &Path, offset: u64) -> HmmerResult<Hmm> {
+    let mut file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+    file.seek(SeekFrom::Start(offset)).map_err(HmmerError::Io)?;
+
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).map_err(HmmerError::Io)?;
+    file.seek(SeekFrom::Start(offset)).map_err(HmmerError::Io)?;
+    if crate::hmmfile_binary::is_binary_hmm_magic(u32::from_ne_bytes(magic)) {
+        return crate::hmmfile_binary::read_binary_hmm(&mut BufReader::new(file))?
+            .ok_or_else(|| HmmerError::Format(format!("No binary HMM record at offset {offset}")));
+    }
+
+    let mut reader = BufReader::new(file);
+    let mut record = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(HmmerError::Io)?;
+        if n == 0 {
+            break;
+        }
+        record.push_str(&line);
+        if line.trim() == "//" {
+            break;
+        }
+    }
+    if record.is_empty() {
+        return Err(HmmerError::Format(format!(
+            "No ASCII HMM record at offset {offset}"
+        )));
+    }
+    if !record.trim_end().ends_with("//") {
+        return Err(HmmerError::Format(format!(
+            "Unterminated ASCII HMM record at offset {offset}"
+        )));
+    }
+    let mut hmms = read_hmms(BufReader::new(Cursor::new(record.into_bytes())))?;
+    if hmms.len() != 1 {
+        return Err(HmmerError::Format(format!(
+            "Expected one HMM record at offset {offset}, found {}",
+            hmms.len()
+        )));
+    }
+    Ok(hmms.remove(0))
+}
+
 /// Read all HMMs from an open HMM save file stream (Rust port of `p7_hmmfile_Read`).
 ///
 /// Loops calling `read_one_hmm` until the reader hits EOF, collecting each
@@ -31,14 +110,124 @@ pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
 pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
     let mut lines = reader.lines();
+    let mut expected_abc = None;
+    let mut expected_format: Option<String> = None;
 
     loop {
-        match read_one_hmm(&mut lines)? {
-            Some(hmm) => hmms.push(hmm),
+        match read_one_hmm_with_format(&mut lines)? {
+            Some((hmm, format_version)) => {
+                if let Some(expected) = expected_format.as_deref() {
+                    if format_version != expected {
+                        return Err(HmmerError::Format(format!(
+                            "ASCII HMM file contains mixed HMMER3 format versions: first record is {expected}, record {} is {format_version}",
+                            hmms.len() + 1
+                        )));
+                    }
+                } else {
+                    expected_format = Some(format_version.clone());
+                }
+                if let Some(expected) = expected_abc {
+                    if hmm.abc_type != expected {
+                        return Err(HmmerError::Format(format!(
+                            "ASCII HMM file contains mixed alphabets: first record is {:?}, record {} is {:?}",
+                            expected,
+                            hmms.len() + 1,
+                            hmm.abc_type
+                        )));
+                    }
+                } else {
+                    expected_abc = Some(hmm.abc_type);
+                }
+                hmms.push(hmm);
+            }
             None => break,
         }
     }
 
+    Ok(hmms)
+}
+
+pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
+    let mut hmms = Vec::new();
+    let mut lines = reader.lines();
+    let mut expected_abc = None;
+
+    loop {
+        match read_one_hmm_with_format(&mut lines)? {
+            Some((hmm, _format_version)) => {
+                if let Some(expected) = expected_abc {
+                    if hmm.abc_type != expected {
+                        return Err(HmmerError::Format(format!(
+                            "ASCII HMM file contains mixed alphabets: first record is {:?}, record {} is {:?}",
+                            expected,
+                            hmms.len() + 1,
+                            hmm.abc_type
+                        )));
+                    }
+                } else {
+                    expected_abc = Some(hmm.abc_type);
+                }
+                hmms.push(hmm);
+            }
+            None => break,
+        }
+    }
+
+    Ok(hmms)
+}
+
+pub fn read_first_hmm<R: Read>(reader: BufReader<R>) -> HmmerResult<Hmm> {
+    let mut lines = reader.lines();
+    read_one_hmm_with_format(&mut lines)?
+        .map(|(hmm, _format_version)| hmm)
+        .ok_or_else(|| HmmerError::Format("No HMM records found".to_string()))
+}
+
+/// Read all HMMs from an open stream, auto-dispatching ASCII vs binary from
+/// the first four bytes. The prefix is chained back into the selected parser.
+pub fn read_hmms_auto<R: Read>(mut reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
+    let mut prefix = Vec::with_capacity(4);
+    while prefix.len() < 4 {
+        let mut byte = [0u8; 1];
+        match reader.read(&mut byte).map_err(HmmerError::Io)? {
+            0 => break,
+            1 => prefix.push(byte[0]),
+            _ => unreachable!(),
+        }
+    }
+
+    let is_binary = prefix.len() == 4
+        && crate::hmmfile_binary::is_binary_hmm_magic(u32::from_ne_bytes([
+            prefix[0], prefix[1], prefix[2], prefix[3],
+        ]));
+    let chained = Cursor::new(prefix).chain(reader);
+    if !is_binary {
+        return read_hmms(BufReader::new(chained));
+    }
+
+    let mut reader = BufReader::new(chained);
+    let mut hmms = Vec::new();
+    let mut expected_abc = None;
+    loop {
+        match crate::hmmfile_binary::read_binary_hmm(&mut reader)? {
+            Some(hmm) => {
+                if let Some(expected) = expected_abc {
+                    if hmm.abc_type != expected {
+                        return Err(HmmerError::Format(format!(
+                            "Binary HMM file contains mixed alphabets: first record is {:?}, record {} is {:?}",
+                            expected,
+                            hmms.len() + 1,
+                            hmm.abc_type
+                        )));
+                    }
+                } else {
+                    expected_abc = Some(hmm.abc_type);
+                }
+                hmms.push(hmm);
+            }
+            None => break,
+        }
+    }
     Ok(hmms)
 }
 
@@ -50,7 +239,9 @@ pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
 /// node blocks of match/insert/transition lines, terminated by `//`.
 /// File values are stored as `-ln(p)` and are exponentiated back into
 /// probabilities on the fly. Returns `Ok(None)` on clean EOF.
-fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option<Hmm>> {
+fn read_one_hmm_with_format<B: BufRead>(
+    lines: &mut std::io::Lines<B>,
+) -> HmmerResult<Option<(Hmm, String)>> {
     // Find the format header line
     let header = loop {
         match lines.next() {
@@ -60,6 +251,11 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
                 let trimmed = line.trim();
                 if trimmed.starts_with("HMMER3/") {
                     break trimmed.to_string();
+                }
+                if trimmed.starts_with("HMMER2.") || trimmed.starts_with("HMMER2/") {
+                    return Err(HmmerError::Format(
+                        "HMMER2 ASCII input is intentionally unsupported".to_string(),
+                    ));
                 }
                 // Skip blank lines between HMMs
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -72,28 +268,7 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
         }
     };
 
-    // Determine format version
-    let format_version = if header.starts_with("HMMER3/f") {
-        "3f"
-    } else if header.starts_with("HMMER3/e") {
-        "3e"
-    } else if header.starts_with("HMMER3/d") {
-        "3d"
-    } else if header.starts_with("HMMER3/c") {
-        "3c"
-    } else if header.starts_with("HMMER3/b") {
-        "3b"
-    } else if header.starts_with("HMMER3/a") {
-        "3a"
-    } else {
-        "3a" // Default
-    };
-    if format_version == "3a" {
-        return Err(HmmerError::Format(
-            "Unsupported legacy HMMER3/a ASCII HMM format".to_string(),
-        ));
-    }
-
+    let format_version = parse_hmmer3_ascii_magic(&header)?;
     // Parse header key-value pairs
     let mut name: Option<String> = None;
     let mut acc: Option<String> = None;
@@ -158,18 +333,21 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
                     .map_err(|_| HmmerError::Format("Bad MAXL".to_string()))?;
             }
             "ALPH" => {
-                abc_type = match value {
-                    "amino" => AlphabetType::Amino,
-                    "DNA" => AlphabetType::Dna,
-                    "RNA" => AlphabetType::Rna,
-                    _ => return Err(HmmerError::Format(format!("Unknown alphabet: {}", value))),
+                abc_type = if value.eq_ignore_ascii_case("amino") {
+                    AlphabetType::Amino
+                } else if value.eq_ignore_ascii_case("DNA") {
+                    AlphabetType::Dna
+                } else if value.eq_ignore_ascii_case("RNA") {
+                    AlphabetType::Rna
+                } else {
+                    return Err(HmmerError::Format(format!("Unknown alphabet: {}", value)));
                 };
             }
-            "RF" => rf_flag = value == "yes",
-            "MM" => mm_flag = value == "yes" && format_version == "3f",
-            "CONS" => cons_flag = value == "yes",
-            "CS" => cs_flag = value == "yes",
-            "MAP" => map_flag = value == "yes",
+            "RF" => rf_flag = parse_hmm_yes_no("RF", value)?,
+            "MM" => mm_flag = parse_hmm_yes_no("MM", value)? && format_version == "3f",
+            "CONS" => cons_flag = parse_hmm_yes_no("CONS", value)?,
+            "CS" => cs_flag = parse_hmm_yes_no("CS", value)?,
+            "MAP" => map_flag = parse_hmm_yes_no("MAP", value)?,
             "DATE" => ctime = Some(value.to_string()),
             "COM" => {
                 // COM lines may be numbered: "COM   [1] hmmbuild ..."
@@ -208,30 +386,25 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
             "STATS" => {
                 // "LOCAL MSV -6.4582 0.72049"
                 let parts: Vec<&str> = value.split_whitespace().collect();
-                if parts.len() >= 4 && parts[0] == "LOCAL" {
+                if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("LOCAL") {
                     let v1: f32 = parts[2]
                         .parse()
                         .map_err(|_| HmmerError::Format("Bad STATS value".to_string()))?;
                     let v2: f32 = parts[3]
                         .parse()
                         .map_err(|_| HmmerError::Format("Bad STATS value".to_string()))?;
-                    match parts[1] {
-                        "MSV" => {
-                            evparam[P7_MMU] = v1;
-                            evparam[P7_MLAMBDA] = v2;
-                            stat_msv = true;
-                        }
-                        "VITERBI" => {
-                            evparam[P7_VMU] = v1;
-                            evparam[P7_VLAMBDA] = v2;
-                            stat_viterbi = true;
-                        }
-                        "FORWARD" => {
-                            evparam[P7_FTAU] = v1;
-                            evparam[P7_FLAMBDA] = v2;
-                            stat_forward = true;
-                        }
-                        _ => {}
+                    if parts[1].eq_ignore_ascii_case("MSV") {
+                        evparam[P7_MMU] = v1;
+                        evparam[P7_MLAMBDA] = v2;
+                        stat_msv = true;
+                    } else if parts[1].eq_ignore_ascii_case("VITERBI") {
+                        evparam[P7_VMU] = v1;
+                        evparam[P7_VLAMBDA] = v2;
+                        stat_viterbi = true;
+                    } else if parts[1].eq_ignore_ascii_case("FORWARD") {
+                        evparam[P7_FTAU] = v1;
+                        evparam[P7_FLAMBDA] = v2;
+                        stat_forward = true;
                     }
                 }
             }
@@ -437,7 +610,7 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
             }
         }
 
-        let has_cons_column = matches!(format_version, "3e" | "3f");
+        let has_cons_column = matches!(format_version.as_str(), "3e" | "3f");
         if has_cons_column {
             let cons_val = parts.get(annot_idx).ok_or_else(|| {
                 HmmerError::Format(format!("Node {node} match line missing CONS column"))
@@ -525,12 +698,12 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     // In the file, values are stored as -ln(p). Convert to p.
     for node in 0..=m {
         for i in 0..k {
-            hmm.mat[node][i] = (-hmm.mat[node][i]).exp();
-            hmm.ins[node][i] = (-hmm.ins[node][i]).exp();
+            hmm.mat[node][i] = c_expf_to_f32(-hmm.mat[node][i]);
+            hmm.ins[node][i] = c_expf_to_f32(-hmm.ins[node][i]);
         }
         for i in 0..NTRANSITIONS {
             if hmm.t[node][i] != f32::INFINITY {
-                hmm.t[node][i] = (-hmm.t[node][i]).exp();
+                hmm.t[node][i] = c_expf_to_f32(-hmm.t[node][i]);
             } else {
                 hmm.t[node][i] = 0.0;
             }
@@ -540,11 +713,41 @@ fn read_one_hmm<B: BufRead>(lines: &mut std::io::Lines<B>) -> HmmerResult<Option
     // Convert compo from -ln(prob) to prob
     for i in 0..k.min(MAXABET) {
         if hmm.compo[i] != COMPO_UNSET {
-            hmm.compo[i] = (-hmm.compo[i]).exp();
+            hmm.compo[i] = c_expf_to_f32(-hmm.compo[i]);
         }
     }
 
-    Ok(Some(hmm))
+    Ok(Some((hmm, format_version)))
+}
+
+fn parse_hmmer3_ascii_magic(header: &str) -> HmmerResult<String> {
+    let tag = header.split_whitespace().next().unwrap_or("");
+    let version = match tag {
+        "HMMER3/a" => "3a",
+        "HMMER3/b" => "3b",
+        "HMMER3/c" => "3c",
+        "HMMER3/d" => "3d",
+        "HMMER3/e" => "3e",
+        "HMMER3/f" => "3f",
+        _ => {
+            return Err(HmmerError::Format(format!(
+                "Unsupported HMMER3 ASCII magic tag: {tag}"
+            )))
+        }
+    };
+    Ok(version.to_string())
+}
+
+fn parse_hmm_yes_no(key: &str, value: &str) -> HmmerResult<bool> {
+    if value.eq_ignore_ascii_case("yes") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("no") {
+        Ok(false)
+    } else {
+        Err(HmmerError::Format(format!(
+            "Bad {key} value in HMM header: expected yes or no, got {value}"
+        )))
+    }
 }
 
 /// Parse one HMM value: a float, or `"*"` meaning zero probability (stored as `+inf` in -ln space).
@@ -636,14 +839,65 @@ fn parse_transition_line(line: &str, values: &mut [f32; NTRANSITIONS]) -> HmmerR
 /// insert/transition rows, and one match/insert/transition triplet per node
 /// 1..M, terminated by `//`. Probabilities are encoded as `-ln(p)` with `*`
 /// for zero, matching the C writer's `logf`-based output exactly.
-pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
-    let k = hmm.abc_k;
-    let write_3f = true;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HmmAsciiFormat {
+    Hmmer3a,
+    Hmmer3b,
+    Hmmer3c,
+    Hmmer3d,
+    Hmmer3e,
+    Hmmer3f,
+}
 
-    if write_3f {
+impl HmmAsciiFormat {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "3/a" => Some(Self::Hmmer3a),
+            "3/b" => Some(Self::Hmmer3b),
+            "3/c" => Some(Self::Hmmer3c),
+            "3/d" => Some(Self::Hmmer3d),
+            "3/e" => Some(Self::Hmmer3e),
+            "3/f" => Some(Self::Hmmer3f),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> char {
+        match self {
+            Self::Hmmer3a => 'a',
+            Self::Hmmer3b => 'b',
+            Self::Hmmer3c => 'c',
+            Self::Hmmer3d => 'd',
+            Self::Hmmer3e => 'e',
+            Self::Hmmer3f => 'f',
+        }
+    }
+
+    fn is_at_least(self, other: Self) -> bool {
+        self >= other
+    }
+}
+
+pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
+    write_hmm_with_format(w, hmm, HmmAsciiFormat::Hmmer3f)
+}
+
+pub fn write_hmm_with_format<W: std::io::Write>(
+    w: &mut W,
+    hmm: &Hmm,
+    format: HmmAsciiFormat,
+) -> HmmerResult<()> {
+    let k = hmm.abc_k;
+
+    if format == HmmAsciiFormat::Hmmer3f {
         writeln!(w, "HMMER3/f [3.4 | Aug 2023]").map_err(HmmerError::Io)?;
     } else {
-        writeln!(w, "HMMER3/e [3.0 | March 2010]").map_err(HmmerError::Io)?;
+        writeln!(
+            w,
+            "HMMER3/{} [3.4 | Aug 2023; reverse compatibility mode]",
+            format.code()
+        )
+        .map_err(HmmerError::Io)?;
     }
     writeln!(w, "NAME  {}", hmm.name).map_err(HmmerError::Io)?;
     if let Some(ref acc) = hmm.acc {
@@ -653,7 +907,7 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         writeln!(w, "DESC  {}", desc).map_err(HmmerError::Io)?;
     }
     writeln!(w, "LENG  {}", hmm.m).map_err(HmmerError::Io)?;
-    if hmm.max_length >= 0 {
+    if format.is_at_least(HmmAsciiFormat::Hmmer3c) && hmm.max_length > 0 {
         writeln!(w, "MAXL  {}", hmm.max_length).map_err(HmmerError::Io)?;
     }
     let alph = match hmm.abc_type {
@@ -669,26 +923,30 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         if hmm.flags & P7H_RF != 0 { "yes" } else { "no" }
     )
     .map_err(HmmerError::Io)?;
-    writeln!(
-        w,
-        "MM    {}",
-        if hmm.flags & P7H_MMASK != 0 {
-            "yes"
-        } else {
-            "no"
-        }
-    )
-    .map_err(HmmerError::Io)?;
-    writeln!(
-        w,
-        "CONS  {}",
-        if hmm.flags & P7H_CONS != 0 {
-            "yes"
-        } else {
-            "no"
-        }
-    )
-    .map_err(HmmerError::Io)?;
+    if format.is_at_least(HmmAsciiFormat::Hmmer3f) {
+        writeln!(
+            w,
+            "MM    {}",
+            if hmm.flags & P7H_MMASK != 0 {
+                "yes"
+            } else {
+                "no"
+            }
+        )
+        .map_err(HmmerError::Io)?;
+    }
+    if format.is_at_least(HmmAsciiFormat::Hmmer3e) {
+        writeln!(
+            w,
+            "CONS  {}",
+            if hmm.flags & P7H_CONS != 0 {
+                "yes"
+            } else {
+                "no"
+            }
+        )
+        .map_err(HmmerError::Io)?;
+    }
     writeln!(
         w,
         "CS    {}",
@@ -708,34 +966,90 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     if let Some(ref ctime) = hmm.ctime {
         writeln!(w, "DATE  {}", ctime).map_err(HmmerError::Io)?;
     }
+    if let Some(ref comlog) = hmm.comlog {
+        for (idx, command) in comlog.lines().enumerate() {
+            writeln!(w, "COM   [{}] {}", idx + 1, command).map_err(HmmerError::Io)?;
+        }
+    }
     if hmm.nseq >= 0 {
         writeln!(w, "NSEQ  {}", hmm.nseq).map_err(HmmerError::Io)?;
     }
     if hmm.eff_nseq >= 0.0 {
-        writeln!(w, "EFFN  {:.6}", hmm.eff_nseq).map_err(HmmerError::Io)?;
+        writeln!(w, "EFFN  {}", fmt_fixed6(hmm.eff_nseq as f64)).map_err(HmmerError::Io)?;
     }
     if hmm.flags & P7H_CHKSUM != 0 {
         writeln!(w, "CKSUM {}", hmm.checksum).map_err(HmmerError::Io)?;
     }
+    if hmm.flags & P7H_GA != 0 {
+        writeln!(
+            w,
+            "GA    {} {}",
+            fmt_fixed2(hmm.cutoff[P7_GA1] as f64),
+            fmt_fixed2(hmm.cutoff[P7_GA2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
+    if hmm.flags & P7H_TC != 0 {
+        writeln!(
+            w,
+            "TC    {} {}",
+            fmt_fixed2(hmm.cutoff[P7_TC1] as f64),
+            fmt_fixed2(hmm.cutoff[P7_TC2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
+    if hmm.flags & P7H_NC != 0 {
+        writeln!(
+            w,
+            "NC    {} {}",
+            fmt_fixed2(hmm.cutoff[P7_NC1] as f64),
+            fmt_fixed2(hmm.cutoff[P7_NC2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
     if hmm.flags & P7H_STATS != 0 {
-        writeln!(
-            w,
-            "STATS LOCAL MSV       {:.4}  {:.5}",
-            hmm.evparam[P7_MMU], hmm.evparam[P7_MLAMBDA]
-        )
-        .map_err(HmmerError::Io)?;
-        writeln!(
-            w,
-            "STATS LOCAL VITERBI   {:.4}  {:.5}",
-            hmm.evparam[P7_VMU], hmm.evparam[P7_VLAMBDA]
-        )
-        .map_err(HmmerError::Io)?;
-        writeln!(
-            w,
-            "STATS LOCAL FORWARD   {:.4}  {:.5}",
-            hmm.evparam[P7_FTAU], hmm.evparam[P7_FLAMBDA]
-        )
-        .map_err(HmmerError::Io)?;
+        if format == HmmAsciiFormat::Hmmer3a {
+            writeln!(
+                w,
+                "STATS LOCAL     VLAMBDA {}",
+                fmt_fixed6(hmm.evparam[P7_MLAMBDA] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+            writeln!(
+                w,
+                "STATS LOCAL         VMU {}",
+                fmt_fixed6(hmm.evparam[P7_MMU] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+            writeln!(
+                w,
+                "STATS LOCAL        FTAU {}",
+                fmt_fixed6(hmm.evparam[P7_FTAU] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+        } else {
+            writeln!(
+                w,
+                "STATS LOCAL MSV       {}  {}",
+                fmt_fixed4(hmm.evparam[P7_MMU] as f64),
+                fmt_fixed5(hmm.evparam[P7_MLAMBDA] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+            writeln!(
+                w,
+                "STATS LOCAL VITERBI   {}  {}",
+                fmt_fixed4(hmm.evparam[P7_VMU] as f64),
+                fmt_fixed5(hmm.evparam[P7_VLAMBDA] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+            writeln!(
+                w,
+                "STATS LOCAL FORWARD   {}  {}",
+                fmt_fixed4(hmm.evparam[P7_FTAU] as f64),
+                fmt_fixed5(hmm.evparam[P7_FLAMBDA] as f64)
+            )
+            .map_err(HmmerError::Io)?;
+        }
     }
 
     // Alphabet header
@@ -796,8 +1110,11 @@ pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
         let rf_ch = hmm.rf.as_ref().map(|rf| rf[node] as char).unwrap_or('-');
         let mm_ch = hmm.mm.as_ref().map(|mm| mm[node] as char).unwrap_or('-');
         let cs_ch = hmm.cs.as_ref().map(|cs| cs[node] as char).unwrap_or('-');
-        write!(w, " {} {}", cons_ch, rf_ch).map_err(HmmerError::Io)?;
-        if write_3f {
+        if format.is_at_least(HmmAsciiFormat::Hmmer3e) {
+            write!(w, " {}", cons_ch).map_err(HmmerError::Io)?;
+        }
+        write!(w, " {}", rf_ch).map_err(HmmerError::Io)?;
+        if format.is_at_least(HmmAsciiFormat::Hmmer3f) {
             write!(w, " {}", mm_ch).map_err(HmmerError::Io)?;
         }
         write!(w, " {}", cs_ch).map_err(HmmerError::Io)?;
@@ -828,10 +1145,10 @@ fn fmt_prob(p: f32) -> String {
     if p <= 0.0 {
         "      *".to_string()
     } else if p == 1.0 {
-        format!("{:7.5}", 0.0)
+        fmt_hmm_prob(0.0)
     } else {
         // HMMER's C writer uses logf(), not double-precision log().
-        format!("{:7.5}", -unsafe { logf(p) })
+        fmt_hmm_prob(-c_logf_to_f32(p) as f64)
     }
 }
 
@@ -841,8 +1158,33 @@ mod tests {
     use std::io::{BufReader, Cursor};
     use std::path::Path;
 
+    struct OneByteReader {
+        data: Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for OneByteReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut byte = [0u8; 1];
+            let n = self.data.read(&mut byte)?;
+            if n == 1 {
+                buf[0] = byte[0];
+            }
+            Ok(n)
+        }
+    }
+
     fn read_hmms_from_str(s: &str) -> HmmerResult<Vec<Hmm>> {
         read_hmms(BufReader::new(Cursor::new(s.as_bytes())))
+    }
+
+    fn minimal_hmm(name: &str, abc_type: AlphabetType) -> Hmm {
+        let abc = Alphabet::new(abc_type);
+        let mut hmm = Hmm::new(1, abc_type, abc.k);
+        hmm.name = name.to_string();
+        hmm
     }
 
     #[test]
@@ -888,6 +1230,26 @@ mod tests {
     }
 
     #[test]
+    fn auto_reader_detects_binary_hmm_from_short_stream_reads() {
+        let hmm = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        let mut bytes = Vec::new();
+        crate::hmmfile_binary::write_binary_hmm(&mut bytes, &hmm).unwrap();
+
+        let reader = OneByteReader {
+            data: Cursor::new(bytes),
+        };
+        let hmms = read_hmms_auto(BufReader::new(reader)).unwrap();
+        assert_eq!(hmms.len(), 1);
+        assert_eq!(hmms[0].name, "fn3");
+        assert_eq!(hmms[0].m, 86);
+    }
+
+    #[test]
     fn rejects_hmm_alphabet_header_that_disagrees_with_alph() {
         let mut text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -898,6 +1260,59 @@ mod tests {
 
         let err = read_hmms_from_str(&text).unwrap_err();
         assert!(err.to_string().contains("HMM alphabet header symbol 1"));
+    }
+
+    #[test]
+    fn rejects_non_exact_hmmer3_magic_tags() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        ))
+        .unwrap()
+        .replacen("HMMER3/e", "HMMER3/foo", 1);
+
+        let err = read_hmms_from_str(&text).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("Unsupported HMMER3 ASCII magic tag"))
+        );
+    }
+
+    #[test]
+    fn parses_alphabet_and_stats_tokens_case_insensitively() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        ))
+        .unwrap()
+        .replacen("ALPH  amino", "ALPH  AMINO", 1)
+        .replacen("STATS LOCAL MSV", "STATS local mSv", 1)
+        .replacen("STATS LOCAL VITERBI", "STATS LoCaL vItErBi", 1)
+        .replacen("STATS LOCAL FORWARD", "STATS LOCAL forward", 1);
+
+        let hmm = read_hmms_from_str(&text).unwrap().remove(0);
+        assert_eq!(hmm.abc_type, AlphabetType::Amino);
+        assert!(hmm.flags & P7H_STATS != 0);
+        assert!((hmm.evparam[P7_MMU] - (-6.4582)).abs() < 1e-3);
+        assert!((hmm.evparam[P7_FTAU] - (-4.5231)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn writer_emits_pfam_cutoff_headers() {
+        let mut hmm = minimal_hmm("with_cutoffs", AlphabetType::Amino);
+        hmm.cutoff[P7_GA1] = 25.0;
+        hmm.cutoff[P7_GA2] = 24.5;
+        hmm.cutoff[P7_TC1] = 30.0;
+        hmm.cutoff[P7_TC2] = 29.5;
+        hmm.cutoff[P7_NC1] = -1.0;
+        hmm.cutoff[P7_NC2] = -2.0;
+        hmm.flags |= P7H_GA | P7H_TC | P7H_NC;
+
+        let mut buf = Vec::new();
+        write_hmm(&mut buf, &hmm).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("GA    25.00 24.50\n"), "{text}");
+        assert!(text.contains("TC    30.00 29.50\n"), "{text}");
+        assert!(text.contains("NC    -1.00 -2.00\n"), "{text}");
     }
 
     #[test]
@@ -931,6 +1346,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_hmmer3a_records_written_by_rust() {
+        let hmm = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        let mut buf = Vec::new();
+        write_hmm_with_format(&mut buf, &hmm, HmmAsciiFormat::Hmmer3a).unwrap();
+        assert!(String::from_utf8_lossy(&buf).starts_with("HMMER3/a "));
+
+        let hmms = read_hmms(BufReader::new(Cursor::new(buf))).unwrap();
+        assert_eq!(hmms.len(), 1);
+        assert_eq!(hmms[0].name, "test");
+        assert_eq!(hmms[0].m, 20);
+        assert_eq!(hmms[0].abc_type, AlphabetType::Amino);
+    }
+
+    #[test]
     fn parses_hmmer3f_map_annotations_with_mm_placeholder() {
         let hmms = read_hmm_file(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -958,12 +1392,80 @@ mod tests {
     }
 
     #[test]
+    fn rejects_ascii_hmm_database_with_mixed_alphabets() {
+        let mut text = Vec::new();
+        write_hmm(&mut text, &minimal_hmm("protein", AlphabetType::Amino)).unwrap();
+        write_hmm(&mut text, &minimal_hmm("dna", AlphabetType::Dna)).unwrap();
+
+        let err = read_hmms(BufReader::new(Cursor::new(text))).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("ASCII HMM file contains mixed alphabets"))
+        );
+    }
+
+    #[test]
     fn rejects_bad_ga_cutoff_instead_of_defaulting() {
         let err = read_hmms_from_str(
             "HMMER3/f [3.4 | Aug 2023]\nNAME  x\nLENG  1\nALPH  amino\nGA    nope\n",
         )
         .unwrap_err();
         assert!(matches!(err, HmmerError::Format(msg) if msg.contains("Bad GA cutoff")));
+    }
+
+    #[test]
+    fn rejects_invalid_yes_no_header_values() {
+        let original = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/gecco_cluster1_hmms.hmm"
+        ))
+        .unwrap();
+        for key in ["RF", "MM", "CONS", "CS", "MAP"] {
+            let yes_needle = format!("{key:<5} yes");
+            let no_needle = format!("{key:<5} no");
+            let needle = if original.contains(&yes_needle) {
+                yes_needle
+            } else {
+                no_needle
+            };
+            let mutated = original.replacen(&needle, &format!("{key:<5} maybe"), 1);
+            assert_ne!(mutated, original, "test fixture did not contain {needle}");
+            let err = read_hmms_from_str(&mutated).unwrap_err();
+            assert!(
+                matches!(&err, HmmerError::Format(msg) if msg.contains(&format!("Bad {key} value"))),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn writer_preserves_comlog_lines() {
+        let mut hmm = minimal_hmm("with_com", AlphabetType::Amino);
+        hmm.comlog = Some("first command\nsecond command".to_string());
+        let mut buf = Vec::new();
+        write_hmm(&mut buf, &hmm).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("COM   [1] first command\n"), "{text}");
+        assert!(text.contains("COM   [2] second command\n"), "{text}");
+    }
+
+    #[test]
+    fn rejects_mixed_ascii_hmmer3_versions() {
+        let mut text = Vec::new();
+        write_hmm(&mut text, &minimal_hmm("first", AlphabetType::Amino)).unwrap();
+        let second = {
+            let mut buf = Vec::new();
+            write_hmm(&mut buf, &minimal_hmm("second", AlphabetType::Amino)).unwrap();
+            String::from_utf8(buf)
+                .unwrap()
+                .replacen("HMMER3/f", "HMMER3/e", 1)
+        };
+        text.extend_from_slice(second.as_bytes());
+
+        let err = read_hmms(BufReader::new(Cursor::new(text))).unwrap_err();
+        assert!(
+            matches!(&err, HmmerError::Format(msg) if msg.contains("mixed HMMER3 format versions")),
+            "{err}"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! Uses SSI-like index for fast lookup on large databases.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
@@ -41,8 +42,16 @@ struct Args {
 /// `--index` writes a C/Easel-compatible SSI index (`<hmmfile>.ssi`). Normal
 /// lookup builds an SSI-style in-memory lookup table, then re-scans the file to
 /// locate the matching HMM by name or accession before writing it.
-pub fn run(args: Vec<String>) -> std::process::ExitCode {
-    let args = Args::parse_from(&args);
+pub fn run_os(args: Vec<OsString>) -> std::process::ExitCode {
+    run_from(args)
+}
+
+fn run_from<I, T>(args: I) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = Args::parse_from(args);
 
     if args.index {
         if args.key.is_some() {
@@ -81,18 +90,53 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         }
         let keys = read_keys(keyfile);
+        if args.hmmfile != PathBuf::from("-") {
+            match ssi::read_hmm_ssi(&args.hmmfile) {
+                Ok(Some(index)) => {
+                    let mut out = open_output(args.output.as_ref());
+                    let mut fetched = 0usize;
+                    for key in &keys {
+                        let Some(offset) = index.lookup(key) else {
+                            eprintln!(
+                                "Error: HMM '{}' not found in {}",
+                                key,
+                                args.hmmfile.display()
+                            );
+                            std::process::exit(1);
+                        };
+                        let hmm = read_indexed_hmm(&args.hmmfile, key, offset);
+                        hmmfile::write_hmm(&mut out, &hmm).unwrap();
+                        fetched += 1;
+                    }
+                    if args.output.is_some() {
+                        println!("\nRetrieved {} HMMs.", fetched);
+                    }
+                    return std::process::ExitCode::SUCCESS;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("Error reading SSI index: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
             eprintln!("Error reading HMM file: {}", e);
             std::process::exit(1);
         });
         let key_set: HashSet<&str> = keys.iter().map(String::as_str).collect();
         let mut out = open_output(args.output.as_ref());
+        let mut fetched = 0usize;
         for hmm in &hmms {
-            if key_set.contains(hmm.name.as_str())
-                || hmm.acc.as_deref().is_some_and(|acc| key_set.contains(acc))
-            {
+            let name_match = key_set.contains(hmm.name.as_str());
+            let acc_match = hmm.acc.as_deref().is_some_and(|acc| key_set.contains(acc));
+            if name_match || acc_match {
                 hmmfile::write_hmm(&mut out, hmm).unwrap();
+                fetched += 1;
             }
+        }
+        if args.output.is_some() {
+            println!("\nRetrieved {} HMMs.", fetched);
         }
     } else if let Some(ref key) = args.key {
         if args.hmmfile == PathBuf::from("-") {
@@ -102,26 +146,64 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             });
             fetch_one(&args, key, &hmms);
         } else {
-            // Build index for fast lookup
-            let idx = Index::build_from_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
-                eprintln!("Error building index: {}", e);
-                std::process::exit(1);
-            });
-
-            if idx.lookup(key).is_some() {
-                // Found in index — read the specific HMM
-                let hmms = hmmfile::read_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
+            match ssi::read_hmm_ssi(&args.hmmfile) {
+                Ok(Some(index)) => {
+                    let Some(offset) = index.lookup(key) else {
+                        eprintln!(
+                            "Error: HMM '{}' not found in {}",
+                            key,
+                            args.hmmfile.display()
+                        );
+                        std::process::exit(1);
+                    };
+                    let hmm = read_indexed_hmm(&args.hmmfile, key, offset);
+                    write_one(&args, key, &hmm);
+                    return std::process::ExitCode::SUCCESS;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("Error reading SSI index: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            if hmmfile::read_hmm_file_auto(&args.hmmfile)
+                .map(|hmms| {
+                    let found = hmms
+                        .iter()
+                        .any(|h| h.name == key.as_str() || h.acc.as_deref() == Some(key.as_str()));
+                    if found {
+                        fetch_one(&args, key, &hmms);
+                    }
+                    found
+                })
+                .unwrap_or_else(|e| {
                     eprintln!("Error reading HMM file: {}", e);
                     std::process::exit(1);
-                });
-                fetch_one(&args, key, &hmms);
+                })
+            {
+                // Found by name or accession.
             } else {
-                eprintln!(
-                    "Error: HMM '{}' not found in {}",
-                    key,
-                    args.hmmfile.display()
-                );
-                std::process::exit(1);
+                // ASCII files may have SSI/index-compatible keys that do not
+                // require loading all records; keep the not-found check aligned
+                // with existing index behavior for malformed key requests.
+                let idx = Index::build_from_hmm_file(&args.hmmfile).unwrap_or_else(|e| {
+                    eprintln!("Error building index: {}", e);
+                    std::process::exit(1);
+                });
+                if idx.lookup(key).is_some() {
+                    let hmms = hmmfile::read_hmm_file_auto(&args.hmmfile).unwrap_or_else(|e| {
+                        eprintln!("Error reading HMM file: {}", e);
+                        std::process::exit(1);
+                    });
+                    fetch_one(&args, key, &hmms);
+                } else {
+                    eprintln!(
+                        "Error: HMM '{}' not found in {}",
+                        key,
+                        args.hmmfile.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
     } else {
@@ -136,18 +218,7 @@ fn fetch_one(args: &Args, key: &str, hmms: &[hmmer_pure_rs::Hmm]) {
         .iter()
         .find(|h| h.name == key || h.acc.as_deref() == Some(key));
     match found {
-        Some(hmm) => {
-            let output_name = if args.output_key {
-                Some(PathBuf::from(key))
-            } else {
-                args.output.clone()
-            };
-            let mut out = open_output(output_name.as_ref());
-            hmmfile::write_hmm(&mut out, hmm).unwrap();
-            if output_name.is_some() {
-                println!("\n\nRetrieved HMM {}.", key);
-            }
-        }
+        Some(hmm) => write_one(args, key, hmm),
         None => {
             eprintln!(
                 "Error: HMM '{}' not found in {}",
@@ -157,6 +228,36 @@ fn fetch_one(args: &Args, key: &str, hmms: &[hmmer_pure_rs::Hmm]) {
             std::process::exit(1);
         }
     }
+}
+
+fn write_one(args: &Args, key: &str, hmm: &hmmer_pure_rs::Hmm) {
+    let output_name = if args.output_key {
+        Some(PathBuf::from(key))
+    } else {
+        args.output.clone()
+    };
+    let mut out = open_output(output_name.as_ref());
+    hmmfile::write_hmm(&mut out, hmm).unwrap();
+    if output_name.is_some() {
+        println!("\n\nRetrieved HMM {}.", key);
+    }
+}
+
+fn read_indexed_hmm(path: &std::path::Path, key: &str, offset: u64) -> hmmer_pure_rs::Hmm {
+    let hmm = hmmfile::read_hmm_file_record_at(path, offset).unwrap_or_else(|e| {
+        eprintln!("Error reading indexed HMM record: {}", e);
+        std::process::exit(1);
+    });
+    if hmm.name != key && hmm.acc.as_deref() != Some(key) {
+        eprintln!(
+            "Error: SSI index for '{}' points to HMM '{}' in {}",
+            key,
+            hmm.name,
+            path.display()
+        );
+        std::process::exit(1);
+    }
+    hmm
 }
 
 fn read_keys(path: &str) -> Vec<String> {
@@ -202,9 +303,9 @@ fn read_hmms_maybe_stdin(
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_hmms_allow_mixed_formats(BufReader::new(stdin.lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto_allow_mixed_formats(path)
     }
 }
 

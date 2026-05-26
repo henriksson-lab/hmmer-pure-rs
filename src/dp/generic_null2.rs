@@ -8,6 +8,7 @@
 use crate::dp::gmx::*;
 use crate::profile::Profile;
 use crate::trace::{State, Trace};
+use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
 
 /// Calculate the null2 model from posterior probabilities (expectation method).
 ///
@@ -49,8 +50,8 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
     exp_j *= norm;
 
     let xfactor = crate::logsum::p7_flogsum(
-        crate::logsum::p7_flogsum(exp_n.ln(), exp_c.ln()),
-        exp_j.ln(),
+        crate::logsum::p7_flogsum(c_logf_to_f32(exp_n), c_logf_to_f32(exp_c)),
+        c_logf_to_f32(exp_j),
     );
 
     // C generic_null2.c forms the weighted emission odds in log-space,
@@ -58,12 +59,14 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
     let mut null2 = vec![f32::NEG_INFINITY; k];
     for x in 0..k {
         for node in 1..m {
-            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[node].ln() + gm.msc(node, x));
-            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_i[node].ln() + gm.isc(node, x));
+            null2[x] =
+                crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_m[node]) + gm.msc(node, x));
+            null2[x] =
+                crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_i[node]) + gm.isc(node, x));
         }
-        null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[m].ln() + gm.msc(m, x));
+        null2[x] = crate::logsum::p7_flogsum(null2[x], c_logf_to_f32(exp_m[m]) + gm.msc(m, x));
         null2[x] = crate::logsum::p7_flogsum(null2[x], xfactor);
-        null2[x] = null2[x].exp();
+        null2[x] = c_expf_to_f32(null2[x]);
     }
 
     null2
@@ -78,7 +81,7 @@ pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
     for i in ienv..=jenv {
         let x = dsq[i] as usize;
         if x < null2.len() && null2[x] > 0.0 {
-            score += null2[x].ln();
+            score += c_logf_to_f32(null2[x]);
         }
     }
     score
@@ -144,10 +147,10 @@ pub fn null2_by_trace(gm: &Profile, tr: &Trace, zstart: usize, zend: usize) -> V
     let mut null2 = vec![0.0_f32; k];
     for x in 0..k {
         for node in 1..m {
-            null2[x] += exp_m[node] * gm.msc(node, x).exp();
-            null2[x] += exp_i[node] * gm.isc(node, x).exp();
+            null2[x] += exp_m[node] * c_expf_to_f32(gm.msc(node, x));
+            null2[x] += exp_i[node] * c_expf_to_f32(gm.isc(node, x));
         }
-        null2[x] += exp_m[m] * gm.msc(m, x).exp();
+        null2[x] += exp_m[m] * c_expf_to_f32(gm.msc(m, x));
         null2[x] += xfactor;
     }
 

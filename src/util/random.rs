@@ -4,6 +4,8 @@
 //! `esl_randomness_CreateFast()`, the legacy Knuth LCG path in
 //! `esl_random.c`, so this type preserves that stream for parity.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 /// Legacy Easel `CreateFast` random number generator.
 pub struct MersenneTwister {
     x: u32,
@@ -13,11 +15,11 @@ pub struct MersenneTwister {
 impl MersenneTwister {
     /// Create a new fast LCG RNG seeded identically to `esl_randomness_CreateFast`.
     ///
-    /// Mirrors Easel's deprecated fast path: seed=0 is replaced with 42, then
-    /// the state is dispersed through `esl_mix3` and forced non-zero so
-    /// downstream sequences exactly match the C reference.
+    /// Mirrors Easel's deprecated fast path: seed=0 requests a one-time
+    /// arbitrary seed, then the state is dispersed through `esl_mix3` and
+    /// forced non-zero so nonzero seeds exactly match the C reference.
     pub fn new(seed: u32) -> Self {
-        let seed = if seed == 0 { 42 } else { seed };
+        let seed = resolve_seed(seed);
         let mut x = esl_mix3(seed, 87_654_321, 12_345_678);
         if x == 0 {
             x = 42;
@@ -85,6 +87,36 @@ impl MersenneTwister {
     }
 }
 
+/// Resolve Easel seed semantics: nonzero seeds are exact, zero means
+/// "choose an arbitrary one-time seed".
+pub fn resolve_seed(seed: u32) -> u32 {
+    resolve_seed_with(seed, arbitrary_seed)
+}
+
+fn resolve_seed_with<F>(seed: u32, arbitrary: F) -> u32
+where
+    F: FnOnce() -> u32,
+{
+    if seed != 0 {
+        return seed;
+    }
+    match arbitrary() {
+        0 | 42 => 43,
+        value => value,
+    }
+}
+
+fn arbitrary_seed() -> u32 {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    let addr = (&time as *const u64 as usize) as u64;
+    let mixed = time ^ pid.rotate_left(17) ^ addr.rotate_left(7);
+    esl_mix3(mixed as u32, (mixed >> 32) as u32, pid as u32 ^ 0x9e37_79b9)
+}
+
 /// Bob Jenkins' 3-word mixing function used by Easel to disperse seeds.
 ///
 /// Direct port of `esl_mix3` from Easel; the bit-rotations have no fitness
@@ -131,6 +163,14 @@ mod tests {
         for _ in 0..1000 {
             assert_eq!(rng1.next_u32(), rng2.next_u32());
         }
+    }
+
+    #[test]
+    fn seed_zero_resolves_to_arbitrary_nonzero_seed() {
+        assert_eq!(resolve_seed_with(42, || 7), 42);
+        assert_eq!(resolve_seed_with(0, || 7), 7);
+        assert_eq!(resolve_seed_with(0, || 0), 43);
+        assert_eq!(resolve_seed_with(0, || 42), 43);
     }
 
     #[test]

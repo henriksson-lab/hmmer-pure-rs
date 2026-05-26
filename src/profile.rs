@@ -4,26 +4,7 @@
 use crate::alphabet::Alphabet;
 use crate::bg::Bg;
 use crate::hmm::*;
-
-#[link(name = "m")]
-unsafe extern "C" {
-    #[link_name = "log"]
-    fn c_log(x: f64) -> f64;
-}
-
-/// Wrap libm `log(x)` and cast the `f64` result to `f32`. Used to reproduce
-/// C HMMER's exact rounding when scoring profile parameters.
-#[inline]
-fn c_log_to_f32(x: f64) -> f32 {
-    unsafe { c_log(x) as f32 }
-}
-
-/// Convenience for the most common pattern: promote `f32` to `f64`, take
-/// `log` via libm, then truncate back to `f32` (matches C `log()` chains).
-#[inline]
-fn c_log_f32_to_f32(x: f32) -> f32 {
-    c_log_to_f32(x as f64)
-}
+use crate::util::cmath::{c_log_f32_to_f32, c_log_f64, c_log_to_f32, ESL_CONST_LOG2};
 
 /// Tracehash hook: record the per-node B→Mk entry-score derivation so it can
 /// be diff'd against the C reference. Active only under the `tracehash` feature.
@@ -207,6 +188,29 @@ pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
     mocc
 }
 
+/// Compute the occupancy-weighted average match-state composition.
+///
+/// This is the composition returned by C's `p7_hmm_CompositionKLD()` when its
+/// optional composition vector is requested. It intentionally uses match
+/// emissions only, not insert emissions.
+pub fn hmm_average_match_composition(hmm: &Hmm) -> Vec<f32> {
+    let occ = hmm_calculate_occupancy(hmm);
+    let mut avg = vec![0.0_f32; hmm.abc_k];
+    for k in 1..=hmm.m {
+        for x in 0..hmm.abc_k {
+            avg[x] += hmm.mat[k][x] * occ[k];
+        }
+    }
+
+    let sum: f32 = avg.iter().sum();
+    if sum > 0.0 {
+        for p in &mut avg {
+            *p /= sum;
+        }
+    }
+    avg
+}
+
 /// Expected score for a degenerate residue code `x`, weighting the canonical
 /// scores `sc[0..K-1]` by background frequencies `p`. Mirrors
 /// `esl_abc_FAvgScore` semantics for IUPAC degeneracies.
@@ -299,16 +303,16 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
             gm.set_tsc(
                 k,
                 P7P_BM,
-                (z as f64 + unsafe { c_log(hmm.t[k][DM] as f64) }) as f32,
+                (z as f64 + c_log_f64(hmm.t[k][DM] as f64)) as f32,
             );
-            z = (z as f64 + unsafe { c_log(hmm.t[k][DD] as f64) }) as f32;
+            z = (z as f64 + c_log_f64(hmm.t[k][DD] as f64)) as f32;
         }
     }
 
     // E state transitions
     if gm.is_multihit() {
-        gm.xsc[P7P_E][P7P_MOVE] = -(std::f64::consts::LN_2 as f32); // -log(2)
-        gm.xsc[P7P_E][P7P_LOOP] = -(std::f64::consts::LN_2 as f32);
+        gm.xsc[P7P_E][P7P_MOVE] = -(ESL_CONST_LOG2 as f32); // -log(2)
+        gm.xsc[P7P_E][P7P_LOOP] = -(ESL_CONST_LOG2 as f32);
         gm.nj = 1.0;
     } else {
         gm.xsc[P7P_E][P7P_MOVE] = 0.0;
@@ -390,8 +394,8 @@ pub fn reconfig_length(gm: &mut Profile, l: i32) {
 /// calls [`reconfig_length`] because the length model depends on `nj`. Used
 /// inside the domain-definition pipeline to flip in and out of unihit mode.
 pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
-    gm.xsc[P7P_E][P7P_MOVE] = -(std::f64::consts::LN_2 as f32);
-    gm.xsc[P7P_E][P7P_LOOP] = -(std::f64::consts::LN_2 as f32);
+    gm.xsc[P7P_E][P7P_MOVE] = -(ESL_CONST_LOG2 as f32);
+    gm.xsc[P7P_E][P7P_LOOP] = -(ESL_CONST_LOG2 as f32);
     gm.nj = 1.0;
     reconfig_length(gm, l);
 }

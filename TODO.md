@@ -1,27 +1,13 @@
-# TODO - HMMER Rust/C Parity And Speed
+# HMMER Rust/C Parity And Speed Notes
 
-This file is the working queue for making the Rust port bitwise closer to C
-HMMER, then making it at least as fast as the original. Keep it current. When a
-trace result or a failed experiment changes what the next useful target is,
-update this file in the same change.
+This file tracks current parity/speed snapshots, preserved invariants, rejected
+experiments, and deferred follow-up ideas. Keep it current when a trace result,
+benchmark, or failed experiment changes the next useful target.
 
-## Remaining Feature Checklist
+## Translation Audit Status - 2026-05-25
 
-- [ ] `phmmer`: finish the remaining single-sequence calibration/build parity
-      work on smaller fixtures where exact bundled-C scores still drift.
-- [ ] `jackhmmer`: make later-round iterative rebuilds C-identical. Rebuilds
-      now use model-guided alignment against the previous-round HMM instead of
-      raw sequence padding, but the iterative `hmmbuild` path is still
-      simplified and final-round bundled-C scores remain lower in Rust.
-- [ ] Domain definition: finish the remaining SIMD/full-matrix Forward,
-      Backward, and Decoding work needed to remove the generic DP bottleneck in
-      per-envelope rescoring.
-- [ ] Sequence-level null2 bias: broaden validation beyond the current checked
-      fixtures and only reopen algorithmic work if a real C/Rust mismatch is
-      reproduced on a committed regression.
-- [ ] Keep command-surface parity honest: whenever a command exists but is not
-      behaviorally complete, document the limitation in both `README.md` and
-      the relevant subcommand source file until it is fixed.
+These notes come from the latest parallel C/Rust audit. Preserve evidence for
+active parity/speed claims until each item has regression coverage.
 
 ## Ground Rules
 
@@ -47,6 +33,12 @@ nm hmmer/src/hmmsearch | rg tracehash
 ```
 
 The final `nm` command should print nothing and exit with status 1.
+
+## Live Output Parity TODO - Real-Data Benchmark 2026-05-26
+
+All live real-data parity items from this section are resolved as of
+`reports/benchmarks/20260526T-nhmmer-ssv-fix`, generated with
+`THREADS=1 ROUNDS=1 ALLOW_MISMATCH=1 SKIP_BUILD=1`.
 
 ## Current Reference Case
 
@@ -374,150 +366,47 @@ Do not repeat these without a new reason:
   - Wrapping stdout and tabular/alignment output files in `BufWriter` is kept as
     a C-like buffered I/O cleanup. It preserves output exactly; current profiles
     no longer show write/syscall cost in the top Rust domtblout symbols.
-  - C domtblout profiling shows the next structural gap: C uses SSE
-    `p7_OptimalAccuracy` (~7.8% self in the C profile), while Rust still runs
-    generic Gmx optimal-accuracy inside `score_domain_envelope`. A faithful
-    striped OA port is the next major domtblout target.
+  - Historical note: C domtblout profiling pointed at SSE
+    `p7_OptimalAccuracy`; Rust now has the SIMD OA coordinate path. Future OA
+    work should be based on a fresh profile, not this older gap statement.
 
-## Priority 1 - Close Remaining Exact Score Drift
+## Completed Parity Invariants And Fixture Coverage
 
-### 1. Isolated-Domain Forward Score: 0/586
+The core Pkinase reference trace is exact for the major score/domain probes,
+including conversion-time `oprofile_xf_bits`. Preserve these invariants:
 
-Current state:
+- `score_domain_forward`: 0/586 exact mismatches. The
+  `null2_is_done=1` clustered-region path must keep the full-PMX Forward call
+  even when the matrix looks unnecessary, because C still calls `p7_Forward()`
+  with `ox1` in `rescore_isolated_domain()`.
+- `pipeline_score_full_seq_bias`, `pipeline_score_direct_seq`,
+  `pipeline_score_sum_bias`, `pipeline_score_final_seq`, and
+  `pipeline_full_seq_bias_detail`: 0/483 mismatches. Do not collapse the two
+  domain-definition sums back into one value; the diagnostic uses the simple
+  `float` sum and pipeline scoring uses the compensated `esl_vec_FSum()` style
+  sum.
+- `pipeline_score_components`: 0/483 exact mismatches.
+- `oprofile_xf_bits`: exact on the Pkinase `hmmsearch` reference after
+  matching C's initial dummy profile length `100`. Keep
+  `tracehash/scripts/run-hmmer-reference.sh` strict for this probe.
 
-- `score_domain_forward` is exact on the reference case: 0/586 mismatches.
-- The final gap was in the `null2_is_done=1` clustered-region path. Rust used a
-  parser-only Forward call because it did not need the matrix later, but C
-  still calls `p7_Forward()` with a full `ox1` matrix in
-  `rescore_isolated_domain()`. Running the Rust full-PMX Forward path for this
-  branch matches C and leaves null2/domain summaries exact.
-- A full-matrix running-`totscale` return tweak fixed this local probe but
-  broke null2/define-domain exactness, so preserve the row-scale return
-  reconstruction.
-
-Next steps:
-
-- Preserve the full-PMX call in the `null2_is_done=1` branch even if it looks
-  like unnecessary work. It is a C-faithfulness requirement for bitwise parity.
-- Recheck this probe on the next broader fixture set.
-
-Acceptance target:
-
-- `score_domain_forward`: remains 0/586 exact mismatches.
-- `score_domain_null2` and `define_domains_summary` must remain 0 mismatches.
-
-### 2. Pipeline Full-Sequence Bias / Direct Sequence Score
-
-Current state:
-
-- `pipeline_score_full_seq_bias`: 0/483 mismatches.
-- `pipeline_score_direct_seq`: 0/483.
-- `pipeline_score_sum_bias`: 0/483.
-- `pipeline_score_final_seq`: 0/483.
-- `pipeline_full_seq_bias_detail`: 0/483.
-
-Interpretation:
-
-- Full-sequence null2 bias and direct sequence score are now exact after
-  domain definition started returning both C sums: simple `float` sum for the
-  diagnostic trace and compensated `esl_vec_FSum()` style sum for pipeline
-  scoring.
-- Remaining reconstruction-score mismatches are now explained by the known
-  isolated-domain Forward score drift.
-
-Next steps:
-
-- Keep the `pipeline_full_seq_bias_detail` probe until at least one broader
-  fixture confirms the two-sum behavior is stable.
-- Do not collapse the two domain-definition sums back into one value.
-
-Acceptance target:
-
-- Maintain 0/483 for full-sequence bias, direct sequence score, final sequence
-  score, and `define_domains_summary`.
-
-### 3. Pipeline Score Components: 0/483
-
-Current state:
-
-- `pipeline_score_components` has 0/483 exact mismatches on the reference case.
-
-Next steps:
-
-- Recheck on the next broader fixture set.
-- If it regresses, split `pipeline_score_components` into one row per field
-  with the same input key.
-
-Acceptance target:
-
-- `pipeline_score_components`: remains 0/483 exact mismatches.
-
-## Priority 2 - Broader Regression Fixtures
-
-The core Pkinase reference trace is now exact for the major score/domain probes
-except conversion-time `oprofile_xf_bits`, which is currently benign. Before
-speed work, run broader fixtures from Priority 3 below and record whether the
-same exactness holds.
-
-## Priority 3 - Keep `oprofile_xf_bits` Resolved
-
-Current state:
-
-- Resolved on the Pkinase `hmmsearch` reference: `oprofile_xf_bits` is exact
-  (`R=8 C=8 missing=0 mism=0`) in the `l100` tracehash run.
-- Root cause was Rust using dummy length `400` for initial `hmmsearch` profile
-  conversion while C uses `p7_ProfileConfig(..., 100, p7_LOCAL)`. That made
-  conversion-time `N/C/J` odds differ as `3/403` vs `3/103`.
-- The mismatch was downstream-neutral because per-sequence reconfiguration
-  overwrote those odds before scoring, but the conversion trace is now faithful.
-- A direct Rust `libc`/C `expf()` experiment did not close this probe, so do
-  not repeat it as a simple conversion fix.
-
-Next steps:
-
-- Keep `tracehash/scripts/run-hmmer-reference.sh` strict for
-  `oprofile_xf_bits`; it is no longer in the benign skip list.
-- Check other subcommands against their C call sites before changing their
-  dummy profile lengths.
-
-Acceptance target:
-
-- Preserve exact `oprofile_xf_bits` in future reference tracehash runs.
-
-## Priority 4 - Wider Regression Fixtures
-
-The current reference case is necessary but not enough. Add more cases once the
-remaining Pkinase exact drift is closed or clearly classified.
-
-Suggested fixtures:
-
-- Globins reference used by `rust_hmmsearch_tests`.
-- GECCO/Pfam fixtures used by existing Rust tests.
-- A case with ambiguous amino residues (`B/J/Z/O/U/X`) to guard the null2 and
-  bias-filter degeneracy fixes.
-- A multi-query HMM file to catch model reconfiguration state leaks.
-
-Completed fixture checks:
+Completed broader fixture checks:
 
 - `hmmer/testsuite/20aa.hmm` vs `hmmer/testsuite/20aa-alitest.fa`
   - Command shape: Rust/C `hmmsearch --cpu 1 --noali --tblout ...`
   - Core trace probes exact, including null2 and pipeline scores.
-  - `oprofile_xf_bits` remains the same benign 6/8 conversion-time mismatch.
   - Parsed `tblout` rows match C exactly. This fixture specifically guards
     clustered null2-by-trace handling of `X` residues in `test2` and `test3`.
 - `hmmer/tutorial/globins4.hmm` vs `hmmer/tutorial/globins45.fa`
   - Command shape: Rust/C `hmmsearch --cpu 1 --noali --tblout ...`
   - Core trace probes exact for all 45 hits.
-  - `oprofile_xf_bits` remains the same benign 6/8 conversion-time mismatch.
   - Parsed `tblout` rows match C exactly.
 - `hmmer/testsuite/gecco_pfam5.hmm` vs `hmmer/testsuite/gecco_proteins.faa`
   - Command shape: Rust/C `hmmsearch --cpu 1 --noali --tblout ...`
   - Core trace probes exact for all 16 pipeline hits / 24 rescored domains.
-  - `oprofile_xf_bits` remains benign at 30/40 conversion-time mismatches
-    across the five HMMs; the downstream score/domain probes are exact.
   - Parsed `tblout` rows match C exactly.
 
-For each fixture, record:
+For any future fixture, record:
 
 - command
 - C/Rust visible output comparison
@@ -525,9 +414,9 @@ For each fixture, record:
 - whether the fixture is intended for exact bitwise parity or only displayed
   output parity.
 
-## Priority 5 - Tracehash Usability Improvements
+## Completed Tracehash Usability Improvements
 
-Useful improvements for continuing parity work:
+Implemented improvements kept for continuing parity work:
 
 - Done:
   - `tracehash-compare` accepts `--only function1,function2`,
@@ -539,115 +428,44 @@ Useful improvements for continuing parity work:
     useful when duplicate-input occurrence order is not meaningful.
   - It accepts `--left-label`, `--right-label`, and `--summary-only` for large
     Rust/C trace comparisons.
+  - It accepts `--json` for downstream scripts that need deterministic summary
+    data without parsing the text report.
 - Done:
   - Added Rust `Call::input_field()` / `Call::output_field()` and matching C
     named scalar field macros for quick ad hoc probes without defining a full
     derive/struct pair.
-- Improve `tracehash-compare` further:
-  - add optional JSON output for downstream scripts
 - Done:
   - Added `tracehash/scripts/run-hmmer-reference.sh` for the standard Pkinase
     reference run. It builds Rust traced release, builds C traced `hmmsearch`,
     runs both sides with `TRACEHASH_VALUES=1`, prints comparator/core-probe
-    summaries, checks parsed `tblout` parity, treats the known
-    conversion-time `oprofile_xf_bits` drift as benign, and rebuilds C
+    summaries, checks parsed `tblout` parity, keeps `oprofile_xf_bits` in the
+    strict core-probe set, and rebuilds C
     uninstrumented on exit.
   - The script writes large traces under
     `target/tracehash-runs` by default; override
     `TRACEHASH_WORKDIR` or `PREFIX` for other storage.
-- Add a Rust macro for a named scalar output probe with standard inputs:
-  - sequence length
-  - model length
-  - optional `dsq` bytes
-  - one or more scalar outputs
-- Improve derive support:
-  - support tuple structs
-  - support enums with explicit variant tags
-  - document unsupported generics/lifetimes clearly
-- Add C convenience macros for common HMMER patterns:
-  - `TH_HMMER_IN_DSQ(call, dsq, start, len)`
-  - `TH_HMMER_IN_MODEL_SEQ(call, M, L, dsq)`
-  - `TH_HMMER_OUT_F32_AND_Q(call, value, quantum)`
-## Priority 6 - Performance After Parity
+- Done:
+  - Added `tracehash::th_hmmer_probe!` for named scalar output probes with
+    standard HMMER inputs: sequence length, model length, optional `dsq`
+    bytes, and one or more named scalar outputs.
+- Done:
+  - Added C HMMER convenience macros for standard model/sequence inputs, sliced
+    `dsq` bytes, and paired raw-plus-quantized f32 outputs.
+- Done:
+  - Added bounded `TraceHash` derive support for fieldless Rust enums with
+    explicit numeric discriminants.
 
-Do not chase speed before the exact-score drift is either closed or explicitly
-accepted. Once parity is stable:
+## Performance Work After Parity
 
-- Establish current speed baselines:
-  - C `hmmer/src/hmmsearch --cpu 1 --noali ...`
-  - Rust `target/release/hmmer search --cpu 1 --noali ...`
-  - Rust with default threading if supported
-  - Include wall time, user time, max RSS, and CPU model.
-- Current single-thread Pkinase reference baseline with stdout redirected:
-  - With `--domtblout`: Rust release, no tracehash: 2.43s wall, 2.26s user,
-    32.6 MB max RSS. C clean `hmmsearch`: 1.43s wall, 1.56s user,
-    15.3 MB max RSS.
-  - Without `--domtblout`: Rust release, no tracehash: 2.00s wall, 1.89s user,
-    31.0 MB max RSS. C clean `hmmsearch`: 1.46s wall, 1.58s user,
-    15.2 MB max RSS.
-  - Rust is now about 1.8x slower by wall with domain table output, about 1.5x
-    slower without it, and uses about 2.0x RSS on this fixture. User-time ratios
-    are about 1.5x and 1.3x respectively.
-- Latest accepted speed work:
-  - Added a SIMD `p7_OptimalAccuracy()`/coordinate-only `p7_OATrace()` port for
-    no-alignment-display domain output. The first bug was an inverted
-    `rightshift_ps()` helper; after matching C's `[fill, a0, a1, a2]` shift,
-    `tblout` and `domtblout` are byte-identical to the prior accepted Rust
-    outputs.
-  - `ProbMx` now keeps its active striped DP window 16-byte aligned and the hot
-    Forward/Backward/OA row accesses use aligned SSE loads/stores.
-  - Backward no longer computes cumulative `log(row_scale)` values in normal
-    builds when it is driven by Forward row scales; `tracehash` builds still
-    compute/store them for debugging parity.
-  - Removed per-lane invalid-node masking from the OA hot loop after traceback
-    was made to ignore `k > M`; outputs stayed exact.
-- Latest same-pass timing on the reference case, current release build:
-  - Rust `--domtblout`: about 2.08-2.11s user.
-  - C `--domtblout`: about 1.50s user.
-  - Rust no `--domtblout`: about 1.85-1.86s user.
-  - C no `--domtblout`: about 1.52s user.
-- Latest Rust `perf record` with `--domtblout`:
-  - Backward parser: about 27% self.
-  - Forward parser: about 21% self.
-  - `score_domain_envelope` including inlined posterior/OA work: about 12%.
-  - `Pipeline::run` including inlined filter control: about 8%.
-  - `__ieee754_log_fma`: about 5%.
-- Same C profile shape for comparison:
-  - `backward_engine`: about 31%.
-  - `forward_engine`: about 29%.
-  - `p7_OptimalAccuracy`: about 7%.
-  - `calc_band_8` + `calc_band_9`: about 7%.
-  - `p7_Null2_ByTrace`: about 3%.
-- A naive in-module SSV port and an isolated generic-band SSV helper were both
-  rejected. The accepted SSV path is the generated fixed-width Q=17 helper with
-  precomputed `sbv`; broader SSV support should be generated by band width or
-  moved to an external C helper object only after preserving visible output and
-  tracehash parity.
-- Use `perf stat` for top-level counters:
-  - cycles
-  - instructions
-  - branches/branch-misses
-  - cache misses
-  - SIMD utilization if available.
-- Use `perf record` or equivalent on Rust release binary:
-  - identify top functions
-  - compare against C hot functions
-  - prioritize hot loops only.
-- Likely speed targets:
-  - `src/simd/fwd_filter.rs`
-  - `src/simd/bck_filter.rs`
-  - `src/simd/probmx.rs`
-  - stochastic traceback / clustering if still hot
-  - output formatting only if it shows up in profiles.
-- Unsafe is acceptable where it is needed for C-like performance:
-  - keep bounds-check elimination local and auditable
-  - prefer slice pointer loops only in hot kernels with tests/traces
-  - preserve a safe wrapper around unsafe kernels
-  - benchmark every unsafe change.
-- After each speed change, rerun:
-  - `cargo test --test rust_hmmsearch_tests`
-  - standard trace summary, at least for core exact probes
-  - visible output comparison on the reference case.
+Current speed state is tracked in the Current Speed Snapshot above. The older
+Priority 6 baseline that showed Rust 1.5-1.8x slower on the Pkinase reference
+is superseded by the newer snapshot where the reference case is on par or
+faster depending on output mode.
+
+Remaining speed work should use larger/fairer benchmark sets and kernel-level
+profiling rather than overfitting the Pkinase reference. Rejected/neutral
+speed experiments are recorded in Known Bad Or Neutral Experiments and the
+Priority 7 measurement notes below.
 
 ## Verification Checklist
 
@@ -666,9 +484,9 @@ Before stopping after any parity change:
 - Skipping the generic PP Gmx allocation for coordinate-only SIMD OA was output-exact but caused a repeatable minor-fault/system-time spike on the reference benchmark; it was reverted.
 - `RUSTFLAGS='-C target-cpu=native'` did not improve the current reused-scratch build on the reference benchmark; do not rely on it as the parity-speed fix.
 
-## Priority 7 - Complexity-Audit Concerns (2026-04-23)
+## Complexity-Audit Historical Notes - 2026-04-23
 
-Findings from running `code-complexity-comparator` (`/home/mahogny/github/claude/code-complexity-comparator`) with the mapping file at `ccc_mapping.toml` against the full tree. Current snapshot: 165 matched pairs after mapping. Each of these surfaces where Rust carries measurably more static complexity than C in hot code. None are a speed fix by themselves; each is a hypothesis worth checking with `perf stat` (cycles, instructions, branch-misses) on the reference case before/after any attempted change.
+Findings from running `code-complexity-comparator` (`/home/mahogny/github/claude/code-complexity-comparator`) with the mapping file at `ccc_mapping.toml` against the full tree. Snapshot from that run: 165 matched pairs after mapping. Each of these surfaces where Rust carries measurably more static complexity than C in hot code. None are a speed fix by themselves; each is a hypothesis worth checking with `perf stat` (cycles, instructions, branch-misses) on the reference case before/after any attempted change.
 
 Reproduce with:
 
@@ -680,7 +498,7 @@ cd /home/mahogny/github/claude/code-complexity-comparator
   --mapping /data/henriksson/github/claude/newhmmer/ccc_mapping.toml --top 40
 ```
 
-Top current outliers from the 2026-04-23 run:
+Top outliers from the 2026-04-23 run:
 
 - `write_binary_hmm` vs `p7_h2io_WriteASCII`: `33.58`
 - `trace_score_domain_forward_an…` vs `trace_score_domain_forward_an…`: `32.65`
@@ -788,7 +606,7 @@ Structural result was exactly as predicted: Pipeline::run dropped 2.7x, iTLB imp
 
 **Pattern observed from both rejected experiments above:** `#[inline(never)]` on a function that takes many arguments (9-14 refs/values) consistently produces the expected I-cache improvement but is cancelled by per-call register spill/reload. Attempts in this direction should either (a) use a much smaller argument surface (e.g. wrap everything in a single borrowed struct parameter), or (b) split only tiny focused blocks whose call cost is minimal.
 
-**Possible next experiments (still deferred):**
+**Deferred performance experiment ideas:**
 
 - Shrink `score_domain_envelope` (34.5 KB, 18.76% self cycles) by extracting the `make_alignment_display` branch into a helper. On `--noali --domtblout` that branch is dead at runtime but still compiled into the hot function body. The extracted helper would have a narrow argument set, avoiding the spill-cost trap.
 - Reduce inlined size of the SIMD parser-with-scratch variants by having them tail-call the `_direct` variant's body rather than duplicating it. This shrinks `_with_scratch` without adding a new frame.
@@ -797,248 +615,8 @@ Structural result was exactly as predicted: Pipeline::run dropped 2.7x, iTLB imp
 
 These are Priority 6 Performance-After-Parity work and require the full tracehash verification loop. Do not attempt without the full build/compare/rebuild cycle in `Ground Rules`.
 
-### 7.1 Hot SIMD Backward inner loop is expression-heavier than C
-
-- Pair: `backward_parser_pmx_offset_with_scratch` <-> `backward_engine`
-- Halstead difficulty 1011 (Rust) vs 470 (C); cognitive 112 vs 48; LOC 274 vs 150.
-- Cyclomatic is actually lower in Rust (56 vs 71), so the extra is not control flow, it is per-row expression count (more unique operators/operands per row of inner loop).
-- This is the top Rust `perf` self-time symbol today (about 27% of domtblout user time).
-- Hypothesis: scratch-buffer bookkeeping, per-row `xmx/scale` raw-pointer store sequences, and DD-wing unfolding have accumulated work the C engine does not do.
-- Action: read the Rust row body against impl_sse `backward_engine()` side by side, compare per-row instruction counts under `perf stat -e instructions,cycles` on the Pkinase reference. Do not refactor structurally before measuring; the TODO already records that structural splits regressed the reference.
-
-### 7.2 Hot SIMD Forward inner loop is longer than C, comment-heavy
-
-- Pair: `forward_parser_pmx_offset_with_scratch` <-> `forward_engine`
-- LOC 261 (Rust) vs 146 (C); loc_comments 79 vs 8; cyclomatic 63 vs 82 (Rust lower); Halstead 275 vs 487 (Rust lower).
-- The extra LOC is largely inline documentation, not algorithmic work. Code size can still matter for I-cache.
-- About 21% of Rust domtblout user time.
-- Action: confirm no lingering dead branches versus `forward_engine()`. Consider moving the largest block comments to module-level docs to shrink the hot function body. Do not change control flow without tracehash reruns.
-
-### 7.3 Multiple SIMD parser variants (Rust only)
-
-- Rust has five `forward_parser_*` variants (`_direct`, `_canonical`, `_with_scratch`, `_offset`, `_with_specials`) and four `backward_parser_*` variants. C has one static `forward_engine`/`backward_engine` each plus thin public wrappers.
-- Only one runs per invocation, so no direct cycles penalty, but total text size is larger and the TODO already records that `STORE_DP=true/false` const-generic splits regressed (`-0.1s` range). Keep in mind for I-cache pressure.
-- Action: audit whether all variants are live. If any are only called from tests or dead code, delete. If two variants differ only in an early return, consider merging with a cheap runtime branch rather than duplicating the body.
-
-### 7.4 `define_domains` carries 3.8x Halstead vs C
-
-- Pair: `define_domains` <-> `p7_domaindef_ByPosteriorHeuristics`
-- Halstead difficulty 1059 (Rust) vs 280 (C); calls_total 458 vs 191; cognitive 86 vs 174 (Rust actually lower on cognitive).
-- Rust touches substantially more distinct operators/operands per orchestration pass. Likely drivers: multiple SIMD-vs-generic branches, scratch reuse branches, tracehash-gated probe calls.
-- Action: time `define_domains` in isolation under `perf record` to see if the extra expression work materializes in cycles. If yes, factor per-envelope SIMD dispatch into a single indirect call rather than repeated inline branches.
-
-### 7.5 `score_domain_envelope` is 4.4x longer than C counterpart
-
-- Pair: `score_domain_envelope` <-> `rescore_isolated_domain`
-- LOC 474 vs 108; cognitive 131 vs 42; max combined nesting 5 vs 4; unsafe blocks 2.
-- TODO Priority 6 already notes: "A narrow structural split of `score_domain_envelope` was output-identical but slightly slower, so it was reverted." Keep that lesson.
-- The extra size is from carrying both a SIMD and a generic fallback, plus make_alignment / make_alignment_display / simd_scratch branches. That is functionally more than C covers in one function.
-- Action: leave structural layout alone. Target only the SIMD path; if the SIMD branch is always taken on release builds on supported hardware, consider gating the generic fallback behind `#[cfg(not(target_arch = "x86_64"))]` so the release hot function body is smaller.
-
-### 7.6 `g_optimal_accuracy_with_deltas` has 1.6x Halstead vs C
-
-- Pair: `g_optimal_accuracy_with_deltas` <-> `p7_GOptimalAccuracy`
-- Halstead 590 (Rust) vs 365 (C); LOC 115 vs 46.
-- Rust precomputes the `td[]` delta table once per profile (`OptAccTDelta::from_profile`); C evaluates `TSCDELTA(s,k)` inline with a branch against `-eslINFINITY` on every access.
-- This is the generic fallback path. In release on x86_64 the SIMD OA coordinate path is taken for `--noali --domtblout` per Priority 6, so this function is cold.
-- Action: leave it alone. The table approach is architecturally faster; it is not a regression.
-
-### 7.7 `convert` (oprofile) has many small loops vs C's fused ones
-
-- Pair: `convert` <-> `p7_oprofile_Convert`
-- loops 25 (Rust) vs 3 (C); cognitive 90 vs 17.
-- Runs once per query HMM; not on the hot per-target path. Still an indicator that restriping work is being done in multiple passes; some of that is probably avoidable.
-- Action: confirm from `perf record` that `convert` is under 1% of user time before touching it. If it is, defer.
-
-### 7.8 Absent C checkpointed DP
-
-- `p7_GForwardCheckpointed` and `p7_GBackwardCheckpointed` do not exist in Rust. Used by C for memory-bounded full Forward/Backward.
-- Rust's baseline RSS is about 2.0x C on the Pkinase reference (Priority 6). Some of that gap is SIMD DP matrices; a Rust port of the C checkpointed Backward would reduce it for long sequences but is not needed for reference parity.
-- Action: defer until a large-sequence or deep-scan fixture shows RSS as a real problem. Do not touch before parity work is done.
-
-### 7.9 `p7_Pipeline` vs `run` deviation is explained-away
-
-- Pair: `run` <-> `p7_Pipeline`
-- Rust has 9 `early_returns` (from `?`/`return` idioms) vs 0 in C (C uses single-exit with `goto`). Rust `loc_comments` 82 vs 3.
-- This is idiomatic, not a regression. Do not try to collapse returns.
-
-### 7.10 Do not use complexity deltas as a speed signal on their own
-
-- Several high-deviation pairs are spurious name matches (`calc_band_8`/`calc_band_9` match by name; C versions are generated 400-line tables that do not exist in Rust).
-- Pairs that include `trace_*` helpers are feature-gated tracehash functions; they compile out in release. Filter them from any audit by prefix.
-- Before editing any function the audit flags, reproduce the perf claim with `perf stat` or `perf record` on the Pkinase reference. A static complexity delta is a starting hypothesis, not a verdict.
-
-## Priority 8 - Known Problems (2026-04-18)
-
-Outstanding parity/regression items discovered while driving nhmmer reference
-cases to byte-identical output.
-
-### 8.1 nhmmer 3box SSV counter drift (58 residues on 45479)
-
-- Reference: `hmmer/testsuite/3box.hmm` (M=20, MAXL=75) vs
-  `hmmer/tutorial/dna_target.fa` (L=330000 × 2 strands).
-- Visible output exact: tblout byte-identical, 2 hits match exactly,
-  bias/Vit/Fwd counters match exactly.
-- Only the SSV counter line diverges: Rust 45421 vs C 45479 (diff 58, or
-  0.13%).
-- Root cause narrowed: Rust's `ssv_filter_longtarget` produces 1 fewer
-  unique pre-merge SSV peak than C (676 vs 677 unique peaks across both
-  strands; raw counts 1352 vs 1354 because each peak appears once per
-  strand). Many peak positions differ between the two lists (only ~37 of
-  the 676 unique peaks are shared), but peaks systematically fall into
-  nearby positions that merge to the same final windows. The single
-  missing peak survives merge and accounts for the 58-residue counter
-  drift.
-- Likely suspect: another f32/f64 edge case or an SSV DP rounding
-  difference specific to M=20 stripe layouts. The analogous ecori case
-  (M=6) was closed by matching C's `p7O_NQB = max(2, ...)` formula; M=20
-  already takes `Q=2` so NQB is not the issue here.
-- Action: not critical (tblout matches, hits match). If pursued, build
-  traced C nhmmer with SSV peak position logging, diff against Rust peak
-  list, and localize the 2 missing peaks. Do not change SSV DP code
-  without a concrete diff first — several prior f32/f64 fixes were
-  neutral on this case.
-
-### 8.2 nhmmer SSV returns 0 peaks on sub-HMM-length sequences (pre-NQB-fix)
-
-- Fixed 2026-04-18. Left here for context in case a regression re-introduces
-  it: nhmmer's `ssv_filter_longtarget` used `q_count = (m+15)/16` which
-  returned `Q=1` for M=6 while C's `p7O_NQB` macro returns `Q=2`. Fix is in
-  `src/simd/ssv_longtarget.rs`: use `crate::simd::oprofile::nqb(m)`.
-
-### 8.3 Pre-existing flaky `ssv_finds_high_scoring_ecoli_trnas` test
-
-- `tests/ecoli_sensitivity_tests.rs::ssv_finds_high_scoring_ecoli_trnas`
-  checks that Rust SSV covers at least 2 of 3 known high-scoring E. coli
-  tRNA positions from Infernal CM results. Currently covers only 1 of 3
-  on this machine.
-- Not a C/Rust parity issue: the positions in the test are
-  Infernal-CM-derived; C HMMER nhmmer also does not produce hits near
-  those positions (verified by running C nhmmer on
-  `/tmp/ecoli_k12.fna` with the HMM extracted from `tRNA.c.cm`).
-- Action: consider relaxing the test's required coverage (1 of 3) or
-  moving the test to an `#[ignore]` block until a different sensitivity
-  target is chosen.
-
-### 8.4 Long `--nobias` / `--nonull2` flag propagation to per-window Pipeline
-
-- Fixed 2026-04-18. Documented here so a future refactor of
-  `nhmmer::search_longtarget` does not regress it: the per-window
-  `Pipeline::new()` must inherit the user's `--nobias` / `--nonull2`
-  flags via `lpli.do_biasfilter = !nobias` and `lpli.do_null2 = !nonull2`
-  before `lpli.run(...)` is called. Otherwise the long-target F3 bias
-  scaling still runs under `--nobias`, rejecting weak hits that C would
-  accept.
-
-### 8.5 Vit/Fwd counter wrap semantics
-
-- Fixed 2026-04-18. Documented so it is not re-clamped: C's
-  `pos_past_vit` (p7_pipeline.c:1638-1641) and `pos_past_fwd`
-  (p7_pipeline.c:1335) are free to receive net-negative deltas when a
-  window's overlap with the previous window exceeds the window's own
-  length. Rust must match by using `fetch_add(add as u64)` on a signed
-  `add` (u64 wrapping preserves sum mod 2^64); do not add a
-  `max(0, …)` clamp.
-
-### 8.6 SSV diagonal-traceback bounds check
-
-- Fixed 2026-04-18. C's `msvfilter.c:385` loop
-  `while (rem_sc > entry_cost)` has no bounds check on `start` /
-  `target_start`; it relies on `rem_sc` terminating the loop before the
-  indices go out of bounds. Rust previously added defensive
-  `start > 1 && target_start > 1` guards that terminated early on some
-  MADE1 peaks. Keep the loop guarded only by a narrow `start == 0 ||
-  target_start == 0` panic avoidance check.
-
-### 8.7 phmmer `--tblout` was a no-op
-
-- Fixed 2026-04-18. `src/subcmd/phmmer.rs` parsed `--tblout` but never
-  wrote the file. Now uses the shared `write_tblout` helper (promoted
-  `pub` in `src/subcmd/hmmsearch.rs`). File layout matches C's `phmmer
-  --tblout` format.
-
-### 8.8 phmmer single-sequence score-matrix conversion drift
-
-- Fixed 2026-04-22. Rust's `seqmodel.rs` had two mismatches from the
-  upstream Easel/HMMER path:
-  1. it set `hmm.compo[]` to background frequencies instead of using the
-     occupancy-weighted `p7_hmm_SetComposition()` calculation; and
-  2. it reverse-engineered the BLOSUM62 conditional matrix with a fixed
-     lambda plus an extra renormalization step, instead of solving lambda
-     from the background frequencies and using the implied joint
-     probabilities directly.
-- After matching the upstream score-matrix conversion shape, the documented
-  `phmmer` globins regression moved from the inflated
-  `HBB_CALAR = 335.4 bits` down to `314.3 bits`, matching the earlier C
-  reference value that motivated the bug note.
-- Regression coverage now lives in
-  `tests/phmmer_integration_tests.rs`, covering the small 20aa fixture and
-  the real-world `HBB_HUMAN` vs `globins45.fa` case.
-
-### 8.9 jackhmmer `--tblout` was missing
-
-- Fixed 2026-04-22. `src/subcmd/jackhmmer.rs` did not accept or write
-  `--tblout`, even though C jackhmmer supports per-sequence tabular output.
-- The Rust port now writes the final iteration's hitlist through the shared
-  `write_tblout()` helper, matching C's behavior of reporting the converged
-  or last round rather than appending every intermediate round.
-- Regression coverage now lives in
-  `tests/jackhmmer_integration_tests.rs`, with exact 20aa and globins
-  final-round `--tblout` checks alongside the round-wise stdout cases.
-
-### 8.10 jackhmmer `--domtblout` was missing
-
-- Fixed 2026-04-22. `src/subcmd/jackhmmer.rs` did not accept or write
-  `--domtblout`, even though C jackhmmer supports final-round per-domain
-  tabular output.
-- The Rust port now writes final-round domain tables through the shared
-  `write_domtblout()` helper. It keeps the original query name, uses the
-  final round's model length for `qlen`, and re-runs thresholding with
-  `domZ = nreported` so domain-level E-values and inclusion flags follow the
-  same two-pass shape as `hmmsearch`.
-- Regression coverage now lives in
-  `tests/jackhmmer_integration_tests.rs`, with exact 20aa and globins
-  final-round `--domtblout` checks.
-
-### 8.11 phmmer/jackhmmer `--nobias` and `--nonull2` were not exposed
-
-- Fixed 2026-04-22. `src/subcmd/phmmer.rs` and `src/subcmd/jackhmmer.rs`
-  were still missing the standard bias-control flags even though
-  `Pipeline` already supports them.
-- Both subcommands now parse `--nobias` and `--nonull2` and propagate them
-  into each per-target pipeline instance before running the search. The
-  thresholding pass also inherits `do_biasfilter`/`do_null2`, so reported and
-  included flags stay consistent with the searched scores.
-- Regression coverage now lives in
-  `tests/phmmer_integration_tests.rs` and
-  `tests/jackhmmer_integration_tests.rs`, with globins `--nonull2`
-  score/bias checks plus `--nobias` acceptance smoke tests.
-
-### 8.12 multi-domain sequence-level null2 behavior now has an exact guardrail
-
-- Added 2026-04-22: `tests/rust_hmmsearch_tests.rs` now includes an explicit
-  `fn3.hmm` vs `7LESS_DROME` regression that pins the current multi-domain
-  full-sequence behavior:
-  - default run reports `1.9e-57 / 178.0 / bias 0.4`
-  - `--nonull2` reports `1.4e-57 / 178.4 / bias 0.0`
-  - both runs preserve the same 9-domain structure and alignment ranges
-- This does not fix the remaining approximation, but it turns the TODO from a
-  README-only note into a concrete protein regression for future validation.
-- Follow-up after checking the bundled C binary: Rust and C currently agree on
-  that guarded case, default and `--nonull2`. Treat this area as "needs broader
-  evidence" rather than a known live mismatch until another committed fixture
-  reproduces a real drift.
-
-### 8.13 hmmsearch `--pfamtblout` parity and coverage
-
-- Fixed 2026-04-22. `src/subcmd/hmmsearch.rs` had an incomplete Pfam writer:
-  it only emitted the sequence-score section, did not force alignment
-  coordinates under `--noali`, and grouped domain rows per hit instead of using
-  C's global per-query domain-score ordering.
-- `write_pfamtblout()` now emits both C-style sections, uses the standard
-  HMMER E-value formatter, requests alignment coordinates whenever
-  `--pfamtblout` is active, and sorts reported domains globally by domain
-  bitscore within each query block.
-- Regression coverage now includes exact bundled-C parity in
-  `tests/rust_hmmsearch_tests.rs` for `20aa` and `fn3`, plus a real-world
-  GECCO multi-query case in `tests/real_world_regression_tests.rs`.
+Detailed Priority 7 subitems 7.1-7.10 have been resolved, deferred, or
+classified as advisory in the status summary above. Treat the measurement
+findings and rejected experiments as historical evidence; do not turn static
+complexity deltas into edits without a fresh perf claim on the active
+benchmark.

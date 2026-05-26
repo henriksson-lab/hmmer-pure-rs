@@ -5,6 +5,7 @@ use crate::alphabet::Alphabet;
 use crate::msa::Msa;
 use crate::sequence::Sequence;
 use crate::trace::{State, Trace};
+use crate::util::cmath::c_exp_f64;
 
 /// Print one alignment display as ASCII blocks, matching C
 /// `p7_nontranslated_alidisplay_Print()` (p7_alidisplay.c:1162). Splits the
@@ -456,7 +457,7 @@ impl TopHits {
                 continue;
             }
 
-            let evalue = z * hit.lnp.exp();
+            let evalue = z * c_exp_f64(hit.lnp);
 
             let reported = if pli.by_e {
                 evalue <= pli.e_value_threshold
@@ -505,7 +506,7 @@ impl TopHits {
 
             let target_included = hit.flags & P7_IS_INCLUDED != 0;
             for dom in &mut hit.dcl {
-                let dom_evalue = domz * dom.lnp.exp();
+                let dom_evalue = domz * c_exp_f64(dom.lnp);
 
                 let dom_reported = if pli.dom_by_e {
                     dom_evalue <= pli.dom_e_value_threshold
@@ -931,6 +932,7 @@ pub fn included_alignment(
             author: None,
             sqname,
             sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
+            weights: None,
             pp,
             aseq,
             nseq: sequences.len(),
@@ -995,6 +997,7 @@ pub fn included_alignment(
         author: None,
         sqname,
         sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
+        weights: None,
         pp,
         aseq,
         nseq: sequences.len(),

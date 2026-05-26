@@ -5,6 +5,7 @@ use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::*;
 use crate::trace::{State, Trace};
+use crate::util::cmath::c_expf_to_f32;
 use crate::util::random::MersenneTwister;
 
 #[cfg(target_arch = "x86_64")]
@@ -468,8 +469,8 @@ pub fn g_stochastic_trace(
 /// Sample 0 or 1 from two log-space scores via stabilized softmax.
 fn sample_two(rng: &mut MersenneTwister, a: f32, b: f32) -> usize {
     let max = a.max(b);
-    let pa = (a - max).exp();
-    let pb = (b - max).exp();
+    let pa = c_expf_to_f32(a - max);
+    let pb = c_expf_to_f32(b - max);
     let total = pa + pb;
     if total <= 0.0 {
         return 0;
@@ -487,7 +488,7 @@ fn sample_from(rng: &mut MersenneTwister, scores: &[f32]) -> usize {
         return 0;
     }
     let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let probs: Vec<f32> = scores.iter().map(|&s| (s - max).exp()).collect();
+    let probs: Vec<f32> = scores.iter().map(|&s| c_expf_to_f32(s - max)).collect();
     let total: f32 = probs.iter().sum();
     if total <= 0.0 {
         return 0;

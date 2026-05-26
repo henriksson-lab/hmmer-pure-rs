@@ -5,6 +5,7 @@ use std::arch::x86_64::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
+use crate::util::cmath::c_log_f64;
 
 /// Number of AVX2 float vectors needed to stripe a model of length M: ceil(M/8), min 2.
 pub fn nqf_avx2(m: usize) -> usize {
@@ -236,7 +237,7 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
                 dmo!(q) = _mm256_mul_ps(dmo!(q), sv);
                 imo!(q) = _mm256_mul_ps(imo!(q), sv);
             }
-            totscale += xe.ln();
+            totscale += c_log_f64(xe as f64) as f32;
             xe = 1.0;
         }
     }
@@ -244,7 +245,7 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
     if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         return f32::NEG_INFINITY;
     }
-    totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
+    totscale + c_log_f64((xc * om.xf[P7O_C][P7O_MOVE]) as f64) as f32
 }
 
 /// Cross-lane right-shift by one float lane for AVX2 (helper, Rust-only).

@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::alphabet::AlphabetType;
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
+use crate::hmmfile::HmmAsciiFormat;
 
 // Magic numbers for HMMER3 binary format versions
 const MAGIC_3A: u32 = 0xe8ededb6;
@@ -16,6 +17,15 @@ const MAGIC_3D: u32 = 0xe8ededb9;
 const MAGIC_3E: u32 = 0xe8ededb0;
 const MAGIC_3F: u32 = 0xe8ededba;
 
+/// Return true if `magic` is one of the supported native-endian HMMER3 binary
+/// HMM magic numbers.
+pub fn is_binary_hmm_magic(magic: u32) -> bool {
+    matches!(
+        magic,
+        MAGIC_3A | MAGIC_3B | MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F
+    )
+}
+
 /// Return true if a path starts with a supported HMMER3 binary HMM magic.
 pub fn looks_like_binary_hmm_file(path: &Path) -> HmmerResult<bool> {
     let mut file = std::fs::File::open(path).map_err(HmmerError::Io)?;
@@ -23,10 +33,7 @@ pub fn looks_like_binary_hmm_file(path: &Path) -> HmmerResult<bool> {
     match file.read_exact(&mut magic_buf) {
         Ok(()) => {
             let magic = u32::from_ne_bytes(magic_buf);
-            Ok(matches!(
-                magic,
-                MAGIC_3A | MAGIC_3B | MAGIC_3C | MAGIC_3D | MAGIC_3E | MAGIC_3F
-            ))
+            Ok(is_binary_hmm_magic(magic))
         }
         Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(false),
         Err(e) => Err(HmmerError::Io(e)),
@@ -319,6 +326,15 @@ pub fn read_binary_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
 /// E-value parameter array, Pfam cutoffs, and optional COMPO. Output is
 /// byte-compatible with C `hmmpress`/`hmmconvert -b`.
 pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
+    write_binary_hmm_with_format(w, hmm, HmmAsciiFormat::Hmmer3f)
+}
+
+/// Write a single HMM in the selected HMMER3 binary format (3/a..3/f).
+pub fn write_binary_hmm_with_format<W: std::io::Write>(
+    w: &mut W,
+    hmm: &Hmm,
+    format: HmmAsciiFormat,
+) -> HmmerResult<()> {
     let k = hmm.abc_k;
     let mut flags = hmm.flags;
     if hmm.acc.is_some() {
@@ -332,9 +348,15 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
         flags &= !P7H_DESC;
     }
 
-    // Magic number (3/f format)
-    w.write_all(&MAGIC_3F.to_ne_bytes())
-        .map_err(HmmerError::Io)?;
+    let magic = match format {
+        HmmAsciiFormat::Hmmer3a => MAGIC_3A,
+        HmmAsciiFormat::Hmmer3b => MAGIC_3B,
+        HmmAsciiFormat::Hmmer3c => MAGIC_3C,
+        HmmAsciiFormat::Hmmer3d => MAGIC_3D,
+        HmmAsciiFormat::Hmmer3e => MAGIC_3E,
+        HmmAsciiFormat::Hmmer3f => MAGIC_3F,
+    };
+    w.write_all(&magic.to_ne_bytes()).map_err(HmmerError::Io)?;
 
     // Flags
     w.write_all(&(flags as i32).to_ne_bytes())
@@ -414,9 +436,10 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     w.write_all(&hmm.eff_nseq.to_ne_bytes())
         .map_err(HmmerError::Io)?;
 
-    // max_length
-    w.write_all(&hmm.max_length.to_ne_bytes())
-        .map_err(HmmerError::Io)?;
+    if format >= HmmAsciiFormat::Hmmer3c {
+        w.write_all(&hmm.max_length.to_ne_bytes())
+            .map_err(HmmerError::Io)?;
+    }
 
     // Creation time
     write_string(w, hmm.ctime.as_deref().unwrap_or(""))?;
@@ -439,10 +462,16 @@ pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<
     w.write_all(&hmm.checksum.to_ne_bytes())
         .map_err(HmmerError::Io)?;
 
-    // E-value params
-    for i in 0..NEVPARAM {
-        w.write_all(&hmm.evparam[i].to_ne_bytes())
-            .map_err(HmmerError::Io)?;
+    if format == HmmAsciiFormat::Hmmer3a {
+        for i in [P7_MLAMBDA, P7_MMU, P7_FTAU] {
+            w.write_all(&hmm.evparam[i].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
+        }
+    } else {
+        for i in 0..NEVPARAM {
+            w.write_all(&hmm.evparam[i].to_ne_bytes())
+                .map_err(HmmerError::Io)?;
+        }
     }
 
     // Cutoffs

@@ -152,120 +152,100 @@ fn phmmer_20aa_stdout_preserves_expected_query_summaries() {
 fn phmmer_20aa_tblout_preserves_expected_rows() {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("out.tbl");
-    let output = run_phmmer(
-        &test_path("hmmer/testsuite/20aa-alitest.fa"),
-        &test_path("hmmer/testsuite/20aa-alitest.fa"),
-        &["--tblout", tblout.to_str().unwrap()],
-    );
+    let query = test_path("hmmer/testsuite/20aa-alitest.fa");
+    let target = test_path("hmmer/testsuite/20aa-alitest.fa");
+    let output = run_phmmer(&query, &target, &["--tblout", tblout.to_str().unwrap()]);
     assert!(String::from_utf8(output.stdout).unwrap().contains("[ok]"));
 
     let tbl = std::fs::read_to_string(tblout).unwrap();
+    let c_tbl = run_c_phmmer_tblout(&query, &target, &[]);
     assert_eq!(
         parse_tblout_rows(&tbl),
-        vec![
-            (
-                "test1".to_string(),
-                "test1".to_string(),
-                "2e-16".to_string(),
-                "44.3".to_string()
-            ),
-            (
-                "test4".to_string(),
-                "test1".to_string(),
-                "5.1e-16".to_string(),
-                "43.2".to_string()
-            ),
-            (
-                "test2".to_string(),
-                "test1".to_string(),
-                "5e-11".to_string(),
-                "28.8".to_string()
-            ),
-            (
-                "test3".to_string(),
-                "test1".to_string(),
-                "1.8e-10".to_string(),
-                "27.2".to_string()
-            ),
-            (
-                "test2".to_string(),
-                "test2".to_string(),
-                "2.2e-15".to_string(),
-                "41.0".to_string()
-            ),
-            (
-                "test4".to_string(),
-                "test2".to_string(),
-                "9e-12".to_string(),
-                "30.7".to_string()
-            ),
-            (
-                "test1".to_string(),
-                "test2".to_string(),
-                "1.6e-11".to_string(),
-                "30.0".to_string()
-            ),
-            (
-                "test3".to_string(),
-                "test2".to_string(),
-                "3.7e-11".to_string(),
-                "29.0".to_string()
-            ),
-            (
-                "test3".to_string(),
-                "test3".to_string(),
-                "7.9e-16".to_string(),
-                "42.4".to_string()
-            ),
-            (
-                "test2".to_string(),
-                "test3".to_string(),
-                "5.3e-11".to_string(),
-                "28.6".to_string()
-            ),
-            (
-                "test4".to_string(),
-                "test3".to_string(),
-                "9.3e-11".to_string(),
-                "28.0".to_string()
-            ),
-            (
-                "test1".to_string(),
-                "test3".to_string(),
-                "1.8e-10".to_string(),
-                "27.2".to_string()
-            ),
-            (
-                "test4".to_string(),
-                "test4".to_string(),
-                "3.7e-17".to_string(),
-                "46.4".to_string()
-            ),
-            (
-                "test1".to_string(),
-                "test4".to_string(),
-                "3.5e-16".to_string(),
-                "43.6".to_string()
-            ),
-            (
-                "test2".to_string(),
-                "test4".to_string(),
-                "2e-11".to_string(),
-                "30.0".to_string()
-            ),
-            (
-                "test3".to_string(),
-                "test4".to_string(),
-                "8.6e-11".to_string(),
-                "28.2".to_string()
-            ),
-        ],
-        "phmmer 20aa tblout rows changed"
+        parse_tblout_rows(&c_tbl),
+        "phmmer 20aa tblout rows drifted from bundled C"
     );
+    assert_eq!(
+        tbl.matches("# target name").count(),
+        1,
+        "phmmer multi-query tblout should use a single shared header"
+    );
+    assert!(tbl.contains("# Program:         phmmer\n"));
+    assert!(tbl.contains("# Pipeline mode:   SEARCH\n"));
+    assert!(tbl.contains(&format!(
+        "# Query file:      {}\n",
+        test_path("hmmer/testsuite/20aa-alitest.fa")
+    )));
+    assert!(tbl.contains(&format!(
+        "# Target file:     {}\n",
+        test_path("hmmer/testsuite/20aa-alitest.fa")
+    )));
+    assert!(tbl.contains("# Option settings: phmmer --tblout "));
+    assert!(tbl.ends_with("# [ok]\n"));
 }
 
 #[test]
-fn phmmer_globins45_preserves_top_hit_order_and_known_score_inflation() {
+fn phmmer_seed_and_calibration_tuning_match_bundled_c_rows() {
+    let query = test_path("hmmer/testsuite/20aa-alitest.fa");
+    let target = test_path("hmmer/testsuite/20aa-alitest.fa");
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("rust.tbl");
+    let args = [
+        "--seed",
+        "7",
+        "--EmN",
+        "20",
+        "--EvN",
+        "20",
+        "--EfN",
+        "20",
+        "--tblout",
+        tblout.to_str().unwrap(),
+    ];
+
+    let output = run_phmmer(&query, &target, &args);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("# random number seed set to:       7\n"));
+    assert!(stdout.contains("# seq number for MSV Gumbel mu fit: 20\n"));
+    assert!(stdout.contains("# seq number for Vit Gumbel mu fit: 20\n"));
+    assert!(stdout.contains("# seq number for Fwd exp tau fit:   20\n"));
+
+    let rust_tbl = std::fs::read_to_string(tblout).unwrap();
+    let c_tbl = run_c_phmmer_tblout(
+        &query,
+        &target,
+        &["--seed", "7", "--EmN", "20", "--EvN", "20", "--EfN", "20"],
+    );
+    assert_eq!(parse_tblout_rows(&rust_tbl), parse_tblout_rows(&c_tbl));
+}
+
+#[test]
+fn phmmer_domtblout_has_c_style_footer() {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("out.domtbl");
+    let output = run_phmmer(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &["--domtblout", domtblout.to_str().unwrap()],
+    );
+    assert!(String::from_utf8(output.stdout).unwrap().contains("[ok]"));
+
+    let domtbl = std::fs::read_to_string(domtblout).unwrap();
+    assert!(domtbl.contains("# Program:         phmmer\n"));
+    assert!(domtbl.contains("# Pipeline mode:   SEARCH\n"));
+    assert!(domtbl.contains(&format!(
+        "# Query file:      {}\n",
+        test_path("hmmer/tutorial/HBB_HUMAN")
+    )));
+    assert!(domtbl.contains(&format!(
+        "# Target file:     {}\n",
+        test_path("hmmer/tutorial/globins45.fa")
+    )));
+    assert!(domtbl.contains("# Option settings: phmmer --domtblout "));
+    assert!(domtbl.ends_with("# [ok]\n"));
+}
+
+#[test]
+fn phmmer_globins45_matches_c_top_hit_order_and_score() {
     let output = run_phmmer(
         &test_path("hmmer/tutorial/HBB_HUMAN"),
         &test_path("hmmer/tutorial/globins45.fa"),
@@ -317,6 +297,39 @@ fn phmmer_globins_tblout_matches_bundled_c_exactly() {
     );
 
     assert_eq!(parse_tblout_rows(&rust_tbl), parse_tblout_rows(&c_tbl));
+}
+
+#[test]
+fn phmmer_popen_pextend_and_search_space_overrides_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("out.tbl");
+    let output = run_phmmer(
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &test_path("hmmer/tutorial/globins45.fa"),
+        &[
+            "--popen",
+            "0.03",
+            "--pextend",
+            "0.3",
+            "-Z",
+            "123",
+            "--domZ",
+            "5",
+            "--tblout",
+            tblout.to_str().unwrap(),
+        ],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Initial search space (Z):                123  [as set by --Z on cmdline]")
+    );
+    assert!(stdout
+        .contains("Domain search space  (domZ):               5  [as set by --domZ on cmdline]"));
+    let tbl = std::fs::read_to_string(tblout).unwrap();
+    assert!(tbl
+        .lines()
+        .any(|line| !line.starts_with('#') && !line.trim().is_empty()));
+    assert!(tbl.contains("--popen 0.03 --pextend 0.3 -Z 123 --domZ 5 --tblout"));
 }
 
 #[test]

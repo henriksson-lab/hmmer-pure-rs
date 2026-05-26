@@ -1,6 +1,7 @@
-//! hmmpress - prepare an HMM database for hmmscan.
+//! hmmpress - prepare an HMM database for hmmscan/nhmmscan.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek};
 use std::path::PathBuf;
@@ -17,7 +18,10 @@ use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::ssi;
 
 #[derive(Parser)]
-#[command(name = "hmmpress", about = "Prepare an HMM database for hmmscan")]
+#[command(
+    name = "hmmpress",
+    about = "Prepare an HMM database for hmmscan/nhmmscan"
+)]
 struct Args {
     /// Force: overwrite any previous pressed sidecars
     #[arg(short = 'f', action = ArgAction::SetTrue)]
@@ -27,8 +31,16 @@ struct Args {
     hmmfile: PathBuf,
 }
 
-pub fn run(args: Vec<String>) -> std::process::ExitCode {
-    let args = Args::parse_from(&args);
+pub fn run_os(args: Vec<OsString>) -> std::process::ExitCode {
+    run_from(args)
+}
+
+fn run_from<I, T>(args: I) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = Args::parse_from(args);
 
     match press_database(&args) {
         Ok(summary) => {
@@ -79,10 +91,6 @@ struct PressSummary {
     h3p: PathBuf,
 }
 
-fn sidecar_path(hmmfile: &PathBuf, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}{}", hmmfile.to_string_lossy(), suffix))
-}
-
 fn create_sidecar(path: &PathBuf, force: bool) -> HmmerResult<BufWriter<File>> {
     let mut opts = OpenOptions::new();
     opts.write(true);
@@ -127,12 +135,12 @@ fn press_database(args: &Args) -> HmmerResult<PressSummary> {
         ));
     }
 
-    let h3m = sidecar_path(&args.hmmfile, ".h3m");
-    let h3f = sidecar_path(&args.hmmfile, ".h3f");
-    let h3p = sidecar_path(&args.hmmfile, ".h3p");
-    let h3i = sidecar_path(&args.hmmfile, ".h3i");
+    let h3m = ssi::path_with_appended_suffix(&args.hmmfile, ".h3m");
+    let h3f = ssi::path_with_appended_suffix(&args.hmmfile, ".h3f");
+    let h3p = ssi::path_with_appended_suffix(&args.hmmfile, ".h3p");
+    let h3i = ssi::path_with_appended_suffix(&args.hmmfile, ".h3i");
 
-    let hmms = hmmfile::read_hmm_file(&args.hmmfile)?;
+    let hmms = hmmfile::read_hmm_file_auto(&args.hmmfile)?;
     prevalidate_index_keys(&hmms)?;
     ensure_sidecars_creatable([&h3m, &h3f, &h3p, &h3i], args.force)?;
     let mut mfp = create_sidecar(&h3m, args.force)?;
@@ -169,8 +177,13 @@ fn press_database(args: &Args) -> HmmerResult<PressSummary> {
     drop(ffp);
     drop(pfp);
 
-    let (_path, nprimary, nsecondary) =
-        ssi::write_hmm_ssi_records(&h3m, &h3i, records, args.force)?;
+    let (_path, nprimary, nsecondary) = ssi::write_hmm_ssi_records_with_stored_path(
+        &args.hmmfile,
+        &ssi::path_file_name(&args.hmmfile),
+        &h3i,
+        records,
+        args.force,
+    )?;
 
     Ok(PressSummary {
         nmodels: hmms.len(),
@@ -230,7 +243,11 @@ mod tests {
         ));
         let hmm_path = dir.path().join("fn3.hmm");
         std::fs::copy(src, &hmm_path).unwrap();
-        std::fs::write(format!("{}.h3i", hmm_path.display()), b"old index").unwrap();
+        std::fs::write(
+            ssi::path_with_appended_suffix(&hmm_path, ".h3i"),
+            b"old index",
+        )
+        .unwrap();
 
         let args = Args {
             force: false,
@@ -242,9 +259,9 @@ mod tests {
         };
 
         assert!(err.to_string().contains("already exists"));
-        assert!(!PathBuf::from(format!("{}.h3m", hmm_path.display())).exists());
-        assert!(!PathBuf::from(format!("{}.h3f", hmm_path.display())).exists());
-        assert!(!PathBuf::from(format!("{}.h3p", hmm_path.display())).exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3m").exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3f").exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3p").exists());
     }
 
     #[test]
@@ -270,9 +287,71 @@ mod tests {
         };
 
         assert!(err.to_string().contains("occurs more than once"));
-        assert!(!PathBuf::from(format!("{}.h3m", hmm_path.display())).exists());
-        assert!(!PathBuf::from(format!("{}.h3f", hmm_path.display())).exists());
-        assert!(!PathBuf::from(format!("{}.h3p", hmm_path.display())).exists());
-        assert!(!PathBuf::from(format!("{}.h3i", hmm_path.display())).exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3m").exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3f").exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3p").exists());
+        assert!(!ssi::path_with_appended_suffix(&hmm_path, ".h3i").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hmmpress_preserves_non_utf8_path_bytes_for_sidecars() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        ));
+        let hmm_path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"fn3-\xff.hmm".to_vec()));
+        std::fs::copy(src, &hmm_path).unwrap();
+
+        let args = Args {
+            force: false,
+            hmmfile: hmm_path.clone(),
+        };
+        let summary = press_database(&args).unwrap();
+
+        for (path, suffix) in [
+            (&summary.h3m, b".h3m".as_slice()),
+            (&summary.h3f, b".h3f".as_slice()),
+            (&summary.h3p, b".h3p".as_slice()),
+            (&summary.h3i, b".h3i".as_slice()),
+        ] {
+            assert!(path.exists(), "missing sidecar {}", path.display());
+            assert!(path.as_os_str().as_bytes().ends_with(suffix));
+            assert!(path.as_os_str().as_bytes().contains(&0xff));
+        }
+    }
+
+    #[test]
+    fn hmmpress_h3i_file_table_matches_easel_basename_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        ));
+        let hmm_path = dir.path().join("fn3.hmm");
+        std::fs::copy(src, &hmm_path).unwrap();
+
+        let args = Args {
+            force: false,
+            hmmfile: hmm_path.clone(),
+        };
+        let summary = press_database(&args).unwrap();
+        let bytes = std::fs::read(&summary.h3i).unwrap();
+        let flen = u32::from_be_bytes(bytes[30..34].try_into().unwrap()) as usize;
+        let foffset = u64::from_be_bytes(bytes[54..62].try_into().unwrap()) as usize;
+        let stored = &bytes[foffset..foffset + flen];
+
+        assert_eq!(flen, hmm_path.as_os_str().len() + 1);
+        assert_eq!(
+            &stored[..b"fn3.hmm".len() + 1],
+            b"fn3.hmm\0",
+            "{}",
+            String::from_utf8_lossy(stored)
+        );
     }
 }

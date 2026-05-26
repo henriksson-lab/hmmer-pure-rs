@@ -17,7 +17,7 @@ use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::msa;
 use hmmer_pure_rs::profile::{self, Profile, P7_UNILOCAL};
-use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::trace::State;
 
 #[derive(Parser)]
@@ -63,6 +63,7 @@ struct Args {
 
 struct AlignmentRow {
     name: String,
+    acc: Option<String>,
     desc: Option<String>,
     aseq: String,
     ppline: Option<String>,
@@ -97,24 +98,29 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error: options --amino, --dna, and --rna are mutually exclusive");
         std::process::exit(1);
     }
-    if let Some(ref informat) = args.informat {
-        if !informat.eq_ignore_ascii_case("fasta") {
+    let informat = args.informat.as_ref().map(|informat| {
+        SequenceFormat::from_name(informat).unwrap_or_else(|| {
             eprintln!("{informat} is not a recognized input sequence file format");
             std::process::exit(1);
-        }
-    }
+        })
+    });
 
     enum OutFormat {
         Stockholm,
         A2m,
+        Psiblast,
     }
-    let outformat = if args.outformat.eq_ignore_ascii_case("stockholm") {
+    let outformat = if args.outformat.eq_ignore_ascii_case("stockholm")
+        || args.outformat.eq_ignore_ascii_case("pfam")
+    {
         OutFormat::Stockholm
     } else if args.outformat.eq_ignore_ascii_case("a2m") {
         OutFormat::A2m
+    } else if args.outformat.eq_ignore_ascii_case("psiblast") {
+        OutFormat::Psiblast
     } else {
         eprintln!(
-            "unsupported --outformat {:?}; implemented: Stockholm, A2M",
+            "unsupported --outformat {:?}; implemented: Stockholm, Pfam, A2M, PSIBLAST",
             args.outformat
         );
         return std::process::ExitCode::from(2);
@@ -151,7 +157,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let bg = Bg::new(&abc);
 
     let mut sequences = Vec::new();
-    let mut sqf = open_seq_file_maybe_stdin(&args.seqfile, &abc).unwrap_or_else(|e| {
+    let mut sqf = open_seq_file_maybe_stdin(&args.seqfile, &abc, informat).unwrap_or_else(|e| {
         eprintln!("Error opening sequence file: {}", e);
         std::process::exit(1);
     });
@@ -204,6 +210,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             &msa,
             hmm.abc_type == hmmer_pure_rs::alphabet::AlphabetType::Amino,
         ),
+        OutFormat::Psiblast => write_psiblast(out, &msa),
     }
     std::process::ExitCode::SUCCESS
 }
@@ -213,21 +220,26 @@ fn read_hmms_maybe_stdin(
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_hmms_auto(BufReader::new(stdin.lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto(path)
     }
 }
 
 fn open_seq_file_maybe_stdin(
     path: &std::path::Path,
     abc: &Alphabet,
+    format: Option<SequenceFormat>,
 ) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn Read>>> {
     if path == std::path::Path::new("-") {
-        Ok(sequence::SeqFile::new(
-            Box::new(std::io::stdin()) as Box<dyn Read>,
-            abc.clone(),
-        ))
+        let sqf = sequence::SeqFile::new(Box::new(std::io::stdin()) as Box<dyn Read>, abc.clone());
+        Ok(if let Some(format) = format {
+            sqf.with_format(format)
+        } else {
+            sqf
+        })
+    } else if let Some(format) = format {
+        sequence::open_seq_file_with_format(path, abc, format)
     } else {
         sequence::open_seq_file(path, abc)
     }
@@ -250,6 +262,18 @@ fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
     writeln!(out).unwrap();
 
     for row in &msa.rows {
+        if let Some(acc) = &row.acc {
+            if !acc.is_empty() {
+                writeln!(
+                    out,
+                    "#=GS {:<width$} AC {}",
+                    row.name,
+                    acc,
+                    width = name_width - 5
+                )
+                .unwrap();
+            }
+        }
         if let Some(desc) = &row.desc {
             if !desc.is_empty() {
                 writeln!(
@@ -263,7 +287,11 @@ fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
             }
         }
     }
-    if msa.rows.iter().any(|row| row.desc.is_some()) {
+    if msa
+        .rows
+        .iter()
+        .any(|row| row.acc.is_some() || row.desc.is_some())
+    {
         writeln!(out).unwrap();
     }
 
@@ -338,6 +366,20 @@ fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     }
 }
 
+/// Emit PSIBLAST-style aligned rows. Easel renders nonresidue alignment
+/// placeholders as `-` in this format while preserving inserted residues.
+fn write_psiblast(out: &mut dyn Write, msa: &TextMsa) {
+    let name_width = msa.rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
+    for row in &msa.rows {
+        let seq: String = row
+            .aseq
+            .chars()
+            .map(|ch| if ch == '.' { '-' } else { ch })
+            .collect();
+        writeln!(out, "{:<width$}  {}", row.name, seq, width = name_width).unwrap();
+    }
+}
+
 /// Align every input sequence to `hmm` (Forward/Backward + posterior decoding +
 /// optimal accuracy traceback) and stitch the per-sequence traces into a single
 /// text MSA, computing per-column PP_cons. Counterpart to the alignment block of
@@ -386,7 +428,8 @@ fn build_text_msa(
         }
         rows.push(AlignmentRow {
             name: sq.name.clone(),
-            desc: None,
+            acc: (!sq.acc.is_empty()).then(|| sq.acc.clone()),
+            desc: (!sq.desc.is_empty()).then(|| sq.desc.clone()),
             aseq,
             ppline: Some(ppline),
         });
@@ -486,6 +529,7 @@ fn build_text_msa_with_mapali(
     for (idx, name) in mapped.sqname.iter().enumerate() {
         rows.push(AlignmentRow {
             name: name.clone(),
+            acc: None,
             desc: (!mapped.sqdesc[idx].is_empty()).then(|| mapped.sqdesc[idx].clone()),
             aseq: expand_mapped_row(&mapped.aseq[idx], map, &matmap, &inscount, hmm.m, trim),
             ppline: mapped.pp[idx]
@@ -508,7 +552,8 @@ fn build_text_msa_with_mapali(
         }
         rows.push(AlignmentRow {
             name: sq.name.clone(),
-            desc: None,
+            acc: (!sq.acc.is_empty()).then(|| sq.acc.clone()),
+            desc: (!sq.desc.is_empty()).then(|| sq.desc.clone()),
             aseq,
             ppline: Some(ppline),
         });

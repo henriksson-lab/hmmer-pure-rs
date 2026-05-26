@@ -7,6 +7,7 @@ use std::arch::x86_64::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
+use crate::util::cmath::c_log_f64;
 
 /// Tracehash helper: sum one DP state (M/D/I) across stripes and emit a quantized hash.
 ///
@@ -344,41 +345,6 @@ pub unsafe fn backward_parser_pmx_offset(
     )
 }
 
-/// Backward parser using sparse scale factors carried over from a paired Forward run.
-///
-/// Variant of C `p7_Backward`: passes the Forward per-row sparse rescaling values
-/// (`fwd_row_scales`) so Backward divides by the same factors instead of choosing
-/// its own. This is required when a full Backward matrix will later be combined
-/// with Forward (e.g. for posterior decoding) so scale factors cancel exactly.
-///
-/// # Safety
-/// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn backward_parser_pmx_offset_with_fwd_scales(
-    dsq: &[Dsq],
-    dsq_offset: usize,
-    l: usize,
-    om: &OProfile,
-    _fwd_sc: f32,
-    pmx: &mut super::probmx::ProbMx,
-    fwd_row_scales: &[f32],
-) -> f32 {
-    let mut dpp_buf: Vec<__m128> = Vec::new();
-    let mut dpc_buf: Vec<__m128> = Vec::new();
-    backward_parser_pmx_offset_with_scratch(
-        dsq,
-        dsq_offset,
-        l,
-        om,
-        _fwd_sc,
-        pmx,
-        Some(fwd_row_scales),
-        &mut dpp_buf,
-        &mut dpc_buf,
-    )
-}
-
 /// Core Backward engine with caller-supplied scratch buffers (variant of C
 /// `backward_engine`).
 ///
@@ -499,7 +465,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
             *v = _mm_mul_ps(*v, scalev);
         }
         if track_scales {
-            totscale += (row_scale_l as f64).ln();
+            totscale += c_log_f64(row_scale_l as f64);
         }
     }
 
@@ -689,7 +655,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
                 *p = _mm_mul_ps(*p, scalev);
             }
             if track_scales {
-                totscale += (row_scale as f64).ln();
+                totscale += c_log_f64(row_scale as f64);
             }
             if has_own_scales {
                 x_b = 1.0;
@@ -813,7 +779,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.row_scale[0] = 1.0;
     pmx.has_own_scales = has_own_scales;
 
-    (totscale + (x_n as f64).ln()) as f32
+    (totscale + c_log_f64(x_n as f64)) as f32
 }
 
 /// Backward full-matrix fill assuming a canonical (no degenerate residues) sequence.
@@ -976,7 +942,7 @@ unsafe fn backward_parser_pmx_offset_direct(
             off += 4;
         }
         if track_scales {
-            totscale += (row_scale_l as f64).ln();
+            totscale += c_log_f64(row_scale_l as f64);
         }
     }
 
@@ -1103,7 +1069,7 @@ unsafe fn backward_parser_pmx_offset_direct(
                 off += 4;
             }
             if track_scales {
-                totscale += (row_scale as f64).ln();
+                totscale += c_log_f64(row_scale as f64);
             }
             if has_own_scales {
                 x_b = 1.0;
@@ -1143,7 +1109,7 @@ unsafe fn backward_parser_pmx_offset_direct(
     *row_scale_ptr = 1.0;
     pmx.has_own_scales = has_own_scales;
 
-    (totscale + (x_n as f64).ln()) as f32
+    (totscale + c_log_f64(x_n as f64)) as f32
 }
 
 /// Returns `true` iff every residue in `dsq[dsq_offset+1..=dsq_offset+l]` is a

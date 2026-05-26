@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
 
-use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::hmmfile::{self, HmmAsciiFormat};
 use hmmer_pure_rs::hmmfile_binary;
 
 #[derive(Parser)]
@@ -22,7 +22,7 @@ struct Args {
     #[arg(short = 'b', action = ArgAction::SetTrue)]
     binary: bool,
 
-    /// Output backward-compatible HMMER2 ASCII format
+    /// HMMER2 ASCII output is intentionally unsupported in this Rust port
     #[arg(short = '2', action = ArgAction::SetTrue)]
     hmmer2: bool,
 
@@ -35,26 +35,27 @@ struct Args {
 }
 
 /// Entry point for `hmmconvert`: re-emit each HMM in the input file as HMMER3
-/// ASCII to stdout. Mirrors the default (no-flag) path of `main()` in
-/// hmmer/src/hmmconvert.c.
+/// ASCII by default, as a selected legacy HMMER3 format with `--outfmt`,
+/// or HMMER3 binary with `-b`.
+/// Mirrors the default and binary output paths of `main()` in hmmer/src/hmmconvert.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 
-    let binary_output = args.binary;
     if args.ascii && args.binary {
         eprintln!("Error: options -a and -b are mutually exclusive");
         std::process::exit(1);
     }
     if args.hmmer2 {
-        eprintln!("Error: hmmconvert -2 is not implemented");
+        eprintln!("Error: hmmconvert -2 HMMER2 ASCII output is intentionally unsupported");
         std::process::exit(1);
     }
-    if let Some(ref outfmt) = args.outfmt {
-        if outfmt != "3/f" {
-            eprintln!("Error: hmmconvert --outfmt={} is not implemented", outfmt);
+    let ascii_format = match args.outfmt.as_deref() {
+        Some(outfmt) => HmmAsciiFormat::parse(outfmt).unwrap_or_else(|| {
+            eprintln!("Error: No such 3.x output format code {outfmt}");
             std::process::exit(1);
-        }
-    }
+        }),
+        None => HmmAsciiFormat::Hmmer3f,
+    };
 
     let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
@@ -65,13 +66,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let mut out = stdout.lock();
 
     for hmm in &hmms {
-        if binary_output {
-            hmmfile_binary::write_binary_hmm(&mut out, hmm).unwrap_or_else(|e| {
-                eprintln!("Error writing binary HMM: {}", e);
-                std::process::exit(1);
-            });
+        if args.binary {
+            hmmfile_binary::write_binary_hmm_with_format(&mut out, hmm, ascii_format)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error writing binary HMM: {}", e);
+                    std::process::exit(1);
+                });
         } else {
-            hmmfile::write_hmm(&mut out, hmm).unwrap_or_else(|e| {
+            hmmfile::write_hmm_with_format(&mut out, hmm, ascii_format).unwrap_or_else(|e| {
                 eprintln!("Error writing HMM: {}", e);
                 std::process::exit(1);
             });
@@ -89,9 +91,9 @@ fn read_hmms_maybe_stdin(
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_hmms_auto(BufReader::new(stdin.lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto(path)
     }
 }
 
@@ -110,6 +112,9 @@ mod tests {
 
         let args = Args::try_parse_from(["hmmconvert", "--outfmt", "3/f", "models.hmm"]).unwrap();
         assert_eq!(args.outfmt.as_deref(), Some("3/f"));
+
+        let args = Args::try_parse_from(["hmmconvert", "--outfmt", "3/b", "models.hmm"]).unwrap();
+        assert_eq!(args.outfmt.as_deref(), Some("3/b"));
     }
 
     #[test]

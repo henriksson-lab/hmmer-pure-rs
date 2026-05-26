@@ -2,6 +2,7 @@
 //! Direct port of impl_sse/p7_oprofile.c.
 
 use crate::profile::*;
+use crate::util::cmath::{c_expf_to_f32, c_log_to_f32, c_logf_to_f32, ESL_CONST_LOG2};
 
 /// Striped segment length for byte-precision (MSV) vectors: ceil(M/16), min 2.
 /// Mirrors C macro `p7O_NQB`.
@@ -360,7 +361,7 @@ impl OProfile {
         let k = gm.abc_k;
 
         // Determine scale and bias for MSV byte scores
-        let scale_b = 3.0_f32 / std::f32::consts::LN_2;
+        let scale_b = (3.0 / ESL_CONST_LOG2) as f32;
         let base_b: u8 = 190;
 
         // Find maximum match emission score across all residues and positions
@@ -408,12 +409,15 @@ impl OProfile {
         }
 
         // Transition costs
-        let tbm_b = unbiased_byteify(scale_b, (2.0_f32 / (m as f32 * (m as f32 + 1.0))).ln());
-        let tec_b = unbiased_byteify(scale_b, 0.5_f32.ln());
-        let tjb_b = unbiased_byteify(scale_b, (3.0_f32 / (gm.l as f32 + 3.0)).ln());
+        let tbm_b = unbiased_byteify(
+            scale_b,
+            c_logf_to_f32(2.0_f32 / (m as f32 * (m as f32 + 1.0))),
+        );
+        let tec_b = unbiased_byteify(scale_b, c_logf_to_f32(0.5_f32));
+        let tjb_b = unbiased_byteify(scale_b, c_logf_to_f32(3.0_f32 / (gm.l as f32 + 3.0)));
 
         // === Viterbi word-precision conversion ===
-        let scale_w = 500.0_f32 / std::f32::consts::LN_2;
+        let scale_w = (500.0 / ESL_CONST_LOG2) as f32;
         let base_w: i16 = 12000;
         let nqw = nqw(m);
 
@@ -607,14 +611,14 @@ impl OProfile {
 
         // Special state float scores
         let mut xf = [[0.0f32; P7O_NXTRANS]; P7O_NXSTATES];
-        xf[P7O_E][P7O_LOOP] = gm.xsc[P7P_E][P7P_LOOP].exp();
-        xf[P7O_E][P7O_MOVE] = gm.xsc[P7P_E][P7P_MOVE].exp();
-        xf[P7O_N][P7O_LOOP] = gm.xsc[P7P_N][P7P_LOOP].exp();
-        xf[P7O_N][P7O_MOVE] = gm.xsc[P7P_N][P7P_MOVE].exp();
-        xf[P7O_C][P7O_LOOP] = gm.xsc[P7P_C][P7P_LOOP].exp();
-        xf[P7O_C][P7O_MOVE] = gm.xsc[P7P_C][P7P_MOVE].exp();
-        xf[P7O_J][P7O_LOOP] = gm.xsc[P7P_J][P7P_LOOP].exp();
-        xf[P7O_J][P7O_MOVE] = gm.xsc[P7P_J][P7P_MOVE].exp();
+        xf[P7O_E][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_E][P7P_LOOP]);
+        xf[P7O_E][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_E][P7P_MOVE]);
+        xf[P7O_N][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_N][P7P_LOOP]);
+        xf[P7O_N][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_N][P7P_MOVE]);
+        xf[P7O_C][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_C][P7P_LOOP]);
+        xf[P7O_C][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_C][P7P_MOVE]);
+        xf[P7O_J][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_J][P7P_LOOP]);
+        xf[P7O_J][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_J][P7P_MOVE]);
 
         #[cfg(target_arch = "x86_64")]
         let rfv_a: Vec<Vec<AlignedF32x4>> = rfv
@@ -672,7 +676,7 @@ impl OProfile {
     /// long-target SSV scan) uses this to defer reconfiguring the rest of the
     /// length model until after the MSV stage.
     pub fn reconfig_msv_length(&mut self, l: i32) {
-        self.tjb_b = unbiased_byteify(self.scale_b, (3.0_f32 / (l as f32 + 3.0)).ln());
+        self.tjb_b = unbiased_byteify(self.scale_b, c_logf_to_f32(3.0_f32 / (l as f32 + 3.0)));
     }
 
     /// Set the target sequence length of the optimized model.
@@ -687,10 +691,11 @@ impl OProfile {
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
         let ploop = 1.0 - pmove;
 
-        self.tjb_b = unbiased_byteify(self.scale_b, (3.0_f32 / (l as f32 + 3.0)).ln());
-        self.xw[P7O_N][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
-        self.xw[P7O_C][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
-        self.xw[P7O_J][P7O_MOVE] = wordify(self.scale_w, pmove.ln());
+        self.tjb_b = unbiased_byteify(self.scale_b, c_logf_to_f32(3.0_f32 / (l as f32 + 3.0)));
+        let log_pmove = c_logf_to_f32(pmove);
+        self.xw[P7O_N][P7O_MOVE] = wordify(self.scale_w, log_pmove);
+        self.xw[P7O_C][P7O_MOVE] = wordify(self.scale_w, log_pmove);
+        self.xw[P7O_J][P7O_MOVE] = wordify(self.scale_w, log_pmove);
 
         self.xf[P7O_N][P7O_LOOP] = ploop;
         self.xf[P7O_N][P7O_MOVE] = pmove;
@@ -712,7 +717,7 @@ impl OProfile {
         self.xf[P7O_E][P7O_LOOP] = 0.5;
         self.nj = 1.0;
 
-        let e = -std::f32::consts::LN_2;
+        let e = -(ESL_CONST_LOG2 as f32);
         self.xw[P7O_E][P7O_MOVE] = wordify(self.scale_w, e);
         self.xw[P7O_E][P7O_LOOP] = wordify(self.scale_w, e);
 
@@ -792,6 +797,22 @@ impl OProfile {
         arr
     }
 
+    /// Return the striped Forward emission odds ratio for match node `k` and
+    /// residue code `x`, matching C's `p7_oprofile_FGetEmission()`.
+    pub fn fwd_emission_odds(&self, k: usize, x: usize) -> Option<f32> {
+        if k == 0 || k > self.m || x >= self.rfv.len() {
+            return None;
+        }
+        let nq = nqf(self.m);
+        let q = (k - 1) % nq;
+        let z = (k - 1) / nq;
+        self.rfv
+            .get(x)
+            .and_then(|rows| rows.get(q))
+            .and_then(|lanes| lanes.get(z))
+            .copied()
+    }
+
     /// Update the Forward/Backward match emissions for a new bg distribution.
     ///
     /// Ports `p7_oprofile_UpdateFwdEmissionScores`: rewrites the striped `rfv`
@@ -820,7 +841,7 @@ impl OProfile {
                 for z in 0..4 {
                     let node = q + 1 + z * nq;
                     sc_arr[z * kp + x] = if node <= m {
-                        ((fwd_emissions[kp * node + x] as f64) / (bg.f[x] as f64)).ln() as f32
+                        c_log_to_f32((fwd_emissions[kp * node + x] as f64) / (bg.f[x] as f64))
                     } else {
                         f32::NEG_INFINITY
                     };
@@ -890,10 +911,16 @@ impl OProfile {
         let z = (node) / nq;
         if z < 8 && q < self.twv.len() / 8 {
             // Map back: twv layout is [q*7+t] for t=0..6, then DD at 7*nq+q
-            let idx = if tsc_type == P7P_DD {
-                7 * nq + q
-            } else {
-                q * 7 + tsc_type
+            let idx = match tsc_type {
+                P7P_BM => q * 7 + P7O_BM,
+                P7P_MM => q * 7 + P7O_MM,
+                P7P_IM => q * 7 + P7O_IM,
+                P7P_DM => q * 7 + P7O_DM,
+                P7P_MD => q * 7 + P7O_MD,
+                P7P_MI => q * 7 + P7O_MI,
+                P7P_II => q * 7 + P7O_II,
+                P7P_DD => 7 * nq + q,
+                _ => return f32::NEG_INFINITY,
             };
             if idx < self.twv.len() && z < 8 {
                 return self.twv[idx][z] as f32 / self.scale_w;

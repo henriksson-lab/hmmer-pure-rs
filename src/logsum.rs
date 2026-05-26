@@ -5,6 +5,8 @@
 
 use std::sync::Once;
 
+use crate::util::cmath::{c_exp_f64, c_log_f64};
+
 const LOGSUM_SCALE: f32 = 1000.0;
 const LOGSUM_TBL: usize = 16000;
 
@@ -22,7 +24,7 @@ pub fn p7_flogsuminit() {
         unsafe {
             for i in 0..LOGSUM_TBL {
                 FLOGSUM_LOOKUP[i] =
-                    (1.0_f64 + (-(i as f64) / LOGSUM_SCALE as f64).exp()).ln() as f32;
+                    c_log_f64(1.0_f64 + c_exp_f64(-(i as f64) / LOGSUM_SCALE as f64)) as f32;
             }
         }
     });

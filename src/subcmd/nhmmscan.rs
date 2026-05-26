@@ -3,18 +3,22 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder::{self, DEFAULT_WINDOW_BETA};
 use hmmer_pure_rs::hmmfile_binary;
 use hmmer_pure_rs::logsum;
+use hmmer_pure_rs::output::{fmt_bias, fmt_elapsed_seconds, fmt_fixed0, fmt_g, fmt_score};
 use hmmer_pure_rs::pipeline::{BitCutoff, Pipeline};
 use hmmer_pure_rs::pressed;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::tophits::TopHits;
+use hmmer_pure_rs::util::cmath::c_exp_f64;
 
 #[derive(Parser)]
 #[command(
@@ -31,7 +35,11 @@ struct Args {
     /// Query sequence file (FASTA)
     seqfile: PathBuf,
 
-    /// Report sequences <= this E-value threshold
+    /// Assert query sequence file format
+    #[arg(long = "qformat")]
+    qformat: Option<String>,
+
+    /// Report models <= this E-value threshold
     #[arg(
         short = 'E',
         default_value = "10.0",
@@ -40,11 +48,11 @@ struct Args {
     )]
     e_value: f64,
 
-    /// Report sequences >= this score threshold
+    /// Report models >= this score threshold
     #[arg(short = 'T', conflicts_with = "e_value")]
     score_threshold: Option<f32>,
 
-    /// Include sequences <= this E-value threshold
+    /// Include models <= this E-value threshold
     #[arg(
         long = "incE",
         default_value = "0.01",
@@ -53,7 +61,7 @@ struct Args {
     )]
     inc_e: f64,
 
-    /// Include sequences >= this score threshold
+    /// Include models >= this score threshold
     #[arg(long = "incT", conflicts_with = "inc_e")]
     inc_t: Option<f32>,
 
@@ -106,6 +114,26 @@ struct Args {
     #[arg(short = 'Z', value_parser = parse_positive_f64)]
     z_value: Option<f64>,
 
+    /// Retained for C command-line compatibility; not used by nhmmscan output
+    #[arg(long = "domZ", value_parser = parse_positive_f64, hide = true)]
+    domz_value: Option<f64>,
+
+    /// Retained for C command-line compatibility
+    #[arg(long = "domE", default_value = "10.0", value_parser = parse_positive_f64, conflicts_with = "dom_t", hide = true)]
+    dom_e: f64,
+
+    /// Retained for C command-line compatibility
+    #[arg(long = "domT", conflicts_with = "dom_e", hide = true)]
+    dom_t: Option<f32>,
+
+    /// Retained for C command-line compatibility
+    #[arg(long = "incdomE", default_value = "0.01", value_parser = parse_positive_f64, conflicts_with = "inc_dom_t", hide = true)]
+    inc_dome: f64,
+
+    /// Retained for C command-line compatibility
+    #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true)]
+    inc_dom_t: Option<f32>,
+
     /// Random number seed
     #[arg(long = "seed", default_value = "42")]
     seed: u32,
@@ -122,8 +150,28 @@ struct Args {
     #[arg(long = "w_length")]
     w_length: Option<usize>,
 
+    /// Tail mass for deriving window length
+    #[arg(long = "w_beta", value_parser = parse_window_beta)]
+    w_beta: Option<f64>,
+
+    /// Window length for biased-composition modifier at MSV stage
+    #[arg(long = "B1", default_value = "110", conflicts_with_all = ["max", "nobias"], hide = true)]
+    b1: usize,
+
+    /// Window length for biased-composition modifier at Viterbi stage
+    #[arg(long = "B2", default_value = "240", conflicts_with_all = ["max", "nobias"], hide = true)]
+    b2: usize,
+
+    /// Window length for biased-composition modifier at Forward stage
+    #[arg(long = "B3", default_value = "1000", conflicts_with_all = ["max", "nobias"], hide = true)]
+    b3: usize,
+
+    /// Override default background probabilities; accepted for compatibility
+    #[arg(long = "bgfile", hide = true)]
+    bgfile: Option<PathBuf>,
+
     /// Number of CPU threads
-    #[arg(long = "cpu", default_value = "2")]
+    #[arg(long = "cpu", default_value = "0")]
     cpu: usize,
 
     /// Save per-sequence hits to tabular file
@@ -173,6 +221,17 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
     }
 }
 
+fn parse_window_beta(s: &str) -> Result<f64, String> {
+    let value = s
+        .parse::<f64>()
+        .map_err(|e| format!("invalid window-length beta value: {e}"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("Invalid window-length beta value".to_string())
+    }
+}
+
 /// Entry point for `nhmmscan`: scan each nucleotide query against every HMM in
 /// a DNA HMM database and report a ranked, E-value-thresholded hit table.
 ///
@@ -183,7 +242,9 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
 /// to `serial_master()`/`serial_loop()` in `hmmer/src/nhmmscan.c`.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
+    let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
+    validate_sequence_format("nhmmscan --qformat", args.qformat.as_deref());
     if matches!(args.w_length, Some(0..=3)) {
         eprintln!("Invalid window length value");
         std::process::exit(1);
@@ -191,11 +252,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     logsum::p7_flogsuminit();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.cpu)
-        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
-        .build_global()
-        .ok();
+    if args.cpu > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cpu)
+            .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
+            .build_global()
+            .ok();
+    }
 
     // C nhmmscan requires a pressed HMM database and refuses plain ASCII HMMs.
     let pressed_available = pressed::pressed_db_available(&args.hmmdb).unwrap_or_else(|e| {
@@ -262,10 +325,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     writeln!(
         out,
-        "# nhmmscan :: search nucleotide sequence(s) against a DNA profile database"
+        "# nhmmscan :: search DNA sequence(s) against a DNA profile database"
     )
     .unwrap();
     writeln!(out, "# HMMER 3.4 (Aug 2023); http://hmmer.org/").unwrap();
+    writeln!(out, "# Copyright (C) 2023 Howard Hughes Medical Institute.").unwrap();
+    writeln!(
+        out,
+        "# Freely distributed under the BSD open source license."
+    )
+    .unwrap();
     writeln!(
         out,
         "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
@@ -277,6 +346,27 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         args.seqfile.display()
     )
     .unwrap();
+    if let Some(format) = args.qformat.as_deref() {
+        writeln!(out, "# input seqfile format asserted:   {format}").unwrap();
+    }
+    if let Some(w_beta) = args.w_beta {
+        writeln!(out, "# window length beta value:        {}", w_beta).unwrap();
+    }
+    if let Some(w_length) = args.w_length {
+        writeln!(out, "# window length :                  {}", w_length).unwrap();
+    }
+    if args.b1 != 110 {
+        writeln!(out, "# biased comp MSV window len:      {}", args.b1).unwrap();
+    }
+    if args.b2 != 240 {
+        writeln!(out, "# biased comp Viterbi window len:  {}", args.b2).unwrap();
+    }
+    if args.b3 != 1000 {
+        writeln!(out, "# biased comp Forward window len:  {}", args.b3).unwrap();
+    }
+    if let Some(path) = &args.bgfile {
+        writeln!(out, "# file with custom bg probs:       {}", path.display()).unwrap();
+    }
     writeln!(
         out,
         "# target HMM database:             {}",
@@ -290,13 +380,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "# per-seq hits tabular output:     {}", path.display()).unwrap();
     }
     if let Some(ref path) = args.dfamtblout {
-        writeln!(out, "# Dfam-style tabular output:       {}", path.display()).unwrap();
+        writeln!(out, "# hits output in Dfam format:      {}", path.display()).unwrap();
     }
     if args.acc {
         writeln!(out, "# prefer accessions over names:    yes").unwrap();
     }
     if args.noali {
         writeln!(out, "# show alignments in output:       no").unwrap();
+    }
+    if command_line_has_option(&cmdline, "--cpu") || std::env::var_os("HMMER_NCPU").is_some() {
+        if args.cpu == 0 {
+            writeln!(out, "# multithread parallelization:     off").unwrap();
+        } else {
+            writeln!(
+                out,
+                "# multithread parallelization:     {} workers",
+                args.cpu
+            )
+            .unwrap();
+        }
     }
     if args.notextw {
         writeln!(out, "# max ASCII text line length:      unlimited").unwrap();
@@ -305,15 +407,21 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "# max ASCII text line length:      {}", textw).unwrap();
     }
     if let Some(z) = args.z_value {
-        writeln!(out, "# sequence search space set to:    {:.0}", z).unwrap();
+        writeln!(out, "# sequence search space set to:    {}", fmt_fixed0(z)).unwrap();
     }
-    if args.seed != 42 {
+    write_nhmmscan_option_header(out, &args, &cmdline);
+    if command_line_has_option(&cmdline, "--seed") {
         if args.seed == 0 {
             writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
         } else {
             writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
         }
     }
+    writeln!(
+        out,
+        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // For each query sequence, search all HMMs
@@ -321,15 +429,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error reading HMM database: {}", e);
         std::process::exit(1);
     });
-    let bg = Bg::new(&abc);
+    let mut bg = Bg::new(&abc);
+    if let Some(path) = &args.bgfile {
+        if let Err(e) = bg.read_file(&abc, path) {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
 
-    let mut sqf = sequence::open_seq_file(&args.seqfile, &abc).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
+    let mut sqf =
+        open_query_seq_file(&args.seqfile, &abc, args.qformat.as_deref()).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        });
 
     let mut sq = Sequence::new();
     let mut query_idx = 0usize;
+    let search_start = Instant::now();
+    let search_space = args.z_value.unwrap_or(hmms.len() as f64);
+    let search_space_ln = hmmer_pure_rs::util::cmath::c_log_f64(search_space);
     while sqf.read(&mut sq).unwrap_or_else(|e| {
         eprintln!("Error reading sequence file: {}", e);
         std::process::exit(1);
@@ -337,148 +455,176 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         query_idx += 1;
         writeln!(out, "Query:       {}  [L={}]", sq.name, sq.n).unwrap();
 
-        use rayon::prelude::*;
-        let all_hits: Vec<Result<Vec<hmmer_pure_rs::tophits::Hit>, String>> = hmms
-            .par_iter()
-            .enumerate()
-            .map(|(idx, hmm)| {
-                let mut local_bg = bg.clone();
-                local_bg.set_filter(hmm.m, &hmm.compo);
-                local_bg.set_length(sq.n);
+        let scan_model = |idx: usize, hmm: &hmmer_pure_rs::hmm::Hmm| {
+            hmmer_pure_rs::util::simd_env::init();
+            let mut local_bg = bg.clone();
+            local_bg.set_filter(hmm.m, &hmm.compo);
+            local_bg.set_length(sq.n);
 
-                let mut gm = Profile::new(hmm.m, &abc);
-                profile::profile_config(hmm, &local_bg, &mut gm, sq.n as i32, P7_LOCAL);
-                let om = pressed_oprofiles[idx].clone();
-                let mut threshold_pli = Pipeline::new();
-                threshold_pli.new_model(&gm);
-                configure_thresholds(&mut threshold_pli, &args);
-                if let Some(cutoff) = bit_cutoff {
-                    threshold_pli.use_bit_cutoffs = cutoff;
-                    if threshold_pli.new_model_thresholds(&hmm.cutoff).is_err() {
-                        return Ok(Vec::new());
-                    }
+            let mut gm = Profile::new(hmm.m, &abc);
+            profile::profile_config(hmm, &local_bg, &mut gm, sq.n as i32, P7_LOCAL);
+            let om = pressed_oprofiles[idx].clone();
+            let mut threshold_pli = Pipeline::new();
+            threshold_pli.new_model(&gm);
+            configure_thresholds(&mut threshold_pli, &args);
+            if let Some(cutoff) = bit_cutoff {
+                threshold_pli.use_bit_cutoffs = cutoff;
+                if threshold_pli.new_model_thresholds(&hmm.cutoff).is_err() {
+                    return Ok(ScanModelResult {
+                        hits: Vec::new(),
+                        stats: PipelineStats::default(),
+                    });
                 }
-                let threshold_config =
-                    crate::subcmd::nhmmer::NhmmerThresholdConfig::from_pipeline(&threshold_pli);
+            }
+            let threshold_config =
+                crate::subcmd::nhmmer::NhmmerThresholdConfig::from_pipeline(&threshold_pli);
+            let bias_windows = crate::subcmd::nhmmer::NhmmerBiasWindowLengths {
+                b1: args.b1,
+                b2: args.b2,
+                b3: args.b3,
+            };
 
-                let max_length = if let Some(w_length) = args.w_length {
-                    w_length as i32
-                } else if hmm.max_length > 0 {
-                    hmm.max_length
-                } else {
-                    (hmm.m * 4) as i32
+            let max_length = nhmmscan_max_length(hmm, args.w_length, args.w_beta);
+            let do_watson = !args.crick;
+            let do_crick = !args.watson;
+            let mut hits = Vec::new();
+            let msv_counter = std::sync::atomic::AtomicU64::new(0);
+            let bias_counter = std::sync::atomic::AtomicU64::new(0);
+            let vit_counter = std::sync::atomic::AtomicU64::new(0);
+            let fwd_counter = std::sync::atomic::AtomicU64::new(0);
+
+            if do_crick && abc.complement.is_some() {
+                let mut rc_dsq = sq.dsq.clone();
+                abc.revcomp(&mut rc_dsq, sq.n);
+                let rc_sq = Sequence {
+                    name: sq.name.clone(),
+                    acc: sq.acc.clone(),
+                    desc: sq.desc.clone(),
+                    dsq: rc_dsq,
+                    n: sq.n,
+                    l: sq.l,
                 };
-                let do_watson = !args.crick;
-                let do_crick = !args.watson;
-                let mut hits = Vec::new();
-                let msv_counter = std::sync::atomic::AtomicU64::new(0);
-                let bias_counter = std::sync::atomic::AtomicU64::new(0);
-                let vit_counter = std::sync::atomic::AtomicU64::new(0);
-                let fwd_counter = std::sync::atomic::AtomicU64::new(0);
+                let mut rc_hits = crate::subcmd::nhmmer::search_sequence(
+                    &rc_sq,
+                    hmm,
+                    &gm,
+                    &om,
+                    &local_bg,
+                    max_length,
+                    args.f1,
+                    args.f2,
+                    args.f3,
+                    args.max,
+                    args.nobias,
+                    args.nonull2,
+                    args.seed,
+                    bias_windows,
+                    threshold_config,
+                    true,
+                    &msv_counter,
+                    &bias_counter,
+                    &vit_counter,
+                    &fwd_counter,
+                    None,
+                )?;
+                convert_crick_hits_to_forward(&mut rc_hits, sq.n);
+                hits.extend(rc_hits);
+            }
 
-                if do_crick && abc.complement.is_some() {
-                    let mut rc_dsq = sq.dsq.clone();
-                    abc.revcomp(&mut rc_dsq, sq.n);
-                    let rc_sq = Sequence {
-                        name: sq.name.clone(),
-                        acc: sq.acc.clone(),
-                        desc: sq.desc.clone(),
-                        dsq: rc_dsq,
-                        n: sq.n,
-                        l: sq.l,
-                    };
-                    let mut rc_hits = crate::subcmd::nhmmer::search_sequence(
-                        &rc_sq,
-                        hmm,
-                        &gm,
-                        &om,
-                        &local_bg,
-                        max_length,
-                        args.f1,
-                        args.f2,
-                        args.f3,
-                        args.max,
-                        args.nobias,
-                        args.nonull2,
-                        args.seed,
-                        threshold_config,
-                        true,
-                        &msv_counter,
-                        &bias_counter,
-                        &vit_counter,
-                        &fwd_counter,
-                    )?;
-                    convert_crick_hits_to_forward(&mut rc_hits, sq.n);
-                    hits.extend(rc_hits);
-                }
+            if do_watson {
+                hits.extend(crate::subcmd::nhmmer::search_sequence(
+                    &sq,
+                    hmm,
+                    &gm,
+                    &om,
+                    &local_bg,
+                    max_length,
+                    args.f1,
+                    args.f2,
+                    args.f3,
+                    args.max,
+                    args.nobias,
+                    args.nonull2,
+                    args.seed,
+                    bias_windows,
+                    threshold_config,
+                    false,
+                    &msv_counter,
+                    &bias_counter,
+                    &vit_counter,
+                    &fwd_counter,
+                    None,
+                )?);
+            }
 
-                if do_watson {
-                    hits.extend(crate::subcmd::nhmmer::search_sequence(
-                        &sq,
-                        hmm,
-                        &gm,
-                        &om,
-                        &local_bg,
-                        max_length,
-                        args.f1,
-                        args.f2,
-                        args.f3,
-                        args.max,
-                        args.nobias,
-                        args.nonull2,
-                        args.seed,
-                        threshold_config,
-                        false,
-                        &msv_counter,
-                        &bias_counter,
-                        &vit_counter,
-                        &fwd_counter,
-                    )?);
+            let strands_searched = (do_watson as usize) + (do_crick as usize);
+            let seq_len = sq.n * strands_searched.max(1);
+            let nhmmscan_ln =
+                nhmmscan_long_target_ln_adjustment(seq_len, max_length, search_space_ln);
+            for hit in &mut hits {
+                hit.lnp += nhmmscan_ln;
+                hit.sortkey = hit.lnp;
+                if let Some(dom0) = hit.dcl.first_mut() {
+                    dom0.lnp = hit.lnp;
                 }
-
-                let strands_searched = (do_watson as usize) + (do_crick as usize);
-                let seq_len = sq.n * strands_searched.max(1);
-                let nhmmscan_ln = ((seq_len as f32) / (max_length as f32)).ln() as f64;
-                for hit in &mut hits {
-                    hit.lnp += nhmmscan_ln;
-                    hit.sortkey = hit.lnp;
-                    if let Some(dom0) = hit.dcl.first_mut() {
-                        dom0.lnp = hit.lnp;
-                    }
-                    hit.name = hmm.name.clone();
-                    hit.acc = hmm.acc.clone().unwrap_or_default();
-                    hit.desc = hmm.desc.clone().unwrap_or_default();
-                    hit.n = hmm.m;
+                hit.name = hmm.name.clone();
+                hit.acc = hmm.acc.clone().unwrap_or_default();
+                hit.desc = hmm.desc.clone().unwrap_or_default();
+                hit.n = hmm.m;
+            }
+            if let Some(cutoff) = bit_cutoff {
+                let mut local_th = TopHits::new();
+                local_th.hits = hits;
+                let mut tmp_pli = Pipeline::new();
+                tmp_pli.long_target = true;
+                configure_thresholds(&mut tmp_pli, &args);
+                tmp_pli.use_bit_cutoffs = cutoff;
+                if tmp_pli.new_model_thresholds(&hmm.cutoff).is_ok() {
+                    local_th.threshold(&tmp_pli, 1.0, 1.0);
                 }
-                if let Some(cutoff) = bit_cutoff {
-                    let mut local_th = TopHits::new();
-                    local_th.hits = hits;
-                    let mut tmp_pli = Pipeline::new();
-                    tmp_pli.long_target = true;
-                    configure_thresholds(&mut tmp_pli, &args);
-                    tmp_pli.use_bit_cutoffs = cutoff;
-                    if tmp_pli.new_model_thresholds(&hmm.cutoff).is_ok() {
-                        local_th.threshold(&tmp_pli, 1.0, 1.0);
-                    }
-                    hits = local_th.hits;
-                }
-                Ok(hits)
+                hits = local_th.hits;
+            }
+            Ok(ScanModelResult {
+                hits,
+                stats: PipelineStats {
+                    n_past_msv: msv_counter.load(std::sync::atomic::Ordering::Relaxed),
+                    n_past_bias: bias_counter.load(std::sync::atomic::Ordering::Relaxed),
+                    n_past_vit: vit_counter.load(std::sync::atomic::Ordering::Relaxed),
+                    n_past_fwd: fwd_counter.load(std::sync::atomic::Ordering::Relaxed),
+                },
             })
-            .collect();
-        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = all_hits
+        };
+        let scan_results: Vec<Result<ScanModelResult, String>> = if args.cpu == 0 {
+            hmms.iter()
+                .enumerate()
+                .map(|(idx, hmm)| scan_model(idx, hmm))
+                .collect()
+        } else {
+            use rayon::prelude::*;
+            hmms.par_iter()
+                .enumerate()
+                .map(|(idx, hmm)| scan_model(idx, hmm))
+                .collect()
+        };
+        let mut stats = PipelineStats::default();
+        let all_hits: Vec<hmmer_pure_rs::tophits::Hit> = scan_results
             .into_iter()
             .flat_map(|result| {
-                result.unwrap_or_else(|err| {
+                let result = result.unwrap_or_else(|err| {
                     eprintln!("Error: {err}");
                     std::process::exit(1);
-                })
+                });
+                stats.n_past_msv += result.stats.n_past_msv;
+                stats.n_past_bias += result.stats.n_past_bias;
+                stats.n_past_vit += result.stats.n_past_vit;
+                stats.n_past_fwd += result.stats.n_past_fwd;
+                result.hits
             })
             .collect();
 
         let mut th = TopHits::new();
         th.hits = all_hits;
-        let z = 1.0_f64;
-        apply_nhmmscan_model_evalue_scale(&mut th.hits, hmms.len());
+        let evalue_scale = 1.0;
         th.sort_by_modelname_and_alipos();
         th.remove_duplicates();
         th.sort_by_sortkey();
@@ -489,7 +635,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             if let Some(cutoff) = bit_cutoff {
                 tmp_pli.use_bit_cutoffs = cutoff;
             }
-            th.threshold(&tmp_pli, z, z);
+            th.threshold(&tmp_pli, evalue_scale, evalue_scale);
         }
 
         if let Some(ref mut f) = tblout_file {
@@ -505,70 +651,51 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &cmdline,
                 query_idx == 1,
                 false,
+                evalue_scale,
+                " modlen",
             );
         }
         if let Some(ref mut f) = dfamtblout_file {
-            crate::subcmd::nhmmer::write_nhmmer_dfamtblout(f, &sq.name, None, "modlen", &th);
+            crate::subcmd::nhmmer::write_nhmmer_dfamtblout(
+                f,
+                &sq.name,
+                None,
+                "modlen",
+                &th,
+                evalue_scale,
+            );
         }
 
-        writeln!(
+        let textw = if args.notextw {
+            0
+        } else {
+            args.textw.unwrap_or(120)
+        };
+        write_nhmmscan_stdout_hits(
             out,
-            "Scores for complete sequence (score includes all domains):"
-        )
-        .unwrap();
-        writeln!(
+            &th,
+            evalue_scale,
+            &sq.name,
+            args.acc,
+            args.noali,
+            textw,
+        );
+        let strands_searched = ((!args.crick) as usize) + ((!args.watson) as usize);
+        let pos_output = reported_aligned_residues(&th);
+        write_nhmmscan_pipeline_stats(
             out,
-            "   --- full sequence ---   --- best 1 domain ---    -#dom-"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    E-value  score  bias    E-value  score  bias    exp  N  Model    Description"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
-        )
-        .unwrap();
-
-        for hit in &th.hits {
-            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
-                continue;
-            }
-            let evalue = z * hit.lnp.exp();
-            let best_dom = hit
-                .dcl
-                .iter()
-                .max_by(|a, b| a.bitscore.total_cmp(&b.bitscore));
-            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
-            let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
-            let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
-            writeln!(
-                out,
-                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {:<9}{}",
-                hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score,
-                hit.bias,
-                hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score,
-                dom_bias,
-                hit.nexpected,
-                hit.nreported,
-                display_name(hit, args.acc),
-                hit.desc,
-            )
-            .unwrap();
-        }
-
-        if th.nreported == 0 {
-            writeln!(
-                out,
-                "   [No targets detected that satisfy reporting thresholds]"
-            )
-            .unwrap();
-        }
-        writeln!(out, "\n//").unwrap();
+            (sq.n * strands_searched.max(1)) as u64,
+            hmms.len() as u64,
+            hmms.iter().map(|hmm| hmm.m as u64).sum(),
+            th.nreported as u64,
+            pos_output,
+            &stats,
+            args.f1,
+            args.f2,
+            args.f3,
+            search_start.elapsed().as_secs_f64(),
+        );
+        writeln!(out, "//").unwrap();
 
         sq.reuse();
     }
@@ -600,6 +727,435 @@ fn display_name(hit: &hmmer_pure_rs::tophits::Hit, prefer_acc: bool) -> &str {
     }
 }
 
+fn write_nhmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
+    if command_line_has_option(cmdline, "-E") {
+        writeln!(
+            out,
+            "# profile reporting threshold:     E-value <= {}",
+            fmt_g(args.e_value)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.score_threshold {
+        writeln!(
+            out,
+            "# profile reporting threshold:     score >= {}",
+            fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incE") {
+        writeln!(
+            out,
+            "# profile inclusion threshold:     E-value <= {}",
+            fmt_g(args.inc_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_t {
+        writeln!(
+            out,
+            "# profile inclusion threshold:     score >= {}",
+            fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if args.cut_ga {
+        writeln!(out, "# model-specific thresholding:     GA cutoffs").unwrap();
+    }
+    if args.cut_nc {
+        writeln!(out, "# model-specific thresholding:     NC cutoffs").unwrap();
+    }
+    if args.cut_tc {
+        writeln!(out, "# model-specific thresholding:     TC cutoffs").unwrap();
+    }
+    if args.max {
+        writeln!(
+            out,
+            "# Max sensitivity mode:            on [all heuristic filters off]"
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F1") {
+        writeln!(out, "# MSV filter P threshold:       <= {}", fmt_g(args.f1)).unwrap();
+    }
+    if command_line_has_option(cmdline, "--F2") {
+        writeln!(out, "# Vit filter P threshold:       <= {}", fmt_g(args.f2)).unwrap();
+    }
+    if command_line_has_option(cmdline, "--F3") {
+        writeln!(out, "# Fwd filter P threshold:       <= {}", fmt_g(args.f3)).unwrap();
+    }
+    if args.nobias {
+        writeln!(out, "# biased composition HMM filter:   off").unwrap();
+    }
+    if args.nonull2 {
+        writeln!(out, "# null2 bias corrections:          off").unwrap();
+    }
+    if args.watson {
+        writeln!(out, "# search only top strand:          on").unwrap();
+    }
+    if args.crick {
+        writeln!(out, "# search only bottom strand:       on").unwrap();
+    }
+}
+
+fn command_line_has_option(cmdline: &str, option: &str) -> bool {
+    let compact_short = option
+        .strip_prefix('-')
+        .filter(|rest| !rest.starts_with('-') && rest.chars().count() == 1)
+        .map(|_| option);
+    cmdline.split_whitespace().any(|token| {
+        token == option
+            || token.starts_with(&format!("{option}="))
+            || compact_short
+                .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
+    })
+}
+
+fn validate_sequence_format(label: &str, format: Option<&str>) {
+    if let Some(format) = format {
+        if SequenceFormat::from_name(format).is_none() {
+            eprintln!("{label}={format} is not a recognized input sequence file format");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn open_query_seq_file(
+    path: &std::path::Path,
+    abc: &Alphabet,
+    format: Option<&str>,
+) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn std::io::Read>>> {
+    if let Some(format) = format {
+        sequence::open_seq_file_with_format(path, abc, SequenceFormat::from_name(format).unwrap())
+    } else {
+        sequence::open_seq_file(path, abc)
+    }
+}
+
+fn nhmmscan_max_length(
+    hmm: &hmmer_pure_rs::hmm::Hmm,
+    w_length: Option<usize>,
+    w_beta: Option<f64>,
+) -> i32 {
+    if let Some(w_length) = w_length {
+        w_length as i32
+    } else if let Some(w_beta) = w_beta.filter(|beta| *beta > 0.0) {
+        builder::max_length_from_beta(hmm, w_beta)
+    } else if hmm.max_length > 0 {
+        hmm.max_length
+    } else if w_beta == Some(0.0) {
+        (hmm.m * 4) as i32
+    } else {
+        builder::max_length_from_beta(hmm, DEFAULT_WINDOW_BETA)
+    }
+}
+
+fn nhmmscan_long_target_ln_adjustment(
+    seq_len: usize,
+    max_length: i32,
+    search_space_ln: f64,
+) -> f64 {
+    let nw_ratio = (seq_len as f32) / (max_length as f32);
+    hmmer_pure_rs::util::cmath::c_log_f64(nw_ratio as f64) + search_space_ln
+}
+
+#[derive(Default)]
+struct PipelineStats {
+    n_past_msv: u64,
+    n_past_bias: u64,
+    n_past_vit: u64,
+    n_past_fwd: u64,
+}
+
+struct ScanModelResult {
+    hits: Vec<hmmer_pure_rs::tophits::Hit>,
+    stats: PipelineStats,
+}
+
+fn write_nhmmscan_stdout_hits(
+    out: &mut dyn Write,
+    th: &TopHits,
+    z: f64,
+    qname: &str,
+    prefer_acc: bool,
+    noali: bool,
+    textw: usize,
+) {
+    use hmmer_pure_rs::tophits::{P7_IS_INCLUDED, P7_IS_REPORTED};
+
+    writeln!(out, "Scores for complete hit:").unwrap();
+    writeln!(
+        out,
+        "    E-value  score  bias  Model     start    end  Description"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    ------- ------ -----  --------  -----  -----  -----------"
+    )
+    .unwrap();
+
+    let mut have_printed_incthresh = false;
+    let mut any_reported = false;
+    for hit in &th.hits {
+        if hit.flags & P7_IS_REPORTED == 0 {
+            continue;
+        }
+        any_reported = true;
+        if hit.flags & P7_IS_INCLUDED == 0 && !have_printed_incthresh {
+            writeln!(out, "  ------ inclusion threshold ------").unwrap();
+            have_printed_incthresh = true;
+        }
+        let best_dom = hit
+            .dcl
+            .iter()
+            .max_by(|a, b| a.bitscore.total_cmp(&b.bitscore));
+        let (start, end) = best_dom.map(|d| (d.iali, d.jali)).unwrap_or((0, 0));
+        writeln!(
+            out,
+            "  {:>9} {} {}  {:<8} {:>6} {:>6} {}",
+            hmmer_pure_rs::output::fmt_evalue(z * c_exp_f64(hit.lnp)),
+            fmt_score(hit.score),
+            fmt_bias(hit.bias),
+            display_name(hit, prefer_acc),
+            start,
+            end,
+            if hit.desc.is_empty() { "" } else { &hit.desc },
+        )
+        .unwrap();
+    }
+
+    if !any_reported {
+        writeln!(
+            out,
+            "   [No targets detected that satisfy reporting thresholds]"
+        )
+        .unwrap();
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Annotation for each hit{}:",
+        if noali { " " } else { "  (and alignments)" }
+    )
+    .unwrap();
+    if !any_reported {
+        writeln!(
+            out,
+            "\n   [No targets detected that satisfy reporting thresholds]"
+        )
+        .unwrap();
+        return;
+    }
+
+    for hit in &th.hits {
+        if hit.flags & P7_IS_REPORTED == 0 {
+            continue;
+        }
+        writeln!(
+            out,
+            ">> {}  {}",
+            display_name(hit, prefer_acc),
+            if hit.desc.is_empty() { "" } else { &hit.desc }
+        )
+        .unwrap();
+        if hit.nreported == 0 {
+            writeln!(
+                out,
+                "   [No individual domains that satisfy reporting thresholds (although complete target did)]"
+            )
+            .unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+        writeln!(
+            out,
+            "    score  bias    Evalue   hmmfrom    hmm to     alifrom    ali to      envfrom    env to      mod len      acc"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "   ------ ----- ---------   -------   -------    --------- ---------    --------- ---------    ---------    ----"
+        )
+        .unwrap();
+        for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+            let (hmmfrom, hmmto) = dom
+                .ad
+                .as_ref()
+                .map(|ad| (ad.hmmfrom, ad.hmmto))
+                .unwrap_or((0, 0));
+            let indicator = if dom.is_included { "!" } else { "?" };
+            let hmm_left = if hmmfrom == 1 { '[' } else { '.' };
+            let hmm_right = if hmmto == hit.n { ']' } else { '.' };
+            let ali_left = '.';
+            let ali_right = '.';
+            let env_left = '.';
+            let env_right = '.';
+            let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
+            writeln!(
+                out,
+                " {} {} {} {:>9}   {:>7}   {:>7} {}{} {:>9} {:>9} {}{} {:>9} {:>9} {}{} {:>9}    {}",
+                indicator,
+                hmmer_pure_rs::output::fmt_score(dom.bitscore),
+                hmmer_pure_rs::output::fmt_bias(dom.dombias),
+                hmmer_pure_rs::output::fmt_evalue(z * c_exp_f64(dom.lnp)),
+                hmmfrom,
+                hmmto,
+                hmm_left,
+                hmm_right,
+                dom.iali,
+                dom.jali,
+                ali_left,
+                ali_right,
+                dom.ienv,
+                dom.jenv,
+                env_left,
+                env_right,
+                hit.n,
+                hmmer_pure_rs::output::fmt_fixed2(acc as f64),
+            )
+            .unwrap();
+        }
+        writeln!(out).unwrap();
+
+        if !noali {
+            writeln!(out, "  Alignment:").unwrap();
+            for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+                writeln!(
+                    out,
+                    "  score: {} bits",
+                    hmmer_pure_rs::output::fmt_fixed1(dom.bitscore as f64)
+                )
+                .unwrap();
+                if let Some(ref ad) = dom.ad {
+                    hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                        out,
+                        display_name(hit, prefer_acc),
+                        qname,
+                        ad,
+                        None,
+                        textw,
+                    );
+                }
+                writeln!(out).unwrap();
+            }
+        }
+    }
+}
+
+fn write_nhmmscan_pipeline_stats<W: Write + ?Sized>(
+    out: &mut W,
+    query_residues: u64,
+    n_models: u64,
+    total_nodes: u64,
+    nreported: u64,
+    pos_output: u64,
+    stats: &PipelineStats,
+    f1: f64,
+    f2: f64,
+    f3: f64,
+    elapsed_secs: f64,
+) {
+    let residues_scanned = query_residues.saturating_mul(n_models);
+    let frac = |n: u64| {
+        if residues_scanned > 0 {
+            n as f64 / residues_scanned as f64
+        } else {
+            0.0
+        }
+    };
+    writeln!(out).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "Internal pipeline statistics summary:").unwrap();
+    writeln!(out, "-------------------------------------").unwrap();
+    writeln!(
+        out,
+        "Query sequence(s):               {:>11}  ({} residues searched)",
+        1, query_residues
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Target model(s):                 {:>11}  ({} nodes)",
+        n_models, total_nodes
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Residues passing SSV filter:     {:>11}  ({}); expected ({})",
+        stats.n_past_msv,
+        hmmer_pure_rs::output::fmt_g3(frac(stats.n_past_msv)),
+        hmmer_pure_rs::output::fmt_g3(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Residues passing bias filter:    {:>11}  ({}); expected ({})",
+        stats.n_past_bias,
+        hmmer_pure_rs::output::fmt_g3(frac(stats.n_past_bias)),
+        hmmer_pure_rs::output::fmt_g3(f1)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Residues passing Vit filter:     {:>11}  ({}); expected ({})",
+        stats.n_past_vit,
+        hmmer_pure_rs::output::fmt_g3(frac(stats.n_past_vit)),
+        hmmer_pure_rs::output::fmt_g3(f2)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Residues passing Fwd filter:     {:>11}  ({}); expected ({})",
+        stats.n_past_fwd,
+        hmmer_pure_rs::output::fmt_g3(frac(stats.n_past_fwd)),
+        hmmer_pure_rs::output::fmt_g3(f3)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Total number of hits:            {:>11}  ({})",
+        nreported,
+        hmmer_pure_rs::output::fmt_g3(frac(pos_output))
+    )
+    .unwrap();
+    let total_h = (elapsed_secs / 3600.0) as u64;
+    let total_m = ((elapsed_secs / 60.0) as u64) % 60;
+    let total_s = elapsed_secs - (total_h * 3600 + total_m * 60) as f64;
+    writeln!(
+        out,
+        "# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: {:02}:{:02}:{}",
+        total_h,
+        total_m,
+        fmt_elapsed_seconds(total_s)
+    )
+    .unwrap();
+    let mc_per_sec = if elapsed_secs > 0.0 {
+        (query_residues as f64 * total_nodes as f64) / 1_000_000.0 / elapsed_secs
+    } else {
+        0.0
+    };
+    writeln!(
+        out,
+        "# Mc/sec: {}",
+        hmmer_pure_rs::output::fmt_g3(mc_per_sec)
+    )
+    .unwrap();
+}
+
+fn reported_aligned_residues(th: &TopHits) -> u64 {
+    th.hits
+        .iter()
+        .filter(|hit| hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED != 0)
+        .flat_map(|hit| hit.dcl.iter())
+        .filter(|dom| dom.is_reported)
+        .map(|dom| ((dom.jali - dom.iali).abs() + 1) as u64)
+        .sum()
+}
+
 fn nucleotide_alphabet_from_hmms(hmms: &[hmmer_pure_rs::Hmm]) -> Result<Alphabet, String> {
     let hmm = hmms
         .first()
@@ -623,17 +1179,6 @@ fn selected_bit_cutoff(args: &Args) -> Option<BitCutoff> {
         Some(BitCutoff::NC)
     } else {
         None
-    }
-}
-
-fn apply_nhmmscan_model_evalue_scale(hits: &mut [hmmer_pure_rs::tophits::Hit], nmodels: usize) {
-    let scale = (nmodels as f32).ln() as f64;
-    for hit in hits {
-        hit.lnp += scale;
-        hit.sortkey = hit.lnp;
-        if let Some(dom0) = hit.dcl.first_mut() {
-            dom0.lnp = hit.lnp;
-        }
     }
 }
 
@@ -738,55 +1283,12 @@ mod tests {
     }
 
     #[test]
-    fn nhmmscan_evalues_apply_post_merge_model_count_scale() {
-        let base_lnp = 0.25_f64.ln();
-        let mut hits = vec![hmmer_pure_rs::tophits::Hit {
-            name: "model".to_string(),
-            acc: String::new(),
-            desc: String::new(),
-            n: 100,
-            sortkey: base_lnp,
-            score: 10.0,
-            bias: 0.0,
-            pre_score: 10.0,
-            sum_score: 10.0,
-            lnp: base_lnp,
-            pre_lnp: base_lnp,
-            sum_lnp: base_lnp,
-            nexpected: 1.0,
-            nregions: 1,
-            nclustered: 1,
-            noverlaps: 0,
-            nenvelopes: 1,
-            ndom: 1,
-            nreported: 0,
-            nincluded: 0,
-            dcl: vec![hmmer_pure_rs::tophits::Domain {
-                iali: 1,
-                jali: 10,
-                ienv: 1,
-                jenv: 10,
-                bitscore: 10.0,
-                lnp: base_lnp,
-                dombias: 0.0,
-                oasc: 0.0,
-                envsc: 0.0,
-                domcorrection: 0.0,
-                is_reported: false,
-                is_included: false,
-                ad: None,
-            }],
-            flags: 0,
-            seqidx: 0,
-            subseq_start: 0,
-        }];
+    fn nhmmscan_long_target_adjustment_folds_model_search_space_into_lnp() {
+        let search_space_ln = hmmer_pure_rs::util::cmath::c_log_f64(12.0);
+        let got = nhmmscan_long_target_ln_adjustment(800, 200, search_space_ln);
+        let expected = hmmer_pure_rs::util::cmath::c_log_f64(48.0);
 
-        apply_nhmmscan_model_evalue_scale(&mut hits, 4);
-
-        let expected = base_lnp + (4.0_f32).ln() as f64;
-        assert!((hits[0].lnp - expected).abs() < 1e-12);
-        assert!((hits[0].dcl[0].lnp - expected).abs() < 1e-12);
-        assert!((hits[0].sortkey - expected).abs() < 1e-12);
+        assert!((got - expected).abs() < 1e-12);
     }
 
     #[test]

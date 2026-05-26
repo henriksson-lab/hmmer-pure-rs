@@ -37,6 +37,30 @@ require_executable() {
   fi
 }
 
+prepare_pressed_hmmdb() {
+  local case_name="$1"
+  local src_hmm="$2"
+  local pressed_dir="$out_dir/pressed/$case_name"
+  local dst_hmm="$pressed_dir/$(basename "$src_hmm")"
+
+  require_file "$src_hmm"
+  require_executable "$c_dir/hmmpress"
+
+  mkdir -p "$pressed_dir"
+  cp "$src_hmm" "$dst_hmm"
+
+  "$c_dir/hmmpress" -f "$dst_hmm" \
+    > "$out_dir/${case_name}.hmmpress.stdout" \
+    2> "$out_dir/${case_name}.hmmpress.stderr"
+
+  require_file "$dst_hmm.h3f"
+  require_file "$dst_hmm.h3p"
+  require_file "$dst_hmm.h3i"
+  require_file "$dst_hmm.h3m"
+
+  printf "%s\n" "$dst_hmm"
+}
+
 decompress_cat() {
   local path="$1"
   case "$path" in
@@ -159,7 +183,56 @@ normalize_benchmark_output() {
       );
       @paths = sort { length($b->[0] // "") <=> length($a->[0] // "") } @paths;
     }
+    sub normalize_option_settings {
+      my ($line) = @_;
+      chomp $line;
+      $line =~ s/^# Option settings:\s+//;
+      my @tokens = split /\s+/, $line;
+
+      if (@tokens && $tokens[0] eq "<RUST_HMMER>") {
+        shift @tokens;
+        shift @tokens if @tokens && $tokens[0] =~ /^(?:search|hmmsearch|phmmer|jackhmmer|scan|hmmscan|nhmmer|nhmmscan)$/;
+      } elsif (@tokens && $tokens[0] eq "<C_HMMER>") {
+        shift @tokens;
+      } elsif (@tokens >= 2 && $tokens[0] eq "hmmer" && $tokens[1] =~ /^(?:search|hmmsearch|phmmer|jackhmmer|scan|hmmscan|nhmmer|nhmmscan)$/) {
+        shift @tokens;
+        shift @tokens;
+      } elsif (@tokens && $tokens[0] =~ m{(?:^|/)(?:hmmsearch|phmmer|jackhmmer|hmmscan|nhmmer|nhmmscan)$}) {
+        shift @tokens;
+      }
+
+      my %values;
+      my @flags;
+      my @operands;
+      while (@tokens) {
+        my $token = shift @tokens;
+        if ($token =~ /^(--(?:cpu|tblout|domtblout|pfamtblout|dfamtblout)|-N)=(.+)$/) {
+          $values{$1} = $2;
+        } elsif ($token =~ /^(--(?:cpu|tblout|domtblout|pfamtblout|dfamtblout)|-N)$/ && @tokens) {
+          $values{$token} = shift @tokens;
+        } elsif ($token eq "--noali") {
+          push @flags, $token;
+        } else {
+          push @operands, $token;
+        }
+      }
+
+      my @canonical = ("<HMMER_COMMAND>");
+      for my $option ("-N", "--cpu", "--noali", "--tblout", "--domtblout", "--pfamtblout", "--dfamtblout") {
+        if ($option eq "--noali") {
+          push @canonical, $option if grep { $_ eq $option } @flags;
+        } elsif (exists $values{$option}) {
+          push @canonical, $option, $values{$option};
+        }
+      }
+      push @canonical, @operands;
+      return "# Option settings: " . join(" ", @canonical) . "\n";
+    }
     s/\r$//;
+    if (/^# CPU time:/ || /^# Mc\/sec:/) {
+      $_ = "";
+      next;
+    }
     s/^# Date:\s+.*/# Date:            <DATE>/;
     s/^# Current dir:\s+.*/# Current dir:     <CWD>/;
     for my $path (@paths) {
@@ -167,11 +240,15 @@ normalize_benchmark_output() {
       my $quoted = quotemeta($path->[0]);
       s/$quoted/$path->[1]/g;
     }
-    s/^# Option settings:\s+(?:<RUST_HMMER>(?:\s+\S+)?|<C_HMMER>)\s+/# Option settings: <HMMER_COMMAND> /;
     s{<OUT>/\S+\.stdout}{<STDOUT>}g;
     s{<OUT>/\S+\.tblout}{<TBLOUT>}g;
     s{<OUT>/\S+\.domtblout}{<DOMTBLOUT>}g;
+    s{<OUT>/\S+\.pfamtblout}{<PFAMTBLOUT>}g;
+    s{<OUT>/\S+\.dfamtblout}{<DFAMTBLOUT>}g;
     s{<OUT>/\S+}{<OUTFILE>}g;
+    if (/^# Option settings:/) {
+      $_ = normalize_option_settings($_);
+    }
   ' "$path"
 }
 
@@ -408,6 +485,8 @@ run_case() {
   local rust_tool_args=()
   if [[ "$tool" == "hmmsearch" ]]; then
     rust_tool_args=("search")
+  elif [[ "$tool" == "hmmscan" ]]; then
+    rust_tool_args=("scan")
   else
     rust_tool_args=("$tool")
   fi
@@ -438,6 +517,18 @@ run_case() {
       jackhmmer)
         rust_args+=("--cpu" "$threads" "--tblout" "$rust_tbl" "--domtblout" "$rust_dom")
         c_args+=("--cpu" "$threads" "--tblout" "$c_tbl" "--domtblout" "$c_dom")
+        ;;
+      hmmscan)
+        rust_args+=("--cpu" "$threads" "--noali" "--tblout" "$rust_tbl" "--domtblout" "$rust_dom")
+        c_args+=("--cpu" "$threads" "--noali" "--tblout" "$c_tbl" "--domtblout" "$c_dom")
+        ;;
+      nhmmer)
+        rust_args+=("--cpu" "$threads" "--noali" "--dna" "--tblout" "$rust_tbl")
+        c_args+=("--cpu" "$threads" "--noali" "--dna" "--tblout" "$c_tbl")
+        ;;
+      nhmmscan)
+        rust_args+=("--cpu" "$threads" "--noali" "--tblout" "$rust_tbl")
+        c_args+=("--cpu" "$threads" "--noali" "--tblout" "$c_tbl")
         ;;
       *)
         echo "unsupported benchmark tool: $tool" >&2
@@ -505,6 +596,17 @@ if should_run_case "phmmer_human_cyh3"; then
 fi
 if should_run_case "jackhmmer_human_cyh3_N2"; then
   run_case "jackhmmer_human_cyh3_N2" "jackhmmer" "$medium_query" "$medium_protein_rewindable" "-N 2"
+fi
+if should_run_case "hmmscan_gecco_cluster1"; then
+  gecco_cluster1_hmmdb="$(prepare_pressed_hmmdb "hmmscan_gecco_cluster1" "test_data/gecco_cluster1_hmms.hmm")"
+  run_case "hmmscan_gecco_cluster1" "hmmscan" "$gecco_cluster1_hmmdb" "test_data/gecco_cluster1_proteins.faa" ""
+fi
+if should_run_case "nhmmer_3box_dna_target"; then
+  run_case "nhmmer_3box_dna_target" "nhmmer" "hmmer/testsuite/3box.hmm" "hmmer/tutorial/dna_target.fa" ""
+fi
+if should_run_case "nhmmscan_3box_dna_target"; then
+  nhmmscan_3box_hmmdb="$(prepare_pressed_hmmdb "nhmmscan_3box_dna_target" "hmmer/testsuite/3box.hmm")"
+  run_case "nhmmscan_3box_dna_target" "nhmmscan" "$nhmmscan_3box_hmmdb" "hmmer/tutorial/dna_target.fa" ""
 fi
 
 echo "benchmark artifacts written to $out_dir"

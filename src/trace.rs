@@ -398,6 +398,20 @@ pub fn alignment_display_with_pp_bg(
     pp: Option<&crate::dp::gmx::Gmx>,
     bg_override: Option<&[f32]>,
 ) -> Option<AlignmentDisplay> {
+    alignment_display_with_pp_emission_odds(tr, dsq, hmm, abc, pp, bg_override, None)
+}
+
+/// Build an alignment display, optionally using optimized-profile emission
+/// odds for C-style match-line `+` decisions.
+pub fn alignment_display_with_pp_emission_odds(
+    tr: &Trace,
+    dsq: &[Dsq],
+    hmm: &crate::hmm::Hmm,
+    abc: &Alphabet,
+    pp: Option<&crate::dp::gmx::Gmx>,
+    bg_override: Option<&[f32]>,
+    emission_odds: Option<&dyn Fn(usize, usize) -> Option<f32>>,
+) -> Option<AlignmentDisplay> {
     // Find first and last M states (domain boundaries)
     let mut z1 = None;
     let mut z2 = None;
@@ -483,7 +497,15 @@ pub fn alignment_display_with_pp_bg(
                     } else {
                         crate::bg::AMINO_FREQUENCIES.get(x).copied().unwrap_or(0.05)
                     };
-                    if x < hmm.abc_k && sc > bg {
+                    let positive_emission =
+                        if let Some(get_odds) = emission_odds.filter(|_| hmm.abc_k > 4) {
+                            get_odds(k, x)
+                                .map(|odds| odds > 1.0)
+                                .unwrap_or(x < hmm.abc_k && sc > bg)
+                        } else {
+                            x < hmm.abc_k && sc > bg
+                        };
+                    if positive_emission {
                         mline.push('+');
                     } else {
                         mline.push(' ');

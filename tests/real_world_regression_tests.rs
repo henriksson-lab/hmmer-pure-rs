@@ -78,6 +78,58 @@ fn run_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
     std::fs::read_to_string(dfamtblout).unwrap()
 }
 
+fn run_c_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let dfamtblout = dir.path().join("dfamtblout.txt");
+    let output = Command::new(test_path("hmmer/src/nhmmer"))
+        .args(["--dfamtblout", dfamtblout.to_str().unwrap(), hmm, seqdb])
+        .output()
+        .expect("failed to run bundled C nhmmer");
+    assert!(
+        output.status.success(),
+        "bundled C nhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(dfamtblout).unwrap()
+}
+
+fn run_c_nhmmer_tblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), hmm, seqdb]);
+    let output = Command::new(test_path("hmmer/src/nhmmer"))
+        .args(&args)
+        .output()
+        .expect("failed to run bundled C nhmmer");
+    assert!(
+        output.status.success(),
+        "bundled C nhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_nhmmer_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), hmm, seqdb]);
+    let output = Command::new(test_path("hmmer/src/nhmmer"))
+        .args(&args)
+        .output()
+        .expect("failed to run bundled C nhmmer");
+    assert!(
+        output.status.success(),
+        "bundled C nhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        std::fs::read_to_string(tblout).unwrap(),
+    )
+}
+
 fn run_nhmmer(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
@@ -227,6 +279,201 @@ fn run_c_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     std::fs::read_to_string(dfamtblout).unwrap()
+}
+
+fn run_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["press", "-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmer press");
+    assert!(
+        press.status.success(),
+        "hmmer press failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let tblout = dir.path().join("tblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "scan",
+            "--noali",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run hmmer scan");
+    assert!(
+        output.status.success(),
+        "hmmer scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(test_path("hmmer/src/hmmpress"))
+        .args(["-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run bundled C hmmpress");
+    assert!(
+        press.status.success(),
+        "bundled C hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let tblout = dir.path().join("tblout.txt");
+    let output = Command::new(test_path("hmmer/src/hmmscan"))
+        .args([
+            "--noali",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmscan");
+    assert!(
+        output.status.success(),
+        "bundled C hmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["press", "-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmer press");
+    assert!(
+        press.status.success(),
+        "hmmer press failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let domtblout = dir.path().join("domtblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "scan",
+            "--noali",
+            "--domtblout",
+            domtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run hmmer scan");
+    assert!(
+        output.status.success(),
+        "hmmer scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
+fn run_c_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(test_path("hmmer/src/hmmpress"))
+        .args(["-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run bundled C hmmpress");
+    assert!(
+        press.status.success(),
+        "bundled C hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let domtblout = dir.path().join("domtblout.txt");
+    let output = Command::new(test_path("hmmer/src/hmmscan"))
+        .args([
+            "--noali",
+            "--domtblout",
+            domtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmscan");
+    assert!(
+        output.status.success(),
+        "bundled C hmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
+fn run_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["press", "-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmer press");
+    assert!(
+        press.status.success(),
+        "hmmer press failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "scan",
+            "--noali",
+            "--pfamtblout",
+            pfamtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run hmmer scan");
+    assert!(
+        output.status.success(),
+        "hmmer scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
+}
+
+fn run_c_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("models.hmm");
+    std::fs::copy(hmmdb, &hmm_copy).unwrap();
+    let press = Command::new(test_path("hmmer/src/hmmpress"))
+        .args(["-f", hmm_copy.to_str().unwrap()])
+        .output()
+        .expect("failed to run bundled C hmmpress");
+    assert!(
+        press.status.success(),
+        "bundled C hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let output = Command::new(test_path("hmmer/src/hmmscan"))
+        .args([
+            "--noali",
+            "--pfamtblout",
+            pfamtblout.to_str().unwrap(),
+            hmm_copy.to_str().unwrap(),
+            seqfile,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmscan");
+    assert!(
+        output.status.success(),
+        "bundled C hmmscan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
 }
 
 fn run_nhmmer_stdout(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
@@ -648,6 +895,19 @@ fn test_nhmmer_made1_dfamtblout_is_written() {
 }
 
 #[test]
+fn test_nhmmer_made1_dfamtblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/MADE1.hmm");
+    let seqdb = test_path("hmmer/tutorial/dna_target.fa");
+    let rust_rows = parse_dfamtbl_rows(&run_nhmmer_dfamtblout(&hmm, &seqdb));
+    let c_rows = parse_dfamtbl_rows(&run_c_nhmmer_dfamtblout(&hmm, &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "nhmmer MADE1 dfamtblout rows diverged from bundled C output"
+    );
+}
+
+#[test]
 fn test_nhmmer_made1_preserves_strand_and_coordinate_conventions() {
     let rust = run_nhmmer_tblout(
         &test_path("hmmer/tutorial/MADE1.hmm"),
@@ -683,6 +943,29 @@ fn test_nhmmer_made1_preserves_strand_and_coordinate_conventions() {
     assert_eq!(rows[0].ali_from, 302390);
     assert_eq!(rows[0].ali_to, 302466);
     assert_eq!(rows[0].strand, "+");
+}
+
+#[test]
+fn test_nhmmer_3box_preserves_c_longtarget_minimum_alignment_span() {
+    let hmm = test_path("hmmer/testsuite/3box.hmm");
+    let seqdb = test_path("hmmer/testsuite/3box-alitest.fa");
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer(&hmm, &seqdb, &["--dna", "--max", "-T=-100"]).1);
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout_with_args(
+        &hmm,
+        &seqdb,
+        &["--dna", "--max", "-T", "-100"],
+    ));
+
+    let span = |row: &NhmmerRow| row.ali_from.abs_diff(row.ali_to) + 1;
+    let rust_min = rust_rows.iter().map(span).min();
+    let c_min = c_rows.iter().map(span).min();
+
+    assert_eq!(c_min, Some(8), "bundled C fixture should exercise span 8");
+    assert_eq!(rust_min, Some(8), "Rust should preserve C's span 8 floor");
+    assert!(
+        rust_rows.iter().all(|row| span(row) >= 8),
+        "Rust nhmmer emitted a long-target alignment shorter than C's span floor: {rust_rows:?}"
+    );
 }
 
 #[test]
@@ -854,6 +1137,45 @@ fn test_nhmmscan_made1_dfamtblout_matches_bundled_c() {
 }
 
 #[test]
+fn test_hmmscan_fn3_tblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/fn3.hmm");
+    let seqdb = test_path("hmmer/tutorial/7LESS_DROME");
+    let rust_rows = parse_hmmsearch_rows(&run_hmmscan_tblout(&hmm, &seqdb));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmscan_tblout(&hmm, &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "hmmscan fn3 tblout rows diverged from bundled C output"
+    );
+}
+
+#[test]
+fn test_hmmscan_fn3_domtblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/fn3.hmm");
+    let seqdb = test_path("hmmer/tutorial/7LESS_DROME");
+    let rust_rows = parse_domtbl_rows(&run_hmmscan_domtblout(&hmm, &seqdb));
+    let c_rows = parse_domtbl_rows(&run_c_hmmscan_domtblout(&hmm, &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "hmmscan fn3 domtblout rows diverged from bundled C output"
+    );
+}
+
+#[test]
+fn test_hmmscan_fn3_pfamtblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/fn3.hmm");
+    let seqdb = test_path("hmmer/tutorial/7LESS_DROME");
+    let rust_rows = parse_pfamtbl_rows(&run_hmmscan_pfamtblout(&hmm, &seqdb));
+    let c_rows = parse_pfamtbl_rows(&run_c_hmmscan_pfamtblout(&hmm, &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "hmmscan fn3 pfamtblout rows diverged from bundled C output"
+    );
+}
+
+#[test]
 fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
     let golden_stdout =
         std::fs::read_to_string(test_path("tests/golden/nhmmer_ecori.stdout")).unwrap();
@@ -893,6 +1215,127 @@ fn test_nhmmer_ecori_requires_explicit_dna_and_runs_cleanly() {
 }
 
 #[test]
+fn test_hmmsearch_max_uses_c_like_thresholds_and_domains() {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domains.tbl");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "search",
+            "--max",
+            "--cpu",
+            "1",
+            "--noali",
+            "--domtblout",
+            domtblout.to_str().unwrap(),
+            &test_path("test_data/mapali/20aa-rebuilt.hmm"),
+            &test_path("test_data/gecco_cluster1_proteins.faa"),
+        ])
+        .output()
+        .expect("failed to run hmmer search --max");
+    assert!(
+        output.status.success(),
+        "hmmer search --max failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "Passed MSV filter:                         6  (1); expected 6.0 (1)",
+        "Passed bias filter:                        6  (1); expected 6.0 (1)",
+        "Passed Vit filter:                         6  (1); expected 6.0 (1)",
+        "Passed Fwd filter:                         6  (1); expected 6.0 (1)",
+        "Domain search space  (domZ):               4  [number of targets reported over threshold]",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected:?} missing from:\n{stdout}"
+        );
+    }
+
+    let rows: Vec<Vec<String>> = std::fs::read_to_string(domtblout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split_whitespace().map(str::to_string).collect())
+        .collect();
+    assert_eq!(rows.len(), 5, "hmmsearch --max domain row count drifted");
+    assert_eq!(rows[0][0], "CP157504.1_560");
+    assert_eq!(rows[0][15].as_str(), "5");
+    assert_eq!(rows[0][16].as_str(), "10");
+    assert_eq!(rows[0][17].as_str(), "46");
+    assert_eq!(rows[0][18].as_str(), "51");
+    assert_eq!(rows[4][0], "CP157504.1_562");
+}
+
+#[test]
+fn test_nhmmer_ecori_max_matches_c_no_hit_behavior() {
+    let (stdout, tbl) = run_nhmmer(
+        &test_path("test_data/mapali/ecori-rebuilt.hmm"),
+        &test_path("test_data/mapali/ecori-query.fa"),
+        &["--dna", "--max", "--cpu", "1", "--noali"],
+    );
+
+    assert!(
+        parse_nhmmer_rows(&tbl).is_empty(),
+        "nhmmer --max ecori fixture should report no hits"
+    );
+    for expected in [
+        "Residues passing SSV filter:              12  (1); expected (0.3)",
+        "Residues passing bias filter:             12  (1); expected (0.3)",
+        "Residues passing Vit filter:              12  (1); expected (1)",
+        "Residues passing Fwd filter:              12  (1); expected (1)",
+        "Total number of hits:                      0  (0)",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected:?} missing from:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_nhmmer_max_uses_longtarget_max_filter_thresholds() {
+    let (stdout, _tbl) = run_nhmmer(
+        &test_path("test_data/mapali/ecori-rebuilt.hmm"),
+        &test_path("test_data/mapali/ecori-query.fa"),
+        &["--dna", "--max", "--cpu", "1", "--noali"],
+    );
+
+    for expected in [
+        "# Max sensitivity mode:            on [all heuristic filters off]",
+        "Residues passing SSV filter:              12  (1); expected (0.3)",
+        "Residues passing bias filter:             12  (1); expected (0.3)",
+        "Residues passing Vit filter:              12  (1); expected (1)",
+        "Residues passing Fwd filter:              12  (1); expected (1)",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected:?} missing from:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_nhmmer_max_is_at_least_as_sensitive_as_default_on_tutorial() {
+    let (_default_stdout, default_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &["--cpu", "1", "--noali"],
+    );
+    let (_max_stdout, max_tbl) = run_nhmmer(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+        &["--max", "--cpu", "1", "--noali"],
+    );
+
+    let default_rows = parse_nhmmer_rows(&default_tbl);
+    let max_rows = parse_nhmmer_rows(&max_tbl);
+    assert!(
+        max_rows.len() >= default_rows.len(),
+        "nhmmer --max should not report fewer tutorial hits than default"
+    );
+}
+
+#[test]
 fn test_nhmmer_3box_exact_parity_bundle() {
     let golden_stdout =
         std::fs::read_to_string(test_path("tests/golden/nhmmer_3box.stdout")).unwrap();
@@ -928,6 +1371,53 @@ fn test_nhmmer_3box_exact_parity_bundle() {
         ),
         "nhmmer 3box tblout diverged from golden output"
     );
+}
+
+#[test]
+fn test_nhmmer_3box_dna_target_matches_c_block_window_ssv_counter() {
+    // Bundled C scans long targets in overlapping blocks by default. The overlap
+    // can duplicate SSV accounting even when reported hits and later counters
+    // are unchanged, so Rust mirrors that visible stdout counter.
+    let hmm = test_path("hmmer/testsuite/3box.hmm");
+    let seqdb = test_path("hmmer/tutorial/dna_target.fa");
+    let args = ["--dna", "--cpu", "1", "--noali"];
+    let (stdout, tbl) = run_nhmmer(&hmm, &seqdb, &args);
+    let (c_stdout, c_tbl) = run_c_nhmmer_with_args(&hmm, &seqdb, &args);
+
+    let rows = parse_nhmmer_rows(&tbl);
+    let c_rows = parse_nhmmer_rows(&c_tbl);
+    assert_eq!(rows, c_rows, "3box dna_target rows should match bundled C");
+    assert_eq!(
+        rows.len(),
+        2,
+        "3box dna_target fixture should keep two hits"
+    );
+    assert_eq!(rows[0].target, "humanchr1_frag");
+    assert_eq!((rows[0].ali_from, rows[0].ali_to), (178064, 178049));
+    assert_eq!((rows[1].ali_from, rows[1].ali_to), (96791, 96776));
+    assert!(
+        c_stdout
+            .contains("Residues passing SSV filter:           45479  (0.0689); expected (0.02)"),
+        "bundled C 3box dna_target SSV counter changed:\n{c_stdout}"
+    );
+    assert!(
+        stdout.contains("Residues passing SSV filter:           45479  (0.0689); expected (0.02)"),
+        "Rust 3box dna_target SSV counter diverged from bundled C:\n{stdout}"
+    );
+    for expected in [
+        "Residues passing bias filter:          21408  (0.0324); expected (0.02)",
+        "Residues passing Vit filter:            3154  (0.00478); expected (0.003)",
+        "Residues passing Fwd filter:             108  (0.000164); expected (3e-05)",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected:?} missing from:\n{stdout}"
+        );
+        assert!(
+            c_stdout.contains(expected),
+            "{expected:?} missing from bundled C output:\n{c_stdout}"
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! hmmlogo — generate data for HMM sequence logo visualization.
-//! Outputs per-position information content and emission probabilities.
+//! Outputs C-style residue-height and indel-value tables.
 
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
@@ -10,7 +10,9 @@ use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
 use hmmer_pure_rs::hmm::{II, MI};
 use hmmer_pure_rs::hmmfile;
+use hmmer_pure_rs::output::{fmt_fixed2, fmt_width6_3};
 use hmmer_pure_rs::profile;
+use hmmer_pure_rs::util::cmath::{c_log_f64, ESL_CONST_LOG2R};
 
 #[derive(Parser)]
 #[command(name = "hmmlogo", about = "Generate HMM logo data for visualization")]
@@ -88,17 +90,22 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let k = abc.k;
 
     if mode != LogoMode::Score {
-        writeln!(out, "max expected height = {:.2}", max_height(&bg)).unwrap();
+        writeln!(
+            out,
+            "max expected height = {}",
+            fmt_fixed2(max_height(&bg) as f64)
+        )
+        .unwrap();
     }
     writeln!(out, "Residue heights").unwrap();
     for node in 1..=hmm.m {
         let (relent, heights) = residue_heights(hmm, &bg, node, mode);
         write!(out, "{}: ", node).unwrap();
         for height in heights.iter().take(k) {
-            write!(out, "{:6.3} ", height).unwrap();
+            write!(out, "{} ", fmt_width6_3(*height as f64)).unwrap();
         }
         if mode != LogoMode::Score {
-            write!(out, " ({:6.3})", relent).unwrap();
+            write!(out, " ({})", fmt_width6_3(relent as f64)).unwrap();
         }
         writeln!(out).unwrap();
     }
@@ -116,8 +123,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             };
             writeln!(
                 out,
-                "{}: {:6.3} {:6.3} {:6.3}",
-                node, insert_p, insert_exp_l, occupancy[node]
+                "{}: {} {} {}",
+                node,
+                fmt_width6_3(insert_p as f64),
+                fmt_width6_3(insert_exp_l as f64),
+                fmt_width6_3(occupancy[node] as f64)
             )
             .unwrap();
         }
@@ -130,9 +140,9 @@ fn read_hmms_maybe_stdin(
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_first_hmm(BufReader::new(stdin.lock())).map(|hmm| vec![hmm])
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_first_hmm_file_auto(path).map(|hmm| vec![hmm])
     }
 }
 
@@ -142,7 +152,7 @@ fn max_height(bg: &Bg) -> f32 {
             .copied()
             .filter(|p| *p > 0.0)
             .fold(1.0_f32, f32::min);
-    (1.0 / min_p).log2()
+    (c_log_f64(1.0 / min_p as f64) * ESL_CONST_LOG2R) as f32
 }
 
 fn residue_heights(
@@ -158,7 +168,7 @@ fn residue_heights(
     for x in 0..k {
         let p = hmm.mat[node][x];
         if p > 0.0 && bg.f[x] > 0.0 {
-            let logodds = (p / bg.f[x]).log2();
+            let logodds = (c_log_f64((p / bg.f[x]) as f64) * ESL_CONST_LOG2R) as f32;
             relent += p * logodds;
             if logodds > 0.0 {
                 above_bg_prob_sum += p;
@@ -172,7 +182,7 @@ fn residue_heights(
         if p <= 0.0 || bg.f[x] <= 0.0 {
             continue;
         }
-        let logodds = (p / bg.f[x]).log2();
+        let logodds = (c_log_f64((p / bg.f[x]) as f64) * ESL_CONST_LOG2R) as f32;
         *height = match mode {
             LogoMode::RelentAll => relent * p,
             LogoMode::RelentAboveBg => {

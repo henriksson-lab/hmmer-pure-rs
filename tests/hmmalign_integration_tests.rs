@@ -192,6 +192,28 @@ fn hmmalign_20aa_preserves_sequences_and_stockholm_shape() {
 }
 
 #[test]
+fn hmmalign_preserves_fasta_descriptions_in_stockholm_gs_lines() {
+    let output = run_hmmalign_with_args(
+        &test_path("hmmer/tutorial/globins4.hmm"),
+        &test_path("hmmer/tutorial/HBB_HUMAN"),
+        &["--informat", "fasta"],
+    );
+
+    assert!(output.contains("#=GS HBB_HUMAN DE Human beta hemoglobin.\n"));
+}
+
+#[test]
+fn hmmalign_preserves_sequence_accessions_in_stockholm_gs_lines() {
+    let output = run_hmmalign(
+        &test_path("hmmer/tutorial/Pkinase.hmm"),
+        &test_path("hmmer/tutorial/7LESS_DROME"),
+    );
+
+    assert!(output.contains("#=GS 7LESS_DROME AC P13368\n"));
+    assert!(output.contains("#=GS 7LESS_DROME DE RecName: Full=Protein sevenless;"));
+}
+
+#[test]
 fn hmmalign_20aa_matches_exact_stockholm_output() {
     let output = run_hmmalign(
         &test_path("hmmer/testsuite/20aa.hmm"),
@@ -376,6 +398,29 @@ fn hmmalign_a2m_matches_bundled_c_on_20aa_fixture() {
         &test_path("hmmer/testsuite/20aa.hmm"),
         &test_path("hmmer/testsuite/20aa-alitest.fa"),
         &["--outformat", "A2M"],
+    );
+
+    assert_eq!(
+        String::from_utf8(rust.stdout).unwrap(),
+        String::from_utf8(c.stdout).unwrap()
+    );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
+fn hmmalign_psiblast_matches_bundled_c_on_20aa_fixture() {
+    let rust = run_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--outformat", "PSIBLAST"],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("hmmer/testsuite/20aa.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--outformat", "PSIBLAST"],
     );
 
     assert_eq!(

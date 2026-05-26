@@ -6,21 +6,7 @@ use std::arch::x86_64::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
-
-#[link(name = "m")]
-unsafe extern "C" {
-    /// libm `log(double)`; bound here so totscale accumulation matches the C
-    /// codebase bit-for-bit (Rust's intrinsic `f64::ln` is not guaranteed to).
-    #[link_name = "log"]
-    fn c_log(x: f64) -> f64;
-}
-
-/// Thin Rust wrapper around libm `log(double)` used to bit-match the C codebase's
-/// totscale accumulation (Rust's `f64::ln` is not guaranteed identical).
-#[inline]
-fn c_log_f64(x: f64) -> f64 {
-    unsafe { c_log(x) }
-}
+use crate::util::cmath::c_log_f64;
 
 /// Tracehash helper: emits quantized per-state sums (M/D) of the striped DP row
 /// for rows 18/19/20. Mirrors `trace_forward_engine_row_sums_q1e5` in fwdback.c.
@@ -886,7 +872,7 @@ pub unsafe fn forward_parser_offset(
                 dmo!(q) = _mm_mul_ps(dmo!(q), scale_v);
                 imo!(q) = _mm_mul_ps(imo!(q), scale_v);
             }
-            totscale += xe.ln();
+            totscale += c_log_f64(xe as f64) as f32;
             xe = 1.0;
         }
     }
@@ -896,7 +882,7 @@ pub unsafe fn forward_parser_offset(
         return f32::NEG_INFINITY; // error conditions
     }
 
-    totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
+    totscale + c_log_f64((xc * om.xf[P7O_C][P7O_MOVE]) as f64) as f32
 }
 
 /// Forward parser writing specials (xE/N/J/B/C), cumulative f64 scale and

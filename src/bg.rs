@@ -2,6 +2,9 @@
 //! Direct port of p7_bg.c.
 
 use crate::alphabet::{Alphabet, AlphabetType, Dsq};
+use crate::errors::{HmmerError, HmmerResult};
+use crate::util::cmath::{c_log_f64, c_log_to_f32, c_logf_to_f32};
+use std::path::Path;
 
 /// Default amino acid background frequencies from Swiss-Prot 50.8 (Oct 2006).
 /// Order: ACDEFGHIKLMNPQRSTVWY (Easel canonical amino acid order).
@@ -92,6 +95,144 @@ impl Bg {
         }
     }
 
+    /// Allocate a P7_BG null model with uniform residue frequencies.
+    ///
+    /// Counterpart to C's `p7_bg_CreateUniform()`. This is primarily used by
+    /// experimental calibration/simulation commands that deliberately avoid
+    /// HMMER's default amino-acid background composition.
+    pub fn new_uniform(abc: &Alphabet) -> Self {
+        let mut bg = Self::new(abc);
+        let p = 1.0 / abc.k as f32;
+        bg.f.fill(p);
+        bg.fhmm_e0 = bg.f.clone();
+        bg.fhmm_e1 = bg.f.clone();
+        bg
+    }
+
+    /// Read replacement residue background frequencies from a C HMMER
+    /// `p7_bg_Read()` style file.
+    pub fn read_file<P: AsRef<Path>>(&mut self, abc: &Alphabet, path: P) -> HmmerResult<()> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HmmerError::NotFound(format!(
+                    "couldn't open bg file  {} for reading",
+                    path.display()
+                ))
+            } else {
+                HmmerError::Io(e)
+            }
+        })?;
+        let mut records = Vec::new();
+        for (line_idx, raw_line) in text.lines().enumerate() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            records.push((line_idx + 1, line.split_whitespace().collect::<Vec<_>>()));
+        }
+        let Some((line_no, first)) = records.first() else {
+            return Err(HmmerError::Format(format!(
+                "premature end of file [line 0 of bgfile {}]",
+                path.display()
+            )));
+        };
+        if first.len() != 1 {
+            return Err(HmmerError::Format(format!(
+                "extra unexpected data found [line {} of bgfile {}]",
+                line_no,
+                path.display()
+            )));
+        }
+        let file_type = parse_bg_alphabet(first[0]).ok_or_else(|| {
+            HmmerError::Format(format!(
+                "expected alphabet type but saw \"{}\" [line {} of bgfile {}]",
+                first[0],
+                line_no,
+                path.display()
+            ))
+        })?;
+        if file_type != abc.abc_type {
+            return Err(HmmerError::Format(format!(
+                "bg file's alphabet is {}; expected {} [line {}, {}]",
+                first[0],
+                bg_alphabet_name(abc.abc_type),
+                line_no,
+                path.display()
+            )));
+        }
+
+        let mut fq = vec![-1.0_f32; abc.k];
+        let mut n = 0usize;
+        for (line_no, fields) in records.iter().skip(1) {
+            if fields.len() != 2 {
+                return Err(HmmerError::Format(format!(
+                    "extra unexpected data found [line {} of bgfile {}]",
+                    line_no,
+                    path.display()
+                )));
+            }
+            let residue = fields[0].as_bytes();
+            if residue.len() != 1 {
+                return Err(HmmerError::Format(format!(
+                    "expected to parse a residue letter; saw {} [line {} of bgfile {}]",
+                    fields[0],
+                    line_no,
+                    path.display()
+                )));
+            }
+            let x = abc.digitize_symbol(residue[0]);
+            if !abc.is_canonical(x) {
+                return Err(HmmerError::Format(format!(
+                    "expected to parse a residue letter; saw {} [line {} of bgfile {}]",
+                    fields[0],
+                    line_no,
+                    path.display()
+                )));
+            }
+            let x = x as usize;
+            if fq[x] != -1.0 {
+                return Err(HmmerError::Format(format!(
+                    "already parsed probability of {} [line {} of bgfile {}]",
+                    abc.sym[x] as char,
+                    line_no,
+                    path.display()
+                )));
+            }
+            fq[x] = fields[1].parse::<f32>().map_err(|_| {
+                HmmerError::Format(format!(
+                    "expected a probability, saw {} [line {} of bgfile {}]",
+                    fields[1],
+                    line_no,
+                    path.display()
+                ))
+            })?;
+            n += 1;
+        }
+        if n != abc.k {
+            return Err(HmmerError::Format(format!(
+                "expected {} residue frequencies, but found {} in bgfile {}",
+                abc.k,
+                n,
+                path.display()
+            )));
+        }
+        let sum: f32 = fq.iter().sum();
+        if (sum - 1.0).abs() > 0.001 {
+            return Err(HmmerError::Format(format!(
+                "residue frequencies do not sum to 1.0 in bgfile {}",
+                path.display()
+            )));
+        }
+        for f in &mut fq {
+            *f /= sum;
+        }
+        self.f = fq;
+        self.fhmm_e0 = self.f.clone();
+        self.fhmm_e1 = self.f.clone();
+        Ok(())
+    }
+
     /// Set the geometric null-model length distribution to a mean of `l` residues.
     /// Counterpart to C's `p7_bg_SetLength()`.
     pub fn set_length(&mut self, l: usize) {
@@ -106,7 +247,7 @@ impl Bg {
     /// profile scoring, only the null model transitions contribute:
     /// `L*log(p1) + log(1-p1)`. Counterpart to C's `p7_bg_NullOne()`.
     pub fn null_one(&self, l: usize) -> f32 {
-        (l as f64 * (self.p1 as f64).ln() + (1.0_f64 - self.p1 as f64).ln()) as f32
+        (l as f64 * c_log_f64(self.p1 as f64) + c_log_f64(1.0_f64 - self.p1 as f64)) as f32
     }
 
     /// Configure the two-state bias-filter HMM from a model's residue composition.
@@ -119,8 +260,11 @@ impl Bg {
     pub fn set_filter(&mut self, m: usize, compo: &[f32]) {
         let l1 = m as f32 / 8.0; // expected length in biased state
 
-        // State 0: background (iid). Preserve the current target-length
-        // configuration; C callers reset this through p7_bg_SetLength().
+        // State 0: background (iid). C p7_bg_SetFilter() resets this to the
+        // default expected filter length before any later SetLength() call.
+        let l0 = 400.0_f32;
+        self.fhmm_t[0][0] = l0 / (l0 + 1.0);
+        self.fhmm_t[0][1] = 1.0 / (l0 + 1.0);
         self.fhmm_t[0][2] = 1.0;
 
         // State 1: biased composition
@@ -182,7 +326,7 @@ impl Bg {
     pub fn filter_score(&self, dsq: &[Dsq], l: usize) -> f32 {
         if l == 0 {
             let term = self.fhmm_pi[0] * self.fhmm_t[0][2] + self.fhmm_pi[1] * self.fhmm_t[1][2];
-            return term.ln() + (1.0 - self.p1).ln();
+            return c_log_to_f32(term as f64) + c_logf_to_f32(1.0 - self.p1);
         }
 
         let (e0, e1) = self.filter_emissions(dsq[1] as usize);
@@ -190,7 +334,7 @@ impl Bg {
         let mut max = dp[0].max(dp[1]);
         dp[0] /= max;
         dp[1] /= max;
-        let mut nullsc = (max as f64).ln() as f32;
+        let mut nullsc = c_log_to_f32(max as f64);
 
         for &x in dsq.iter().take(l + 1).skip(2) {
             let prev = dp;
@@ -200,14 +344,14 @@ impl Bg {
             max = dp[0].max(dp[1]);
             dp[0] /= max;
             dp[1] /= max;
-            nullsc += (max as f64).ln() as f32;
+            nullsc += c_log_to_f32(max as f64);
         }
 
         let term = dp[0] * self.fhmm_t[0][2] + dp[1] * self.fhmm_t[1][2];
-        nullsc += (term as f64).ln() as f32;
+        nullsc += c_log_to_f32(term as f64);
 
         // Apply length distribution
-        nullsc + l as f32 * self.p1.ln() + (1.0 - self.p1).ln()
+        nullsc + l as f32 * c_logf_to_f32(self.p1) + c_logf_to_f32(1.0 - self.p1)
     }
 
     /// Look up state-0 and state-1 filter emission odds for digital code `x`.
@@ -236,6 +380,27 @@ impl Bg {
     }
 }
 
+fn parse_bg_alphabet(token: &str) -> Option<AlphabetType> {
+    if token.eq_ignore_ascii_case("dna") {
+        Some(AlphabetType::Dna)
+    } else if token.eq_ignore_ascii_case("rna") {
+        Some(AlphabetType::Rna)
+    } else if token.eq_ignore_ascii_case("amino") {
+        Some(AlphabetType::Amino)
+    } else {
+        None
+    }
+}
+
+fn bg_alphabet_name(abc_type: AlphabetType) -> &'static str {
+    match abc_type {
+        AlphabetType::Dna => "DNA",
+        AlphabetType::Rna => "RNA",
+        AlphabetType::Amino => "amino",
+        AlphabetType::Unknown => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,13 +425,27 @@ mod tests {
     }
 
     #[test]
+    fn set_filter_resets_state0_to_default_length() {
+        let abc = Alphabet::amino();
+        let mut bg = Bg::new(&abc);
+        bg.set_length(100);
+        let compo = bg.f.clone();
+
+        bg.set_filter(80, &compo);
+
+        assert!((bg.fhmm_t[0][0] - 400.0 / 401.0).abs() < 1e-6);
+        assert!((bg.fhmm_t[0][1] - 1.0 / 401.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_bg_null_one() {
         let abc = Alphabet::amino();
         let mut bg = Bg::new(&abc);
         bg.set_length(100);
         let sc = bg.null_one(100);
         // Score should be L * ln(p1) + ln(1-p1)
-        let expected = 100.0 * bg.p1.ln() + (1.0 - bg.p1).ln();
+        let expected = (100.0 * crate::util::cmath::c_log_f64(bg.p1 as f64)
+            + crate::util::cmath::c_log_f64((1.0 - bg.p1) as f64)) as f32;
         assert!((sc - expected).abs() < 1e-6);
     }
 }

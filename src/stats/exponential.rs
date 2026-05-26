@@ -1,6 +1,8 @@
 //! Exponential distribution functions.
 //! Direct port of Easel's esl_exponential.c.
 
+use crate::util::cmath::c_exp_f64;
+
 /// Survivor function P(X > x), i.e. 1 - CDF, the right-tail probability mass.
 ///
 /// Given offset `mu` and decay parameter `lambda`. Returns 1.0 for x < mu;
@@ -9,7 +11,7 @@ pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 1.0;
     }
-    (-lambda * (x - mu)).exp()
+    c_exp_f64(-lambda * (x - mu))
 }
 
 /// Log survivor function log P(X > x), i.e. log(1 - CDF).
@@ -30,7 +32,7 @@ pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     if x < mu {
         return 0.0;
     }
-    lambda * (-lambda * (x - mu)).exp()
+    lambda * c_exp_f64(-lambda * (x - mu))
 }
 
 /// Cumulative distribution function P(X <= x) for the exponential.
@@ -45,7 +47,7 @@ pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
     if y < 5e-9 {
         y
     } else {
-        1.0 - (-y).exp()
+        1.0 - c_exp_f64(-y)
     }
 }
 
@@ -68,7 +70,7 @@ mod tests {
     #[test]
     fn test_surv_basic() {
         assert!((surv(0.0, 0.0, 1.0) - 1.0).abs() < 1e-15);
-        assert!((surv(1.0, 0.0, 1.0) - (-1.0_f64).exp()).abs() < 1e-15);
+        assert!((surv(1.0, 0.0, 1.0) - c_exp_f64(-1.0)).abs() < 1e-15);
         assert_eq!(surv(-1.0, 0.0, 1.0), 1.0);
     }
 

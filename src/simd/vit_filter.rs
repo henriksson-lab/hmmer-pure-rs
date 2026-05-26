@@ -6,6 +6,7 @@ use std::arch::x86_64::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
+use crate::util::cmath::ESL_CONST_LOG2;
 
 /// Result of Viterbi filter.
 pub enum VitResult {
@@ -233,8 +234,8 @@ pub unsafe fn viterbi_filter_longtarget(
         om.evparam[crate::hmm::P7_VMU] as f64,
         om.evparam[crate::hmm::P7_VLAMBDA] as f64,
     );
-    let ln2 = std::f64::consts::LN_2;
-    let raw = (filtersc as f64 + ln2 * inv_p + 3.0) * om.scale_w as f64;
+    let inv_p_f32 = inv_p as f32;
+    let raw = (filtersc as f64 + ESL_CONST_LOG2 * inv_p_f32 as f64 + 3.0) * om.scale_w as f64;
     let sc_thresh: i32 =
         raw.ceil() as i32 - om.xw[P7O_E][P7O_MOVE] as i32 - om.xw[P7O_C][P7O_MOVE] as i32
             + om.base_w as i32;

@@ -15,18 +15,8 @@ use crate::profile::*;
 use crate::spensemble::{self, ClusterParams, SegmentPair};
 use crate::tophits::{AliDisplay, Domain};
 use crate::trace::{State, Trace};
+use crate::util::cmath::{c_log_f64, c_logf_to_f32, ESL_CONST_LOG2, ESL_CONST_LOG2R};
 use crate::util::random::MersenneTwister;
-
-unsafe extern "C" {
-    #[link_name = "logf"]
-    fn c_logf(x: f32) -> f32;
-}
-
-/// Bit-exact wrapper around libm `logf` for parity with the C reference.
-#[inline]
-fn c_logf_to_f32(x: f32) -> f32 {
-    unsafe { c_logf(x) }
-}
 
 // Thresholds matching C's p7_domaindef defaults
 const RT1: f32 = 0.25; // mocc threshold to trigger a domain region
@@ -104,6 +94,12 @@ pub(crate) struct DomainSimdScratch {
     exp_i: Vec<f32>,
     pp_gmx: Gmx,
     oa_gmx: Gmx,
+    trim_fwd_pmx: crate::simd::probmx::ProbMx,
+    trim_bck_pmx: crate::simd::probmx::ProbMx,
+    trim_pp_pmx: crate::simd::probmx::ProbMx,
+    trim_oa_pmx: crate::simd::probmx::ProbMx,
+    trim_pp_gmx: Gmx,
+    trim_sub_dsq: Vec<Dsq>,
     btot: Vec<f32>,
     etot: Vec<f32>,
     mocc: Vec<f32>,
@@ -127,6 +123,12 @@ impl DomainSimdScratch {
             exp_i: Vec::new(),
             pp_gmx: Gmx::new(0, 0),
             oa_gmx: Gmx::new(0, 0),
+            trim_fwd_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
+            trim_bck_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
+            trim_pp_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
+            trim_oa_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
+            trim_pp_gmx: Gmx::new(0, 0),
+            trim_sub_dsq: Vec::new(),
             btot: Vec::new(),
             etot: Vec::new(),
             mocc: Vec::new(),
@@ -136,6 +138,10 @@ impl DomainSimdScratch {
 
 #[cfg(not(target_arch = "x86_64"))]
 pub(crate) struct DomainSimdScratch {
+    fwd_gmx: Gmx,
+    bck_gmx: Gmx,
+    env_fwd_gmx: Gmx,
+    env_bck_gmx: Gmx,
     pp_gmx: Gmx,
     oa_gmx: Gmx,
 }
@@ -145,6 +151,10 @@ impl DomainSimdScratch {
     /// Allocate a minimal scratch bundle for the non-x86 (generic) path.
     pub(crate) fn new() -> Self {
         Self {
+            fwd_gmx: Gmx::new(0, 0),
+            bck_gmx: Gmx::new(0, 0),
+            env_fwd_gmx: Gmx::new(0, 0),
+            env_bck_gmx: Gmx::new(0, 0),
             pp_gmx: Gmx::new(0, 0),
             oa_gmx: Gmx::new(0, 0),
         }
@@ -1381,7 +1391,7 @@ fn trace_pmx_forward_scale_events_summary(
             }
             last = pos;
             count += 1;
-            sum += pmx.row_scale[pos].ln();
+            sum += c_logf_to_f32(pmx.row_scale[pos]);
         }
     }
     let mut th = tracehash::th_call!("simd_forward_scale_events_summary");
@@ -1664,8 +1674,8 @@ fn null2_ratio_for_code(null2_arr: &[f32], abc: &Alphabet, x: usize) -> f32 {
 ///   - Optimal-accuracy traceback for the alignment;
 ///   - Null2 bias correction (skipped when `null2_is_done`).
 ///
-/// SIMD path (when available) reuses scratch buffers from `simd_scratch`;
-/// the generic fallback uses Gmx matrices. When `long_target` is set, the
+/// SIMD path (when available) reuses the caller-owned scratch buffers;
+/// the non-SIMD fallback uses Gmx matrices. When `long_target` is set, the
 /// nhmmer-specific reparameterization (envelope-local background, rest
 /// length set to envelope length) is applied to the optimized profile,
 /// mirroring C `reparameterize_model()`.
@@ -1687,7 +1697,7 @@ fn score_domain_envelope(
     null2_is_done: bool,
     _match_odds: Option<&[f32]>,
     optacc_deltas: &OptAccTDelta,
-    mut simd_scratch: Option<&mut DomainSimdScratch>,
+    simd_scratch: &mut DomainSimdScratch,
     make_alignment: bool,
     make_alignment_display: bool,
     long_target: bool,
@@ -1705,7 +1715,6 @@ fn score_domain_envelope(
 
     // Forward score for the envelope.
     let env_fwd_sc;
-    let mut simd_null2_arr: Option<Vec<f32>> = None;
     let mut simd_null2_scratch: Option<&[f32]> = None;
     let mut env_pp_storage: Option<Gmx>;
     let mut env_pp_ptr: *mut Gmx = std::ptr::null_mut();
@@ -1718,13 +1727,8 @@ fn score_domain_envelope(
     #[cfg(target_arch = "x86_64")]
     let mut pre_trim_local_bg_f: Option<Vec<f32>> = None;
     if make_alignment {
-        if let Some(ref mut scratch) = simd_scratch {
-            scratch.pp_gmx.grow_to_zeroed(gm.m, env_len);
-            env_pp_ptr = &mut scratch.pp_gmx;
-        } else {
-            env_pp_storage = Some(Gmx::new(gm.m, env_len));
-            env_pp_ptr = env_pp_storage.as_mut().unwrap();
-        }
+        simd_scratch.pp_gmx.grow_to_zeroed(gm.m, env_len);
+        env_pp_ptr = &mut simd_scratch.pp_gmx;
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1792,10 +1796,11 @@ fn score_domain_envelope(
                 use crate::simd::oprofile::{P7O_C, P7O_J, P7O_LOOP, P7O_N};
                 use crate::simd::probmx::{
                     p_decoding_to_gmx, p_null2_odds_from_omx_expectation_reuse,
-                    p_null2_odds_from_posteriors_reuse, ProbMx,
+                    p_null2_odds_from_posteriors_reuse,
                 };
 
-                if let Some(ref mut scratch) = simd_scratch {
+                {
+                    let scratch = &mut *simd_scratch;
                     let canonical_env =
                         is_canonical_window(dsq, dsq_offset, env_len, env_om.abc_kp);
                     scratch.fwd_pmx.resize_full(gm.m, env_len);
@@ -1929,70 +1934,10 @@ fn score_domain_envelope(
                         }
                         simd_null2_scratch = Some(&scratch.null2);
                     }
-                } else {
-                    let mut fwd_pmx = ProbMx::new_full(gm.m, env_len);
-                    env_fwd_sc = unsafe {
-                        crate::simd::fwd_filter::forward_parser_pmx_offset(
-                            dsq,
-                            dsq_offset,
-                            env_len,
-                            &env_om,
-                            &mut fwd_pmx,
-                        )
-                    };
-                    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
-                    trace_score_domain_forward_anchors_q1e5(
-                        seq_len,
-                        gm.m,
-                        env_len,
-                        ienv,
-                        jenv,
-                        null2_is_done,
-                        &dsq[ienv..=jenv],
-                        env_om,
-                        &fwd_pmx,
-                    );
-                    let mut bck_pmx = ProbMx::new_full(gm.m, env_len);
-                    unsafe {
-                        crate::simd::bck_filter::backward_parser_pmx_offset_with_fwd_scales(
-                            dsq,
-                            dsq_offset,
-                            env_len,
-                            &env_om,
-                            env_fwd_sc,
-                            &mut bck_pmx,
-                            &fwd_pmx.row_scale,
-                        );
-                    }
-                    let njc_loop = [
-                        env_om.xf[P7O_N][P7O_LOOP],
-                        env_om.xf[P7O_J][P7O_LOOP],
-                        env_om.xf[P7O_C][P7O_LOOP],
-                    ];
-                    if make_alignment {
-                        p_decoding_to_gmx(&fwd_pmx, &bck_pmx, gm.m, njc_loop, unsafe {
-                            &mut *env_pp_ptr
-                        });
-                    }
-                    if !null2_is_done {
-                        let mut null2 = Vec::new();
-                        let mut exp_m = Vec::new();
-                        let mut exp_i = Vec::new();
-                        p_null2_odds_from_omx_expectation_reuse(
-                            &fwd_pmx,
-                            &bck_pmx,
-                            gm.abc_k,
-                            &env_om.rfv,
-                            njc_loop,
-                            &mut null2,
-                            &mut exp_m,
-                            &mut exp_i,
-                        );
-                        simd_null2_arr = Some(null2);
-                    }
                 }
             } else {
-                if let Some(ref mut scratch) = simd_scratch {
+                {
+                    let scratch = &mut *simd_scratch;
                     scratch.fwd_pmx.resize_full(gm.m, env_len);
                     env_fwd_sc = unsafe {
                         crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
@@ -2016,58 +1961,55 @@ fn score_domain_envelope(
                         env_om,
                         &scratch.fwd_pmx,
                     );
-                } else {
-                    let mut fwd_pmx = crate::simd::probmx::ProbMx::new_full(gm.m, env_len);
-                    env_fwd_sc = unsafe {
-                        crate::simd::fwd_filter::forward_parser_pmx_offset(
-                            dsq,
-                            dsq_offset,
-                            env_len,
-                            &env_om,
-                            &mut fwd_pmx,
-                        )
-                    };
-                    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
-                    trace_score_domain_forward_anchors_q1e5(
-                        seq_len,
-                        gm.m,
-                        env_len,
-                        ienv,
-                        jenv,
-                        null2_is_done,
-                        &dsq[ienv..=jenv],
-                        env_om,
-                        &fwd_pmx,
-                    );
                 }
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
         unreachable!();
     } else {
-        let mut gx = Gmx::new(gm.m, env_len);
-        env_fwd_sc = g_forward(&sub_dsq, env_len, env_gm, &mut gx);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut gx = Gmx::new(gm.m, env_len);
+            env_fwd_sc = g_forward(&sub_dsq, env_len, env_gm, &mut gx);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            simd_scratch.env_fwd_gmx.grow_to(gm.m, env_len);
+            env_fwd_sc = g_forward(&sub_dsq, env_len, env_gm, &mut simd_scratch.env_fwd_gmx);
+        }
     }
 
     // Posterior decoding for PP annotation and null2. C HMMER fills n2sc[]
     // from these per-envelope posteriors for simple regions.
-    if env_pp_ptr.is_null()
-        && simd_null2_arr.is_none()
-        && simd_null2_scratch.is_none()
-        && !null2_is_done
-    {
+    if env_pp_ptr.is_null() && simd_null2_scratch.is_none() && !null2_is_done {
         env_pp_storage = Some(Gmx::new(gm.m, env_len));
         env_pp_ptr = env_pp_storage.as_mut().unwrap();
     }
-    let needs_generic_pp = make_alignment && cfg!(not(target_arch = "x86_64"))
+    let needs_generic_pp = make_alignment && !use_simd
         || make_alignment_display
-        || simd_null2_arr.is_none() && simd_null2_scratch.is_none() && !null2_is_done;
+        || simd_null2_scratch.is_none() && !null2_is_done;
     if !env_pp_ptr.is_null() && unsafe { (*env_pp_ptr).l == 0 } && needs_generic_pp {
-        let mut gx_fwd = Gmx::new(gm.m, env_len);
-        g_forward(&sub_dsq, env_len, env_gm, &mut gx_fwd);
-        let mut gx_bck = Gmx::new(gm.m, env_len);
-        g_backward(&sub_dsq, env_len, env_gm, &mut gx_bck);
-        g_decoding(env_gm, &gx_fwd, &gx_bck, unsafe { &mut *env_pp_ptr });
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut gx_fwd = Gmx::new(gm.m, env_len);
+            g_forward(&sub_dsq, env_len, env_gm, &mut gx_fwd);
+            let mut gx_bck = Gmx::new(gm.m, env_len);
+            g_backward(&sub_dsq, env_len, env_gm, &mut gx_bck);
+            g_decoding(env_gm, &gx_fwd, &gx_bck, unsafe { &mut *env_pp_ptr });
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            simd_scratch.env_fwd_gmx.grow_to(gm.m, env_len);
+            g_forward(&sub_dsq, env_len, env_gm, &mut simd_scratch.env_fwd_gmx);
+            simd_scratch.env_bck_gmx.grow_to(gm.m, env_len);
+            g_backward(&sub_dsq, env_len, env_gm, &mut simd_scratch.env_bck_gmx);
+            g_decoding(
+                env_gm,
+                &simd_scratch.env_fwd_gmx,
+                &simd_scratch.env_bck_gmx,
+                unsafe { &mut *env_pp_ptr },
+            );
+        }
     }
     let mut dom_correction = 0.0_f32;
     if null2_is_done {
@@ -2089,9 +2031,8 @@ fn score_domain_envelope(
                 &mut dom_correction,
             );
         } else {
-            let null2_arr = simd_null2_arr.unwrap_or_else(|| {
-                generic_null2::null2_by_expectation(env_gm, unsafe { &*env_pp_ptr }, 1, env_len)
-            });
+            let null2_arr =
+                generic_null2::null2_by_expectation(env_gm, unsafe { &*env_pp_ptr }, 1, env_len);
             add_null2_correction(
                 &null2_arr,
                 &abc,
@@ -2107,6 +2048,8 @@ fn score_domain_envelope(
     let mut oasc = 0.0_f32;
     let ad = if make_alignment {
         let mut simd_ad: Option<AliDisplay> = None;
+        let env_emission_odds =
+            |k: usize, x: usize| env_om.and_then(|om| om.fwd_emission_odds(k, x));
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -2116,13 +2059,14 @@ fn score_domain_envelope(
                 oasc = simd_oasc.unwrap_or(0.0);
                 let env_pp = unsafe { &*env_pp_ptr };
                 let abc = Alphabet::new(hmm.abc_type);
-                simd_ad = crate::trace::alignment_display_with_pp_bg(
+                simd_ad = crate::trace::alignment_display_with_pp_emission_odds(
                     &tr,
                     &sub_dsq,
                     hmm,
                     &abc,
                     Some(env_pp),
                     pre_trim_local_bg_f.as_deref(),
+                    Some(&env_emission_odds),
                 )
                 .map(|mut ad| {
                     ad.sqfrom += ienv - 1;
@@ -2165,78 +2109,41 @@ fn score_domain_envelope(
             simd_ad
         } else {
             let env_pp = unsafe { &*env_pp_ptr };
-            if let Some(ref mut scratch) = simd_scratch {
-                scratch.oa_gmx.grow_to_zeroed(gm.m, env_len);
+            {
+                simd_scratch.oa_gmx.grow_to_zeroed(gm.m, env_len);
                 oasc = g_optimal_accuracy_with_deltas(
                     env_gm,
                     env_pp,
-                    &mut scratch.oa_gmx,
+                    &mut simd_scratch.oa_gmx,
                     optacc_deltas,
                 );
-                let tr = g_oa_trace(env_gm, env_pp, &scratch.oa_gmx);
+                let tr = g_oa_trace(env_gm, env_pp, &simd_scratch.oa_gmx);
                 if make_alignment_display {
                     let abc = Alphabet::new(hmm.abc_type);
-                    crate::trace::alignment_display_with_pp(&tr, &sub_dsq, hmm, &abc, Some(env_pp))
-                        .map(|mut ad| {
-                            ad.sqfrom += ienv - 1;
-                            ad.sqto += ienv - 1;
-                            AliDisplay {
-                                model: ad.model,
-                                mline: ad.mline,
-                                aseq: ad.aseq,
-                                hmmfrom: ad.hmmfrom,
-                                hmmto: ad.hmmto,
-                                sqfrom: ad.sqfrom,
-                                sqto: ad.sqto,
-                                ppline: ad.ppline,
-                                rfline: ad.rfline,
-                            }
-                        })
-                } else {
-                    crate::trace::alignment_coords(&tr).map(
-                        |(hmmfrom, hmmto, mut sqfrom, mut sqto)| {
-                            if sqfrom > 0 {
-                                sqfrom += ienv - 1;
-                            }
-                            if sqto > 0 {
-                                sqto += ienv - 1;
-                            }
-                            AliDisplay {
-                                model: String::new(),
-                                mline: String::new(),
-                                aseq: String::new(),
-                                hmmfrom,
-                                hmmto,
-                                sqfrom,
-                                sqto,
-                                ppline: String::new(),
-                                rfline: String::new(),
-                            }
-                        },
+                    crate::trace::alignment_display_with_pp_emission_odds(
+                        &tr,
+                        &sub_dsq,
+                        hmm,
+                        &abc,
+                        Some(env_pp),
+                        None,
+                        Some(&env_emission_odds),
                     )
-                }
-            } else {
-                let mut gx_oa = Gmx::new(gm.m, env_len);
-                oasc = g_optimal_accuracy_with_deltas(env_gm, env_pp, &mut gx_oa, optacc_deltas);
-                let tr = g_oa_trace(env_gm, env_pp, &gx_oa);
-                if make_alignment_display {
-                    let abc = Alphabet::new(hmm.abc_type);
-                    crate::trace::alignment_display_with_pp(&tr, &sub_dsq, hmm, &abc, Some(env_pp))
-                        .map(|mut ad| {
-                            ad.sqfrom += ienv - 1;
-                            ad.sqto += ienv - 1;
-                            AliDisplay {
-                                model: ad.model,
-                                mline: ad.mline,
-                                aseq: ad.aseq,
-                                hmmfrom: ad.hmmfrom,
-                                hmmto: ad.hmmto,
-                                sqfrom: ad.sqfrom,
-                                sqto: ad.sqto,
-                                ppline: ad.ppline,
-                                rfline: ad.rfline,
-                            }
-                        })
+                    .map(|mut ad| {
+                        ad.sqfrom += ienv - 1;
+                        ad.sqto += ienv - 1;
+                        AliDisplay {
+                            model: ad.model,
+                            mline: ad.mline,
+                            aseq: ad.aseq,
+                            hmmfrom: ad.hmmfrom,
+                            hmmto: ad.hmmto,
+                            sqfrom: ad.sqfrom,
+                            sqto: ad.sqto,
+                            ppline: ad.ppline,
+                            rfline: ad.rfline,
+                        }
+                    })
                 } else {
                     crate::trace::alignment_coords(&tr).map(
                         |(hmmfrom, hmmto, mut sqfrom, mut sqto)| {
@@ -2334,62 +2241,59 @@ fn score_domain_envelope(
                         let mut trim_om = base_om.clone();
                         trim_om.reconfig_length(new_env_len as i32);
                         trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
-                        let mut trim_pmx = crate::simd::probmx::ProbMx::new(0);
-                        trim_pmx.resize_full(gm.m, new_env_len);
-                        env_fwd_sc_current = unsafe {
-                            crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                                dsq,
-                                new_dsq_offset,
-                                new_env_len,
-                                &trim_om,
-                                &mut trim_pmx,
-                            )
-                        };
 
                         // Match C p7_domaindef.c:2180-2200: after trim Forward, also
                         // re-run Backward, Decoding, OA, OATrace and REBUILD the
                         // AliDisplay. Without this, Rust keeps the pre-trim ad with
                         // stale hmmto/sqto that diverge from C by 1 residue.
                         if make_alignment {
-                            let mut trim_bck_pmx = crate::simd::probmx::ProbMx::new(0);
-                            trim_bck_pmx.resize_full(gm.m, new_env_len);
+                            let scratch = &mut *simd_scratch;
+                            scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                            env_fwd_sc_current = unsafe {
+                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                    dsq,
+                                    new_dsq_offset,
+                                    new_env_len,
+                                    &trim_om,
+                                    &mut scratch.trim_fwd_pmx,
+                                )
+                            };
+                            scratch.trim_bck_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
                                 crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
                                     dsq,
                                     new_dsq_offset,
                                     new_env_len,
                                     &trim_om,
-                                    &mut trim_bck_pmx,
-                                    Some(&trim_pmx.row_scale),
+                                    &mut scratch.trim_bck_pmx,
+                                    Some(&scratch.trim_fwd_pmx.row_scale),
                                 );
                             }
-                            let mut trim_pp_pmx = crate::simd::probmx::ProbMx::new(0);
-                            trim_pp_pmx.resize_full(gm.m, new_env_len);
+                            scratch.trim_pp_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
                                 crate::simd::optacc::posterior_decoding_pmx(
-                                    &trim_pmx,
-                                    &trim_bck_pmx,
+                                    &scratch.trim_fwd_pmx,
+                                    &scratch.trim_bck_pmx,
                                     &trim_om,
-                                    &mut trim_pp_pmx,
+                                    &mut scratch.trim_pp_pmx,
                                 );
                             }
-                            let mut trim_oa_pmx = crate::simd::probmx::ProbMx::new(0);
-                            trim_oa_pmx.resize_full(gm.m, new_env_len);
+                            scratch.trim_oa_pmx.resize_full(gm.m, new_env_len);
                             let trim_oasc = unsafe {
                                 crate::simd::optacc::optimal_accuracy_pmx(
                                     &trim_om,
-                                    &trim_pp_pmx,
-                                    &mut trim_oa_pmx,
+                                    &scratch.trim_pp_pmx,
+                                    &mut scratch.trim_oa_pmx,
                                 )
                             };
                             let trim_tr = unsafe {
                                 crate::simd::optacc::oa_trace_pmx(
                                     &trim_om,
-                                    &trim_pp_pmx,
-                                    &trim_oa_pmx,
+                                    &scratch.trim_pp_pmx,
+                                    &scratch.trim_oa_pmx,
                                 )
                             };
-                            let mut trim_pp_gmx = Gmx::new(gm.m, new_env_len);
+                            scratch.trim_pp_gmx.grow_to_zeroed(gm.m, new_env_len);
                             let njc_loop_trim = [
                                 trim_om.xf[crate::simd::oprofile::P7O_N]
                                     [crate::simd::oprofile::P7O_LOOP],
@@ -2399,31 +2303,48 @@ fn score_domain_envelope(
                                     [crate::simd::oprofile::P7O_LOOP],
                             ];
                             crate::simd::probmx::p_decoding_to_gmx(
-                                &trim_pmx,
-                                &trim_bck_pmx,
+                                &scratch.trim_fwd_pmx,
+                                &scratch.trim_bck_pmx,
                                 gm.m,
                                 njc_loop_trim,
-                                &mut trim_pp_gmx,
+                                &mut scratch.trim_pp_gmx,
                             );
                             let trim_sub_start = new_dsq_offset;
                             let trim_sub_end = trim_sub_start + new_env_len;
-                            let trim_sub_dsq = {
-                                let mut buf = vec![crate::alphabet::DSQ_SENTINEL];
-                                buf.extend_from_slice(&dsq[trim_sub_start + 1..=trim_sub_end]);
-                                buf.push(crate::alphabet::DSQ_SENTINEL);
-                                buf
-                            };
+                            scratch.trim_sub_dsq.clear();
+                            scratch.trim_sub_dsq.push(crate::alphabet::DSQ_SENTINEL);
+                            scratch
+                                .trim_sub_dsq
+                                .extend_from_slice(&dsq[trim_sub_start + 1..=trim_sub_end]);
+                            scratch.trim_sub_dsq.push(crate::alphabet::DSQ_SENTINEL);
                             let abc = crate::alphabet::Alphabet::new(hmm.abc_type);
-                            if let Some(new_ad) = crate::trace::alignment_display_with_pp_bg(
-                                &trim_tr,
-                                &trim_sub_dsq,
-                                hmm,
-                                &abc,
-                                Some(&trim_pp_gmx),
-                                Some(&local_bg.f),
-                            ) {
+                            let trim_emission_odds =
+                                |k: usize, x: usize| trim_om.fwd_emission_odds(k, x);
+                            if let Some(new_ad) =
+                                crate::trace::alignment_display_with_pp_emission_odds(
+                                    &trim_tr,
+                                    &scratch.trim_sub_dsq,
+                                    hmm,
+                                    &abc,
+                                    Some(&scratch.trim_pp_gmx),
+                                    Some(&local_bg.f),
+                                    Some(&trim_emission_odds),
+                                )
+                            {
                                 trim_rebuilt_ad = Some((new_ad, trim_oasc));
                             }
+                        } else {
+                            let scratch = &mut *simd_scratch;
+                            scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                            env_fwd_sc_current = unsafe {
+                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                    dsq,
+                                    new_dsq_offset,
+                                    new_env_len,
+                                    &trim_om,
+                                    &mut scratch.trim_fwd_pmx,
+                                )
+                            };
                         }
                     }
                 }
@@ -2431,16 +2352,18 @@ fn score_domain_envelope(
                 // Default-model Forward on the (possibly trimmed) region.
                 let mut default_om = base_om.clone();
                 default_om.reconfig_length(new_env_len as i32);
-                let mut default_pmx = crate::simd::probmx::ProbMx::new(0);
-                default_pmx.resize_full(gm.m, new_env_len);
-                let default_fwd_sc = unsafe {
-                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                        dsq,
-                        new_dsq_offset,
-                        new_env_len,
-                        &default_om,
-                        &mut default_pmx,
-                    )
+                let default_fwd_sc = {
+                    let scratch = &mut *simd_scratch;
+                    scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                    unsafe {
+                        crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                            dsq,
+                            new_dsq_offset,
+                            new_env_len,
+                            &default_om,
+                            &mut scratch.trim_fwd_pmx,
+                        )
+                    }
                 };
                 let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
                 let lt_domcorrection = default_fwd_sc - envsc_min;
@@ -2510,8 +2433,8 @@ fn score_domain_envelope(
     let (env_fwd_sc, dom_correction) = (env_fwd_sc, dom_correction);
 
     // Omega-weighted null2 bias.
-    let omega = 1.0_f32 / 256.0;
-    let dom_bias = crate::logsum::p7_flogsum(0.0, omega.ln() + dom_correction);
+    let omega = bg.omega;
+    let dom_bias = crate::logsum::p7_flogsum(0.0, c_log_f64(omega as f64) as f32 + dom_correction);
 
     // Domain bitscore:
     // * long_target: use C nhmmer's post-Viterbi long-target rescaling
@@ -2534,32 +2457,32 @@ fn score_domain_envelope(
         // (1) entrance/exit costs: env_len → max_length.
         // C: `2 * log(2. / (env_len+2))` — `2.` is double, (env_len+2) is int →
         // division yields double.
-        bitscore -= 2.0 * (2.0_f64 / (env_len_i + 2) as f64).ln();
-        bitscore += 2.0 * (2.0_f64 / (max_length_i + 2) as f64).ln();
+        bitscore -= 2.0 * c_log_f64(2.0_f64 / (env_len_i + 2) as f64);
+        bitscore += 2.0 * c_log_f64(2.0_f64 / (max_length_i + 2) as f64);
         // (2) extension cost: replace env-bounds extension with max-bounds one.
         // C: `log((float)env_len / (env_len+2))` — ratio computed in f32, then
         // promoted to f64 for log. Multiplier `(env_len-ali_len)` is int.
         let env_ratio = (env_len_i as f32) / ((env_len_i + 2) as f32);
-        bitscore -= (env_len_i - ali_len_i) as f64 * (env_ratio as f64).ln();
+        bitscore -= (env_len_i - ali_len_i) as f64 * c_log_f64(env_ratio as f64);
         let max_len_or_env_i = max_length_i.max(env_len_i);
         // C: `log((float)om->max_length / (float)(om->max_length+2))`.
         let max_ratio = (max_length_i as f32) / ((max_length_i + 2) as f32);
-        bitscore += (max_len_or_env_i - ali_len_i) as f64 * (max_ratio as f64).ln();
+        bitscore += (max_len_or_env_i - ali_len_i) as f64 * c_log_f64(max_ratio as f64);
         // Null score at max(max_length, env_len).
         let nsc_length = max_len_or_env_i as usize;
         let mut bg_local = bg.clone();
         bg_local.set_length(nsc_length);
         let nullsc = bg_local.null_one(nsc_length) as f64;
-        ((bitscore - nullsc) / std::f64::consts::LN_2) as f32
+        ((bitscore - nullsc) / ESL_CONST_LOG2) as f32
     } else {
         // C p7_pipeline.c computes:
         //   bitscore = envsc + (sq->n-Ld) * log((float)sq->n / (float)(sq->n+3))
         // The ratio is rounded to float before log(), but log() itself is the
         // double-precision libc call. Preserve that ordering here.
         let ratio = (l as f32) / ((l + 3) as f32);
-        let length_correction = (l - env_len) as f64 * (ratio as f64).ln();
+        let length_correction = (l - env_len) as f64 * c_log_f64(ratio as f64);
         let bitscore = (env_fwd_sc as f64 + length_correction) as f32;
-        ((bitscore - (null_sc + dom_bias)) as f64 / std::f64::consts::LN_2) as f32
+        ((bitscore - (null_sc + dom_bias)) as f64 / ESL_CONST_LOG2) as f32
     };
     let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
     let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
@@ -2570,9 +2493,9 @@ fn score_domain_envelope(
     // existing convention is to store dombias in bits. Keep both paths
     // consistent by storing in bits.
     let domain_dombias = if long_target {
-        dom_correction / std::f32::consts::LN_2
+        dom_correction * (ESL_CONST_LOG2R as f32)
     } else {
-        dom_bias / std::f32::consts::LN_2
+        dom_bias * (ESL_CONST_LOG2R as f32)
     };
     let domain = Domain {
         iali,
@@ -2864,14 +2787,28 @@ pub(crate) fn define_domains(
         #[cfg(not(target_arch = "x86_64"))]
         unreachable!();
     } else {
-        let mut gx_fwd = Gmx::new(gm.m, l);
-        g_forward(dsq, l, gm, &mut gx_fwd);
-        let mut gx_bck = Gmx::new(gm.m, l);
-        g_backward(dsq, l, gm, &mut gx_bck);
-        let r = domain_decoding(gm, &gx_fwd, &gx_bck);
-        btot = r.0;
-        etot = r.1;
-        mocc = r.2;
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut gx_fwd = Gmx::new(gm.m, l);
+            g_forward(dsq, l, gm, &mut gx_fwd);
+            let mut gx_bck = Gmx::new(gm.m, l);
+            g_backward(dsq, l, gm, &mut gx_bck);
+            let r = domain_decoding(gm, &gx_fwd, &gx_bck);
+            btot = r.0;
+            etot = r.1;
+            mocc = r.2;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            simd_scratch.fwd_gmx.grow_to(gm.m, l);
+            g_forward(dsq, l, gm, &mut simd_scratch.fwd_gmx);
+            simd_scratch.bck_gmx.grow_to(gm.m, l);
+            g_backward(dsq, l, gm, &mut simd_scratch.bck_gmx);
+            let r = domain_decoding(gm, &simd_scratch.fwd_gmx, &simd_scratch.bck_gmx);
+            btot = r.0;
+            etot = r.1;
+            mocc = r.2;
+        }
     }
 
     #[cfg(feature = "tracehash")]
@@ -2937,7 +2874,7 @@ pub(crate) fn define_domains(
                 false,
                 simd_match_odds.as_deref(),
                 &optacc_deltas,
-                Some(&mut *simd_scratch),
+                &mut *simd_scratch,
                 make_alignment,
                 make_alignment_display,
                 long_target,
@@ -3150,7 +3087,7 @@ pub(crate) fn define_domains(
             }
 
             for pos in ri..=rj {
-                n2sc[pos] = (n2sc[pos] / NSAMPLES as f32).ln();
+                n2sc[pos] = c_logf_to_f32(n2sc[pos] / NSAMPLES as f32);
             }
 
             if !segments.is_empty() {
@@ -3186,7 +3123,7 @@ pub(crate) fn define_domains(
                             true,
                             simd_match_odds.as_deref(),
                             &optacc_deltas,
-                            Some(&mut *simd_scratch),
+                            &mut *simd_scratch,
                             make_alignment,
                             make_alignment_display,
                             long_target,
@@ -3216,7 +3153,7 @@ pub(crate) fn define_domains(
                     false,
                     simd_match_odds.as_deref(),
                     &optacc_deltas,
-                    Some(&mut *simd_scratch),
+                    &mut *simd_scratch,
                     make_alignment,
                     make_alignment_display,
                     long_target,
@@ -3242,7 +3179,7 @@ pub(crate) fn define_domains(
                 false,
                 simd_match_odds.as_deref(),
                 &optacc_deltas,
-                Some(&mut *simd_scratch),
+                &mut *simd_scratch,
                 make_alignment,
                 make_alignment_display,
                 long_target,

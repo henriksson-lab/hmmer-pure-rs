@@ -204,48 +204,48 @@ impl Alphabet {
 
     /// Install the standard IUPAC nucleotide degeneracy table for DNA.
     fn set_dna_degeneracies(&mut self) {
-        self.set_degeneracy(b'R', &[b'A', b'G']);
-        self.set_degeneracy(b'Y', &[b'C', b'T']);
-        self.set_degeneracy(b'M', &[b'A', b'C']);
-        self.set_degeneracy(b'K', &[b'G', b'T']);
-        self.set_degeneracy(b'S', &[b'C', b'G']);
-        self.set_degeneracy(b'W', &[b'A', b'T']);
-        self.set_degeneracy(b'H', &[b'A', b'C', b'T']);
-        self.set_degeneracy(b'B', &[b'C', b'G', b'T']);
-        self.set_degeneracy(b'V', &[b'A', b'C', b'G']);
-        self.set_degeneracy(b'D', &[b'A', b'G', b'T']);
+        self.set_degeneracy(b'R', b"AG");
+        self.set_degeneracy(b'Y', b"CT");
+        self.set_degeneracy(b'M', b"AC");
+        self.set_degeneracy(b'K', b"GT");
+        self.set_degeneracy(b'S', b"CG");
+        self.set_degeneracy(b'W', b"AT");
+        self.set_degeneracy(b'H', b"ACT");
+        self.set_degeneracy(b'B', b"CGT");
+        self.set_degeneracy(b'V', b"ACG");
+        self.set_degeneracy(b'D', b"AGT");
         // N = any
-        self.set_degeneracy(b'N', &[b'A', b'C', b'G', b'T']);
+        self.set_degeneracy(b'N', b"ACGT");
         // * = nonresidue, ~ = missing: leave empty
     }
 
     /// Install the standard IUPAC nucleotide degeneracy table for RNA.
     fn set_rna_degeneracies(&mut self) {
-        self.set_degeneracy(b'R', &[b'A', b'G']);
-        self.set_degeneracy(b'Y', &[b'C', b'U']);
-        self.set_degeneracy(b'M', &[b'A', b'C']);
-        self.set_degeneracy(b'K', &[b'G', b'U']);
-        self.set_degeneracy(b'S', &[b'C', b'G']);
-        self.set_degeneracy(b'W', &[b'A', b'U']);
-        self.set_degeneracy(b'H', &[b'A', b'C', b'U']);
-        self.set_degeneracy(b'B', &[b'C', b'G', b'U']);
-        self.set_degeneracy(b'V', &[b'A', b'C', b'G']);
-        self.set_degeneracy(b'D', &[b'A', b'G', b'U']);
-        self.set_degeneracy(b'N', &[b'A', b'C', b'G', b'U']);
+        self.set_degeneracy(b'R', b"AG");
+        self.set_degeneracy(b'Y', b"CU");
+        self.set_degeneracy(b'M', b"AC");
+        self.set_degeneracy(b'K', b"GU");
+        self.set_degeneracy(b'S', b"CG");
+        self.set_degeneracy(b'W', b"AU");
+        self.set_degeneracy(b'H', b"ACU");
+        self.set_degeneracy(b'B', b"CGU");
+        self.set_degeneracy(b'V', b"ACG");
+        self.set_degeneracy(b'D', b"AGU");
+        self.set_degeneracy(b'N', b"ACGU");
     }
 
     /// Install standard amino acid ambiguity codes (B, J, Z, O, U, X).
     fn set_amino_degeneracies(&mut self) {
         // B = N or D (Asx)
-        self.set_degeneracy(b'B', &[b'N', b'D']);
+        self.set_degeneracy(b'B', b"ND");
         // J = I or L
-        self.set_degeneracy(b'J', &[b'I', b'L']);
+        self.set_degeneracy(b'J', b"IL");
         // Z = Q or E (Glx)
-        self.set_degeneracy(b'Z', &[b'Q', b'E']);
+        self.set_degeneracy(b'Z', b"QE");
         // O = pyrrolysine -> maps to K
-        self.set_degeneracy(b'O', &[b'K']);
+        self.set_degeneracy(b'O', b"K");
         // U = selenocysteine -> maps to C
-        self.set_degeneracy(b'U', &[b'C']);
+        self.set_degeneracy(b'U', b"C");
         // X = any (all 20)
         let all: Vec<u8> = AMINO_SYMS.bytes().take(20).collect();
         self.set_degeneracy(b'X', &all);

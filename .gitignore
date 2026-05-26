@@ -10,6 +10,7 @@ tests/golden/pfam_*.tblout
 CLAUDE.md
 
 # Local perf / scratch artifacts
+.tmp/
 perf.data
 perf.data.old
 tracehash

@@ -12,6 +12,7 @@ use crate::alphabet::Dsq;
 use crate::bg::Bg;
 use crate::simd::oprofile::OProfile;
 use crate::stats;
+use crate::util::cmath::ESL_CONST_LOG2;
 
 /// A window hit from the SSV long-target filter.
 #[derive(Debug, Clone)]
@@ -125,7 +126,8 @@ pub unsafe fn ssv_filter_longtarget(
         m * 4
     };
     let p1: f32 = ml as f32 / (ml as f32 + 1.0);
-    let nullsc: f32 = (ml as f64 * (p1 as f64).ln() + (1.0_f64 - p1 as f64).ln()) as f32;
+    let nullsc: f32 = (ml as f64 * crate::util::cmath::c_log_f64(p1 as f64)
+        + crate::util::cmath::c_log_f64(1.0_f64 - p1 as f64)) as f32;
 
     // Use om->tjb_b directly (matching C line 324, 334, 385, 420)
     // C reconfigures om->tjb_b via ReconfigMSVLength before calling this function.
@@ -140,7 +142,7 @@ pub unsafe fn ssv_filter_longtarget(
     // Rust's invsurv returns f64; keeping full f64 precision shifts the ceil()
     // boundary for a few sequences and produces different SSV peak sets.
     let inv_p_f32 = inv_p as f32;
-    let sc_thresh_d: f64 = (((nullsc as f64) + (inv_p_f32 as f64 * std::f64::consts::LN_2) + 3.0)
+    let sc_thresh_d: f64 = (((nullsc as f64) + (inv_p_f32 as f64 * ESL_CONST_LOG2) + 3.0)
         * (om.scale_b as f64))
         + (om.base_b as f64)
         + (om.tec_b as f64)
@@ -362,11 +364,11 @@ fn compute_prefix_suffix_lengths_hmm(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f3
         prefix[k] = if t_mi == 0.0 {
             1.0
         } else {
-            let ln_t_ii = (t_ii as f64).ln();
+            let ln_t_ii = crate::util::cmath::c_log_f64(t_ii as f64);
             if ln_t_ii == 0.0 {
                 1.0
             } else {
-                let v = (BETA as f64 / t_mi as f64).ln() / ln_t_ii;
+                let v = crate::util::cmath::c_log_f64(BETA as f64 / t_mi as f64) / ln_t_ii;
                 1.0 + v.floor() as f32
             }
         };
@@ -439,13 +441,13 @@ pub fn compute_prefix_suffix_lengths_from_om(
         prefix[k] = if t_mi[k] == 0.0 {
             1.0
         } else {
-            let ln_t_ii = (t_ii[k] as f64).ln();
+            let ln_t_ii = crate::util::cmath::c_log_f64(t_ii[k] as f64);
             if ln_t_ii == 0.0 {
                 1.0
             } else {
                 // C: `1 + (int)(log(BETA / t_mi[k]) / log(t_ii[k]))`.
                 // C `(int)` truncates toward zero (not floor).
-                let v = (BETA / t_mi[k] as f64).ln() / ln_t_ii;
+                let v = crate::util::cmath::c_log_f64(BETA / t_mi[k] as f64) / ln_t_ii;
                 1.0 + (v as i32) as f32
             }
         };

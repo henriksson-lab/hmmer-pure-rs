@@ -2,6 +2,8 @@
 //! Direct port of Easel's esl_gumbel.c.
 
 use crate::errors::{HmmerError, HmmerResult};
+use crate::util::cmath::c_sqrt_f64;
+use crate::util::cmath::{c_exp_f64, c_log_f64, c_pow_f64};
 
 const SMALLX1: f64 = 5e-9;
 
@@ -12,7 +14,7 @@ const SMALLX1: f64 = 5e-9;
 /// Port of Easel `esl_gumbel_pdf`.
 pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    lambda * (-y - (-y).exp()).exp()
+    lambda * c_exp_f64(-y - c_exp_f64(-y))
 }
 
 /// Log probability density at `x`: log P(X = x) for the Gumbel.
@@ -21,7 +23,7 @@ pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Port of Easel `esl_gumbel_logpdf`.
 pub fn logpdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    lambda.ln() - y - (-y).exp()
+    c_log_f64(lambda) - y - c_exp_f64(-y)
 }
 
 /// Cumulative distribution P(X <= x) for the Gumbel.
@@ -30,7 +32,7 @@ pub fn logpdf(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Port of Easel `esl_gumbel_cdf`.
 pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    (-(-y).exp()).exp()
+    c_exp_f64(-c_exp_f64(-y))
 }
 
 /// Log cumulative distribution log P(X <= x) for the Gumbel.
@@ -39,7 +41,7 @@ pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Port of Easel `esl_gumbel_logcdf`.
 pub fn logcdf(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    -(-y).exp()
+    -c_exp_f64(-y)
 }
 
 /// Right tail mass P(X > x) = 1 - CDF for the Gumbel.
@@ -48,11 +50,11 @@ pub fn logcdf(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Port of Easel `esl_gumbel_surv`.
 pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    let ey = -(-y).exp();
+    let ey = -c_exp_f64(-y);
     if ey.abs() < SMALLX1 {
         -ey
     } else {
-        1.0 - ey.exp()
+        1.0 - c_exp_f64(ey)
     }
 }
 
@@ -63,14 +65,14 @@ pub fn surv(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Port of Easel `esl_gumbel_logsurv`.
 pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     let y = lambda * (x - mu);
-    let ey = -(-y).exp();
+    let ey = -c_exp_f64(-y);
 
     if ey.abs() < SMALLX1 {
         -y
-    } else if ey.exp().abs() < SMALLX1 {
-        -ey.exp()
+    } else if c_exp_f64(ey).abs() < SMALLX1 {
+        -c_exp_f64(ey)
     } else {
-        (1.0 - ey.exp()).ln()
+        c_log_f64(1.0 - c_exp_f64(ey))
     }
 }
 
@@ -78,7 +80,7 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
 ///
 /// Port of Easel `esl_gumbel_invcdf`.
 pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
-    mu - ((-1.0 * p.ln()).ln() / lambda)
+    mu - (c_log_f64(-1.0 * c_log_f64(p)) / lambda)
 }
 
 /// Inverse survivor: return quantile x at which the right tail mass equals `p`.
@@ -87,9 +89,9 @@ pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
 /// the inf at p < ~1e-15. Port of Easel `esl_gumbel_invsurv`.
 pub fn invsurv(p: f64, mu: f64, lambda: f64) -> f64 {
     let log_part = if p < SMALLX1 {
-        (p.powf(p) - 1.0) / p
+        (c_pow_f64(p, p) - 1.0) / p
     } else {
-        (-1.0 * (1.0 - p).ln()).ln()
+        c_log_f64(-1.0 * c_log_f64(1.0 - p))
     };
     mu - (log_part / lambda)
 }
@@ -106,7 +108,7 @@ fn lawless416(x: &[f64], lambda: f64) -> (f64, f64) {
     let mut xsum = 0.0_f64;
 
     for &xi in x {
-        let e = (-lambda * xi).exp();
+        let e = c_exp_f64(-lambda * xi);
         xsum += xi;
         xesum += xi * e;
         xxesum += xi * xi * e;
@@ -136,7 +138,7 @@ pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     // 1. Initial guess at lambda
     let mean: f64 = x.iter().sum::<f64>() / n as f64;
     let variance: f64 = x.iter().map(|&xi| (xi - mean) * (xi - mean)).sum::<f64>() / (n - 1) as f64;
-    let mut lambda = std::f64::consts::PI / (6.0 * variance).sqrt();
+    let mut lambda = std::f64::consts::PI / c_sqrt_f64(6.0 * variance);
 
     // 2. Newton/Raphson to solve Lawless 4.1.6
     let tol = 1e-5;
@@ -156,7 +158,7 @@ pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     // 2.5: Fallback to bisection if Newton/Raphson failed
     if !converged {
         let mut left = 0.0_f64;
-        let mut right = std::f64::consts::PI / (6.0 * variance).sqrt();
+        let mut right = std::f64::consts::PI / c_sqrt_f64(6.0 * variance);
         let (mut fx, _) = lawless416(x, right);
         while fx > 0.0 {
             right *= 2.0;
@@ -189,8 +191,8 @@ pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     }
 
     // 3. Substitute into Lawless 4.1.5 to find mu
-    let esum: f64 = x.iter().map(|&xi| (-lambda * xi).exp()).sum();
-    let mu = -(esum / n as f64).ln() / lambda;
+    let esum: f64 = x.iter().map(|&xi| c_exp_f64(-lambda * xi)).sum();
+    let mu = -c_log_f64(esum / n as f64) / lambda;
 
     Ok((mu, lambda))
 }
@@ -206,8 +208,8 @@ pub fn fit_complete_loc(x: &[f64], lambda: f64) -> HmmerResult<f64> {
             "Need more than 1 sample for Gumbel fit".to_string(),
         ));
     }
-    let esum: f64 = x.iter().map(|&xi| (-lambda * xi).exp()).sum();
-    let mu = -(esum / n as f64).ln() / lambda;
+    let esum: f64 = x.iter().map(|&xi| c_exp_f64(-lambda * xi)).sum();
+    let mu = -c_log_f64(esum / n as f64) / lambda;
     Ok(mu)
 }
 
@@ -219,7 +221,7 @@ mod tests {
     fn test_surv_basic() {
         // P(X > mu) for standard Gumbel should be 1 - e^{-1} ≈ 0.6321
         let p = surv(0.0, 0.0, 1.0);
-        assert!((p - (1.0 - (-1.0_f64).exp())).abs() < 1e-10);
+        assert!((p - (1.0 - c_exp_f64(-1.0))).abs() < 1e-10);
     }
 
     #[test]

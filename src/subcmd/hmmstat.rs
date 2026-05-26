@@ -10,6 +10,7 @@ use hmmer_pure_rs::bg::Bg;
 use hmmer_pure_rs::hmm::{DM, IM, MI, MM};
 use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::profile;
+use hmmer_pure_rs::util::cmath::{c_log_f64, ESL_CONST_LOG2, ESL_CONST_LOG2R};
 
 #[derive(Parser)]
 #[command(name = "hmmstat", about = "Display summary statistics for each HMM")]
@@ -98,9 +99,9 @@ fn read_hmms_maybe_stdin(
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_hmms_auto(BufReader::new(stdin.lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto(path)
     }
 }
 
@@ -119,8 +120,17 @@ fn write_stat_row<W: Write>(
 ) {
     writeln!(
         out,
-        "{:<4}   {:<20} {:<12} {:>8} {:>8.2} {:>6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
-        idx, name, acc, nseq, eff_nseq, m, relent, info, p_rele, comp_kl
+        "{:<4}   {:<20} {:<12} {:>8} {} {:>6} {} {} {} {}",
+        idx,
+        name,
+        acc,
+        nseq,
+        hmmer_pure_rs::output::fmt_width8_2(eff_nseq as f64),
+        m,
+        hmmer_pure_rs::output::fmt_width6_2(relent as f64),
+        hmmer_pure_rs::output::fmt_width6_2(info as f64),
+        hmmer_pure_rs::output::fmt_width6_2(p_rele as f64),
+        hmmer_pure_rs::output::fmt_width6_2(comp_kl as f64)
     )
     .unwrap();
 }
@@ -133,7 +143,7 @@ fn mean_match_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
         for x in 0..k {
             let p = h.mat[node][x];
             if p > 0.0 && bg.f[x] > 0.0 {
-                sum += p * (p / bg.f[x]).log2();
+                sum += p * c_log_f64((p / bg.f[x]) as f64) as f32 * (ESL_CONST_LOG2R as f32);
             }
         }
     }
@@ -149,13 +159,13 @@ fn mean_match_info(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
         for x in 0..k {
             let p = h.mat[node][x];
             if p > 0.0 {
-                node_entropy -= p * p.log2();
+                node_entropy -= p * c_log_f64(p as f64) as f32 * (ESL_CONST_LOG2R as f32);
             }
         }
         let mut bg_entropy = 0.0_f32;
         for x in 0..k {
             if bg.f[x] > 0.0 {
-                bg_entropy -= bg.f[x] * bg.f[x].log2();
+                bg_entropy -= bg.f[x] * c_log_f64(bg.f[x] as f64) as f32 * (ESL_CONST_LOG2R as f32);
             }
         }
         sum += bg_entropy - node_entropy;
@@ -198,7 +208,7 @@ fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
         let xm = prev_occ * log_ratio_term(mm, p1);
         let xi = prev_occ * mi * (safe_ln_ratio(mm, p1) + safe_ln_ratio(im, p1));
         let xd = (1.0 - prev_occ) * log_ratio_term(dm, p1);
-        tre += (xm + xi + xd) / std::f64::consts::LN_2;
+        tre += (xm + xi + xd) / ESL_CONST_LOG2;
     }
     tre /= trans_occ_sum as f64;
 
@@ -231,7 +241,7 @@ fn rel_entropy(p: &[f32], q: &[f32]) -> f64 {
         .zip(q.iter())
         .filter_map(|(&px, &qx)| {
             if px > 0.0 && qx > 0.0 {
-                Some((px as f64) * ((px as f64) / (qx as f64)).log2())
+                Some((px as f64) * c_log_f64((px as f64) / (qx as f64)) * ESL_CONST_LOG2R)
             } else {
                 None
             }
@@ -241,7 +251,7 @@ fn rel_entropy(p: &[f32], q: &[f32]) -> f64 {
 
 fn log_ratio_term(p: f64, q: f64) -> f64 {
     if p > 0.0 && q > 0.0 {
-        p * (p / q).ln()
+        p * c_log_f64(p / q)
     } else {
         0.0
     }
@@ -249,7 +259,7 @@ fn log_ratio_term(p: f64, q: f64) -> f64 {
 
 fn safe_ln_ratio(p: f64, q: f64) -> f64 {
     if p > 0.0 && q > 0.0 {
-        (p / q).ln()
+        c_log_f64(p / q)
     } else {
         0.0
     }

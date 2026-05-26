@@ -1,6 +1,10 @@
 //! Vector operations on f32/f64/i32 slices.
 //! Direct port of Easel's esl_vectorops.c, focusing on functions used by HMMER.
 
+use crate::util::cmath::{
+    c_expf_to_f32, c_log_f64, c_logf_to_f32, ESL_CONST_LOG2, ESL_CONST_LOG2R,
+};
+
 // ===== Set =====
 
 /// Set every element of `vec` to `value`. Port of `esl_vec_DSet`.
@@ -170,11 +174,13 @@ pub fn i_reverse(vec: &[i32], rev: &mut [i32]) {
 /// Normalize a probability vector so it sums to 1.0. Port of `esl_vec_DNorm`.
 ///
 /// If the current sum is 0, the vector is left untouched (the C version
-/// fills with 1/n; this Rust variant keeps zeros).
+/// fills with 1/n).
 pub fn d_norm(vec: &mut [f64]) {
     let sum = d_sum(vec);
     if sum != 0.0 {
         d_scale(vec, 1.0 / sum);
+    } else if !vec.is_empty() {
+        d_set(vec, 1.0 / vec.len() as f64);
     }
 }
 
@@ -183,6 +189,8 @@ pub fn f_norm(vec: &mut [f32]) {
     let sum = f_sum(vec);
     if sum != 0.0 {
         f_scale(vec, 1.0 / sum);
+    } else if !vec.is_empty() {
+        f_set(vec, 1.0 / vec.len() as f32);
     }
 }
 
@@ -190,12 +198,12 @@ pub fn f_norm(vec: &mut [f32]) {
 
 /// Replace each element of `vec` with its natural log. Port of `esl_vec_FLog`.
 pub fn f_log(vec: &mut [f32]) {
-    vec.iter_mut().for_each(|v| *v = v.ln());
+    vec.iter_mut().for_each(|v| *v = c_logf_to_f32(*v));
 }
 
 /// Replace each element of `vec` with exp(v). Port of `esl_vec_FExp`.
 pub fn f_exp(vec: &mut [f32]) {
-    vec.iter_mut().for_each(|v| *v = v.exp());
+    vec.iter_mut().for_each(|v| *v = c_expf_to_f32(*v));
 }
 
 /// Convert an unnormalized log p-vector into a normalized probability vector.
@@ -206,9 +214,9 @@ pub fn f_lognorm(vec: &mut [f32]) {
     let max = f_max(vec);
     let mut sum = 0.0_f32;
     for v in vec.iter() {
-        sum += (*v - max).exp();
+        sum += c_expf_to_f32(*v - max);
     }
-    let log_sum = max + sum.ln();
+    let log_sum = max + c_logf_to_f32(sum);
     for v in vec.iter_mut() {
         *v -= log_sum;
     }
@@ -223,13 +231,14 @@ pub fn f_log2norm(vec: &mut [f32]) {
     let max = f_max(vec);
     let mut sum = 0.0_f32;
     for v in vec.iter() {
-        sum += f32::exp2(*v - max);
+        sum += c_expf_to_f32((*v - max) * ESL_CONST_LOG2 as f32);
     }
-    let log2_sum = max + sum.log2();
+    let log2_sum = max + c_logf_to_f32(sum) * ESL_CONST_LOG2R as f32;
     for v in vec.iter_mut() {
         *v -= log2_sum;
     }
-    vec.iter_mut().for_each(|v| *v = f32::exp2(*v));
+    vec.iter_mut()
+        .for_each(|v| *v = c_expf_to_f32(*v * ESL_CONST_LOG2 as f32));
 }
 
 // ===== Entropy =====
@@ -241,7 +250,7 @@ pub fn d_entropy(p: &[f64]) -> f64 {
     let mut h = 0.0;
     for &pi in p {
         if pi > 0.0 {
-            h -= pi * pi.log2();
+            h -= pi * c_log_f64(pi) * ESL_CONST_LOG2R;
         }
     }
     h
@@ -252,7 +261,7 @@ pub fn f_entropy(p: &[f32]) -> f32 {
     let mut h = 0.0_f32;
     for &pi in p {
         if pi > 0.0 {
-            h -= pi * pi.log2();
+            h -= pi * c_logf_to_f32(pi) * ESL_CONST_LOG2R as f32;
         }
     }
     h
@@ -266,7 +275,7 @@ pub fn d_rel_entropy(p: &[f64], q: &[f64]) -> f64 {
     let mut kl = 0.0;
     for (&pi, &qi) in p.iter().zip(q.iter()) {
         if pi > 0.0 && qi > 0.0 {
-            kl += pi * (pi / qi).log2();
+            kl += pi * c_log_f64(pi / qi) * ESL_CONST_LOG2R;
         }
     }
     kl
@@ -277,7 +286,7 @@ pub fn f_rel_entropy(p: &[f32], q: &[f32]) -> f32 {
     let mut kl = 0.0_f32;
     for (&pi, &qi) in p.iter().zip(q.iter()) {
         if pi > 0.0 && qi > 0.0 {
-            kl += pi * (pi / qi).log2();
+            kl += pi * c_logf_to_f32(pi / qi) * ESL_CONST_LOG2R as f32;
         }
     }
     kl

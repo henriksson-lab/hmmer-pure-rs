@@ -1,11 +1,23 @@
 //! Build an HMM from a single sequence using a substitution matrix.
 //! Simplified port of seqmodel.c p7_Seqmodel().
 
-use crate::alphabet::{Alphabet, Dsq};
+use crate::alphabet::{Alphabet, AlphabetType, Dsq};
 use crate::bg::Bg;
+use crate::calibrate::CalibrationConfig;
 use crate::hmm::*;
+use crate::util::cmath::c_exp_f64;
+use std::path::Path;
 
-/// BLOSUM62 scores for the 20 canonical amino acids (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y).
+const BUILTIN_SCOREMATRIX_SOURCE: &str = include_str!("../hmmer/easel/esl_scorematrix.c");
+const BUILTIN_MATRIX_NAMES: &[&str] = &[
+    "PAM30", "PAM70", "PAM120", "PAM240", "BLOSUM45", "BLOSUM50", "BLOSUM62", "BLOSUM80",
+    "BLOSUM90",
+];
+const BUILTIN_NT_MATRIX_NAMES: &[&str] = &["DNA1"];
+
+/// Built-in BLOSUM62 scores for the 20 canonical amino acids
+/// (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y). Used as the default and
+/// as a fallback if the bundled Easel source layout changes.
 const BLOSUM62_20: [[i32; 20]; 20] = [
     [
         4, 0, -2, -1, -2, 0, -2, -1, -1, -1, -1, -2, -1, -1, -1, 1, 0, 0, -3, -2,
@@ -69,75 +81,372 @@ const BLOSUM62_20: [[i32; 20]; 20] = [
     ], // Y
 ];
 
-/// Reverse-engineer BLOSUM62 into a conditional probability matrix `P(b|a)`
+const DNA1_4: [[i32; 4]; 4] = [
+    [41, -32, -26, -26],
+    [-32, 39, -38, -17],
+    [-26, -38, 46, -31],
+    [-26, -17, -31, 39],
+];
+
+#[derive(Debug, Clone)]
+pub struct ScoreMatrix {
+    name: String,
+    scores: Vec<Vec<i32>>,
+    k: usize,
+}
+
+impl ScoreMatrix {
+    pub fn blosum62() -> Self {
+        Self {
+            name: "BLOSUM62".to_string(),
+            scores: matrix20_to_vec(&BLOSUM62_20),
+            k: 20,
+        }
+    }
+
+    pub fn dna1() -> Self {
+        Self {
+            name: "DNA1".to_string(),
+            scores: matrix4_to_vec(&DNA1_4),
+            k: 4,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn builtin(name: &str) -> Result<Self, String> {
+        Self::builtin_for_alphabet(name, AlphabetType::Amino)
+    }
+
+    pub fn builtin_for_alphabet(name: &str, abc_type: AlphabetType) -> Result<Self, String> {
+        match abc_type {
+            AlphabetType::Amino => Self::builtin_protein(name),
+            AlphabetType::Dna | AlphabetType::Rna => Self::builtin_nucleotide(name),
+            AlphabetType::Unknown => Err("unknown alphabet for score matrix".to_string()),
+        }
+    }
+
+    fn builtin_protein(name: &str) -> Result<Self, String> {
+        let canonical = BUILTIN_MATRIX_NAMES
+            .iter()
+            .copied()
+            .find(|candidate| candidate.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                format!(
+                    "unknown built-in protein score matrix {name}; supported matrices are {}",
+                    BUILTIN_MATRIX_NAMES.join(", ")
+                )
+            })?;
+
+        let scores = if canonical == "BLOSUM62" {
+            matrix20_to_vec(&BLOSUM62_20)
+        } else {
+            parse_builtin_matrix(canonical).ok_or_else(|| {
+                format!("failed to load built-in protein score matrix {canonical}")
+            })?
+        };
+
+        Ok(Self {
+            name: canonical.to_string(),
+            scores,
+            k: 20,
+        })
+    }
+
+    fn builtin_nucleotide(name: &str) -> Result<Self, String> {
+        let canonical = BUILTIN_NT_MATRIX_NAMES
+            .iter()
+            .copied()
+            .find(|candidate| candidate.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                format!(
+                    "unknown built-in nucleotide score matrix {name}; supported matrices are {}",
+                    BUILTIN_NT_MATRIX_NAMES.join(", ")
+                )
+            })?;
+
+        Ok(Self {
+            name: canonical.to_string(),
+            scores: matrix4_to_vec(&DNA1_4),
+            k: 4,
+        })
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        Self::from_file_for_alphabet(path, &Alphabet::amino())
+    }
+
+    pub fn from_file_for_alphabet(path: &Path, abc: &Alphabet) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read score matrix file {}: {e}", path.display()))?;
+        let scores = parse_score_matrix_file(&text, abc)
+            .map_err(|e| format!("failed to parse score matrix file {}: {e}", path.display()))?;
+        Ok(Self {
+            name: path.display().to_string(),
+            scores,
+            k: abc.k,
+        })
+    }
+}
+
+pub fn is_known_builtin_score_matrix_name(name: &str) -> bool {
+    BUILTIN_MATRIX_NAMES
+        .iter()
+        .chain(BUILTIN_NT_MATRIX_NAMES.iter())
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn matrix20_to_vec(matrix: &[[i32; 20]; 20]) -> Vec<Vec<i32>> {
+    matrix.iter().map(|row| row.to_vec()).collect()
+}
+
+fn matrix4_to_vec(matrix: &[[i32; 4]; 4]) -> Vec<Vec<i32>> {
+    matrix.iter().map(|row| row.to_vec()).collect()
+}
+
+fn parse_builtin_matrix(name: &str) -> Option<Vec<Vec<i32>>> {
+    let needle = format!("{{ \"{name}\",");
+    let source = &BUILTIN_SCOREMATRIX_SOURCE[BUILTIN_SCOREMATRIX_SOURCE.find(&needle)?..];
+    let mut scores = vec![vec![0_i32; 20]; 20];
+    let mut row = 0usize;
+
+    for line in source.lines() {
+        if row == 20 {
+            return Some(scores);
+        }
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('{') || !line.contains("/*") {
+            continue;
+        }
+        let Some(end) = line.find('}') else {
+            continue;
+        };
+        let fields: Vec<i32> = line[..end]
+            .trim_start_matches(|c: char| c == '{' || c.is_whitespace())
+            .split(',')
+            .filter_map(|field| {
+                let field = field.trim();
+                (!field.is_empty())
+                    .then(|| field.parse::<i32>().ok())
+                    .flatten()
+            })
+            .collect();
+        if fields.len() < 20 {
+            return None;
+        }
+        scores[row].copy_from_slice(&fields[..20]);
+        row += 1;
+    }
+
+    (row == 20).then_some(scores)
+}
+
+fn parse_score_matrix_file(text: &str, abc: &Alphabet) -> Result<Vec<Vec<i32>>, String> {
+    let mut lines = text.lines().filter_map(matrix_line_tokens);
+    let header = lines
+        .next()
+        .ok_or_else(|| "file appears to be empty".to_string())?;
+    if header.is_empty() {
+        return Err("header is empty".to_string());
+    }
+
+    let mut col_map = Vec::with_capacity(header.len());
+    let mut seen = vec![false; abc.k];
+    for token in &header {
+        if token.len() != 1 {
+            return Err(format!(
+                "header labels must be single residues; {token} is invalid"
+            ));
+        }
+        let idx = matrix_symbol_index(abc, token.as_bytes()[0])
+            .ok_or_else(|| format!("unknown residue {token} in matrix header"))?;
+        col_map.push(idx);
+        if idx < abc.k {
+            seen[idx] = true;
+        }
+    }
+    for (idx, residue) in abc.sym.iter().take(abc.k).enumerate() {
+        if !seen[idx] {
+            return Err(format!(
+                "expected to see a column for residue {}",
+                *residue as char
+            ));
+        }
+    }
+
+    let mut scores = vec![vec![0_i32; abc.k]; abc.k];
+    let mut filled = vec![false; abc.k];
+    for row_number in 0..header.len() {
+        let row = lines
+            .next()
+            .ok_or_else(|| "unexpectedly ran out of matrix rows".to_string())?;
+        let mut offset = 0usize;
+        let row_idx = if row.len() == header.len() + 1 {
+            if row[0].len() != 1 {
+                return Err("row labels must be single residues".to_string());
+            }
+            offset = 1;
+            matrix_symbol_index(abc, row[0].as_bytes()[0])
+                .ok_or_else(|| format!("unknown residue {} in matrix row", row[0]))?
+        } else if row.len() == header.len() {
+            col_map[row_number]
+        } else {
+            return Err("matrix rows must contain one score per header column".to_string());
+        };
+
+        if row_idx >= abc.k {
+            continue;
+        }
+        filled[row_idx] = true;
+        for (col, &col_idx) in col_map.iter().enumerate() {
+            if col_idx >= abc.k {
+                continue;
+            }
+            scores[row_idx][col_idx] = row[col + offset]
+                .parse::<i32>()
+                .map_err(|_| format!("invalid score {}", row[col + offset]))?;
+        }
+    }
+
+    if lines.next().is_some() {
+        return Err("too many lines in matrix file".to_string());
+    }
+    for (idx, residue) in abc.sym.iter().take(abc.k).enumerate() {
+        if !filled[idx] {
+            return Err(format!(
+                "expected to see a row for residue {}",
+                *residue as char
+            ));
+        }
+    }
+
+    Ok(scores)
+}
+
+fn matrix_symbol_index(abc: &Alphabet, residue: u8) -> Option<usize> {
+    if residue as usize >= abc.inmap.len() {
+        return None;
+    }
+    let code = abc.digitize_symbol(residue);
+    if code == crate::alphabet::DSQ_ILLEGAL
+        || code == crate::alphabet::DSQ_IGNORED
+        || code == crate::alphabet::DSQ_SENTINEL
+    {
+        None
+    } else {
+        Some(code as usize)
+    }
+}
+
+fn matrix_line_tokens(line: &str) -> Option<Vec<String>> {
+    let line = line
+        .split_once('#')
+        .map_or(line, |(prefix, _)| prefix)
+        .trim();
+    (!line.is_empty()).then(|| line.split_whitespace().map(str::to_string).collect())
+}
+
+/// Reverse-engineer a score matrix into a conditional probability matrix `P(b|a)`
 /// given background frequencies `bg_f`.
 ///
 /// Solves for the matrix's natural scale `λ` (so that the implied joint
 /// distribution sums to 1), forms `P(a,b) = f(a) f(b) exp(λ · s(a,b))`,
 /// then normalises each row to get `P(target=b | query=a)`. Used to seed
 /// HMMER's single-sequence query model (`p7_Seqmodel`).
-fn score_to_conditional(bg_f: &[f32]) -> Vec<Vec<f32>> {
-    let k = 20;
-    let lambda = solve_lambda(bg_f);
+fn score_to_conditional(
+    matrix: &ScoreMatrix,
+    abc: &Alphabet,
+    bg_f: &[f32],
+) -> Result<Vec<Vec<f32>>, String> {
+    let k = abc.k;
+    if matrix.k != k {
+        return Err(format!(
+            "score matrix {} is for alphabet size {}, but model alphabet has size {}",
+            matrix.name, matrix.k, k
+        ));
+    }
+    let lambda = solve_lambda(&matrix.scores, bg_f)?;
 
     let mut joint = vec![vec![0.0_f64; k]; k];
     for a in 0..k {
         for b in 0..k {
-            joint[a][b] =
-                (bg_f[a] as f64) * (bg_f[b] as f64) * (lambda * BLOSUM62_20[a][b] as f64).exp();
+            joint[a][b] = (bg_f[a] as f64)
+                * (bg_f[b] as f64)
+                * c_exp_f64(lambda * matrix.scores[a][b] as f64);
         }
     }
 
-    let mut cond = vec![vec![0.0_f32; k]; k];
-    for a in 0..k {
-        let row_sum: f64 = joint[a].iter().sum();
+    let mut cond = vec![vec![0.0_f32; k]; abc.kp.max(k)];
+    for residue in 0..cond.len() {
+        let mut row = vec![0.0_f64; k];
+        if residue < k {
+            row.copy_from_slice(&joint[residue]);
+        } else if residue < abc.degen.len() && abc.ndegen[residue] > 0 {
+            for a in 0..k {
+                if abc.degen[residue][a] {
+                    for b in 0..k {
+                        row[b] += joint[a][b];
+                    }
+                }
+            }
+        }
+
+        let row_sum: f64 = row.iter().sum();
         for b in 0..k {
-            cond[a][b] = if row_sum > 0.0 {
-                (joint[a][b] / row_sum) as f32
+            cond[residue][b] = if row_sum > 0.0 {
+                (row[b] / row_sum) as f32
             } else {
                 bg_f[b]
             };
         }
     }
-    cond
+    Ok(cond)
 }
 
 /// Residual of the lambda-fixing equation:
 /// `sum_{a,b} f(a) f(b) exp(λ s_{ab}) - 1`.
-/// Zero when `λ` is the natural scale of the BLOSUM62 score matrix.
-fn lambda_f(bg_f: &[f32], lambda: f64) -> f64 {
+/// Zero when `λ` is the natural scale of the score matrix.
+fn lambda_f(scores: &[Vec<i32>], bg_f: &[f32], lambda: f64) -> f64 {
     let mut fx = -1.0_f64;
-    for a in 0..20 {
-        for b in 0..20 {
-            fx += (bg_f[a] as f64) * (bg_f[b] as f64) * (lambda * BLOSUM62_20[a][b] as f64).exp();
+    for a in 0..scores.len() {
+        for b in 0..scores.len() {
+            fx += (bg_f[a] as f64) * (bg_f[b] as f64) * c_exp_f64(lambda * scores[a][b] as f64);
         }
     }
     fx
 }
 
-/// Bisect the root of [`lambda_f`] to find the BLOSUM62 natural scale `λ`
+/// Bisect the root of [`lambda_f`] to find the score matrix's natural scale `λ`
 /// given the background `bg_f`. Returns the `f64` lambda value.
-fn solve_lambda(bg_f: &[f32]) -> f64 {
-    let max_score = BLOSUM62_20
+fn solve_lambda(scores: &[Vec<i32>], bg_f: &[f32]) -> Result<f64, String> {
+    let max_score = scores
         .iter()
         .flat_map(|row| row.iter())
         .copied()
         .max()
-        .unwrap() as f64;
+        .unwrap_or(0) as f64;
+    if max_score <= 0.0 {
+        return Err("score matrix has no positive scores".to_string());
+    }
     let mut hi = 1.0 / max_score;
-    while hi < 50.0 && lambda_f(bg_f, hi) <= 0.0 {
+    while hi < 50.0 && lambda_f(scores, bg_f, hi) <= 0.0 {
         hi *= 2.0;
+    }
+    if lambda_f(scores, bg_f, hi) <= 0.0 {
+        return Err("failed to bracket lambda root for score matrix".to_string());
     }
     let mut lo = 0.0_f64;
     for _ in 0..80 {
         let mid = (lo + hi) * 0.5;
-        if lambda_f(bg_f, mid) > 0.0 {
+        if lambda_f(scores, bg_f, mid) > 0.0 {
             hi = mid;
         } else {
             lo = mid;
         }
     }
-    (lo + hi) * 0.5
+    Ok((lo + hi) * 0.5)
 }
 
 /// Compute both match-state and insert-state occupancies for `hmm`
@@ -189,11 +498,11 @@ fn set_composition(hmm: &mut Hmm) {
 
 /// Build a profile HMM from one query sequence (port of `p7_Seqmodel`).
 ///
-/// Probabilistic Smith/Waterman-style query model: match emissions are the
-/// BLOSUM62-derived conditional distribution `P(b | dsq[k])`, insert
-/// emissions are the background, and transitions use `popen` for gap-open
-/// (`t_MI`, `t_MD`) and `pextend` for gap-extend (`t_II`, `t_DD`). Node M
-/// gets the usual termination tweaks. Sets composition (via
+/// Probabilistic Smith/Waterman-style query model: match emissions are derived
+/// from a substitution score matrix as conditional distributions
+/// `P(b | dsq[k])`, insert emissions are the background, and transitions use
+/// `popen` for gap-open (`t_MI`, `t_MD`) and `pextend` for gap-extend
+/// (`t_II`, `t_DD`). Node M gets the usual termination tweaks. Sets composition (via
 /// `set_composition`) and calibrates E-value statistics by simulation.
 pub fn build_single_seq_hmm(
     name: &str,
@@ -204,11 +513,59 @@ pub fn build_single_seq_hmm(
     popen: f32,
     pextend: f32,
 ) -> Hmm {
+    build_single_seq_hmm_with_matrix(
+        name,
+        dsq,
+        seq_len,
+        abc,
+        bg,
+        &ScoreMatrix::blosum62(),
+        popen,
+        pextend,
+    )
+    .expect("default BLOSUM62 score matrix should be valid")
+}
+
+pub fn build_single_seq_hmm_with_matrix(
+    name: &str,
+    dsq: &[Dsq],
+    seq_len: usize,
+    abc: &Alphabet,
+    bg: &Bg,
+    matrix: &ScoreMatrix,
+    popen: f32,
+    pextend: f32,
+) -> Result<Hmm, String> {
+    build_single_seq_hmm_with_matrix_and_calibration(
+        name,
+        dsq,
+        seq_len,
+        abc,
+        bg,
+        matrix,
+        popen,
+        pextend,
+        42,
+        CalibrationConfig::default(),
+    )
+}
+
+pub fn build_single_seq_hmm_with_matrix_and_calibration(
+    name: &str,
+    dsq: &[Dsq],
+    seq_len: usize,
+    abc: &Alphabet,
+    bg: &Bg,
+    matrix: &ScoreMatrix,
+    popen: f32,
+    pextend: f32,
+    calibration_seed: u32,
+    calibration_config: CalibrationConfig,
+) -> Result<Hmm, String> {
     let k = abc.k;
     let m = seq_len;
 
-    // Get conditional probability matrix from BLOSUM62
-    let cond = score_to_conditional(&bg.f);
+    let cond = score_to_conditional(matrix, abc, &bg.f)?;
 
     let mut hmm = Hmm::new(m, abc.abc_type, k);
     hmm.name = name.to_string();
@@ -222,7 +579,7 @@ pub fn build_single_seq_hmm(
         // Match emissions from conditional probability matrix (only for k>0).
         if node > 0 {
             let residue = dsq[node] as usize;
-            if residue < k {
+            if residue < cond.len() {
                 for x in 0..k {
                     hmm.mat[node][x] = cond[residue][x];
                 }
@@ -273,10 +630,16 @@ pub fn build_single_seq_hmm(
     hmm.flags |= P7H_CONS;
 
     // E-value calibration by simulation
-    crate::calibrate::calibrate(&mut hmm, abc, bg);
+    crate::calibrate::calibrate_with_config(
+        &mut hmm,
+        abc,
+        bg,
+        calibration_seed,
+        calibration_config,
+    );
 
     hmm.nseq = 1;
     hmm.eff_nseq = 1.0;
 
-    hmm
+    Ok(hmm)
 }

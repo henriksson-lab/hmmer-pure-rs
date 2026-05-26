@@ -1,20 +1,22 @@
 //! Pure Rust hmmsearch — uses generic DP algorithms.
 //! Progressively replacing C hmmsearch functionality.
 
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
+use hmmer_pure_rs::output::{fmt_bias, fmt_fixed1, fmt_fixed2, fmt_score, fmt_width5_1};
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::sequence::{self, Sequence};
+use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::{Domain, Hit, TopHits};
-use hmmer_pure_rs::{hmmfile, hmmfile_binary};
+use hmmer_pure_rs::util::cmath::c_exp_f64;
 
 const TARGET_BATCH_SIZE: usize = 4096;
 
@@ -197,6 +199,18 @@ struct Args {
     #[arg(long = "cpu", default_value = "2")]
     cpu: usize,
 
+    /// Start restricted target search at this sequence key
+    #[arg(long = "restrictdb_stkey", hide = true)]
+    restrictdb_stkey: Option<String>,
+
+    /// Search only this many target sequences from the restricted start
+    #[arg(long = "restrictdb_n", value_parser = parse_positive_usize, hide = true)]
+    restrictdb_n: Option<usize>,
+
+    /// SSI index file for C-compatible restricted database options
+    #[arg(long = "ssifile", hide = true)]
+    ssifile: Option<PathBuf>,
+
     // --- Output formatting ---
     /// Prefer accessions over names in output
     #[arg(long = "acc")]
@@ -218,7 +232,7 @@ struct Args {
     #[arg(short = 'A')]
     ali_outfile: Option<PathBuf>,
 
-    /// Assert target sequence file format (not implemented; auto-detection is used)
+    /// Assert target sequence file format (currently FASTA only)
     #[arg(long = "tformat")]
     tformat: Option<String>,
 }
@@ -245,37 +259,67 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
     }
 }
 
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid positive integer: {e}"))?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("value must be > 0".to_string())
+    }
+}
+
+fn copy_reporting_thresholds(dst: &mut Pipeline, src: &Pipeline) {
+    dst.e_value_threshold = src.e_value_threshold;
+    dst.dom_e_value_threshold = src.dom_e_value_threshold;
+    dst.inc_e = src.inc_e;
+    dst.inc_dome = src.inc_dome;
+    dst.t = src.t;
+    dst.dom_t = src.dom_t;
+    dst.inc_t = src.inc_t;
+    dst.inc_dom_t = src.inc_dom_t;
+    dst.by_e = src.by_e;
+    dst.dom_by_e = src.dom_by_e;
+    dst.inc_by_e = src.inc_by_e;
+    dst.incdom_by_e = src.incdom_by_e;
+    dst.use_bit_cutoffs = src.use_bit_cutoffs;
+}
+
 /// Entry point for `hmmsearch`: search profile(s) against a sequence database.
 ///
 /// Equivalent to the C `main` + `serial_master` + `output_header` in
 /// `hmmer/src/hmmsearch.c`. Parses CLI args, reads HMM(s), initializes the
 /// pipeline (filter thresholds, reporting/inclusion thresholds, model-specific
 /// cutoffs, Z/domZ overrides), iterates target sequences (serial when
-/// `--cpu 1`, otherwise rayon-parallel over a target batch), thresholds and
-/// emits the standard hmmsearch text report plus optional --tblout,
+/// `--cpu` is 0 or 1, otherwise rayon-parallel over a target batch), thresholds
+/// and emits the standard hmmsearch text report plus optional --tblout,
 /// --domtblout, --pfamtblout, and -A (Stockholm) outputs.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
+    let cpu_was_requested = args
+        .iter()
+        .any(|arg| arg == "--cpu" || arg.starts_with("--cpu="))
+        || std::env::var_os("HMMER_NCPU").is_some();
+    let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
-
-    if let Some(ref format) = args.tformat {
-        if format.eq_ignore_ascii_case("fasta") {
-            // FASTA is already accepted by the sequence reader's auto-detection.
-        } else {
+    if let Some(format) = args.tformat.as_deref() {
+        if SequenceFormat::from_name(format).is_none() {
             eprintln!(
-                "hmmsearch --tformat={} is not implemented: only FASTA target format assertions are supported",
-            format
-        );
+                "hmmsearch --tformat={format} is not a recognized input sequence file format",
+            );
             std::process::exit(1);
         }
     }
 
-    // Configure thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.cpu)
-        .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
-        .build_global()
-        .ok();
+    // `--cpu 0` is HMMER's explicit serial/threading-off mode.
+    if args.cpu > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cpu)
+            .start_handler(|_| hmmer_pure_rs::util::simd_env::init())
+            .build_global()
+            .ok();
+    }
 
     logsum::p7_flogsuminit();
 
@@ -300,10 +344,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let outfile_handle;
     let stdout;
     let mut out: Box<dyn std::io::Write> = if let Some(ref path) = args.outfile {
-        outfile_handle = std::fs::File::create(path).unwrap_or_else(|e| {
-            eprintln!("Error creating output file: {}", e);
-            std::process::exit(1);
-        });
+        outfile_handle =
+            create_output_file_or_exit(path, "Failed to open output file {path} for writing");
         Box::new(BufWriter::new(outfile_handle))
     } else {
         stdout = std::io::stdout();
@@ -340,12 +382,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         args.seqdb.display()
     )
     .unwrap();
-    if args
-        .tformat
-        .as_deref()
-        .is_some_and(|format| format.eq_ignore_ascii_case("fasta"))
-    {
-        writeln!(out, "# targ <seqfile> format asserted:  fasta").unwrap();
+    if let Some(format) = args.tformat.as_deref() {
+        writeln!(out, "# targ <seqfile> format asserted:  {format}").unwrap();
     }
     if let Some(ref path) = args.outfile {
         writeln!(out, "# output directed to file:         {}", path.display()).unwrap();
@@ -357,16 +395,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "# per-dom hits tabular output:     {}", path.display()).unwrap();
     }
     if let Some(ref path) = args.pfamtblout {
-        writeln!(out, "# pfam-style tabular output:       {}", path.display()).unwrap();
+        writeln!(out, "# pfam-style tabular hit output:   {}", path.display()).unwrap();
     }
     if let Some(ref path) = args.ali_outfile {
-        writeln!(out, "# MSA of hits saved to file:       {}", path.display()).unwrap();
+        writeln!(out, "# MSA of all hits saved to file:   {}", path.display()).unwrap();
     }
     if args.noali {
         writeln!(out, "# show alignments in output:       no").unwrap();
     }
     if args.show_acc {
         writeln!(out, "# prefer accessions over names:    yes").unwrap();
+    }
+    write_hmmsearch_option_header(&mut out, &args, &cmdline);
+    if cpu_was_requested {
+        writeln!(out, "# number of worker threads:        {}", args.cpu).unwrap();
     }
     if args.notextw {
         writeln!(out, "# max ASCII text line length:      unlimited").unwrap();
@@ -386,31 +428,29 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     // Open tblout/domtblout files if requested
     let mut tblout_file = args.tblout.as_ref().map(|p| {
-        let file = std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating tblout file: {}", e);
-            std::process::exit(1);
-        });
+        let file = create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-seq output file {path} for writing",
+        );
         BufWriter::new(file)
     });
     let mut domtblout_file = args.domtblout.as_ref().map(|p| {
-        let file = std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating domtblout file: {}", e);
-            std::process::exit(1);
-        });
+        let file = create_output_file_or_exit(
+            p,
+            "Failed to open tabular per-dom output file {path} for writing",
+        );
         BufWriter::new(file)
     });
     let mut pfamtblout_file = args.pfamtblout.as_ref().map(|p| {
-        let file = std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating pfamtblout file: {}", e);
-            std::process::exit(1);
-        });
+        let file = create_output_file_or_exit(
+            p,
+            "Failed to open pfam-style tabular output file {path} for writing",
+        );
         BufWriter::new(file)
     });
     let mut ali_outfile = args.ali_outfile.as_ref().map(|p| {
-        let file = std::fs::File::create(p).unwrap_or_else(|e| {
-            eprintln!("Error creating alignment output file: {}", e);
-            std::process::exit(1);
-        });
+        let file =
+            create_output_file_or_exit(p, "Failed to open alignment file {path} for writing");
         BufWriter::new(file)
     });
 
@@ -429,12 +469,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut pli = Pipeline::new();
         pli.new_model(&gm);
 
+        let effective_f1 = if args.max { 1.0 } else { args.f1 };
+        let effective_f2 = if args.max { 1.0 } else { args.f2 };
+        let effective_f3 = if args.max { 1.0 } else { args.f3 };
+        let effective_nobias = args.max || args.nobias;
+
         // Filter thresholds
-        pli.f1 = args.f1;
-        pli.f2 = args.f2;
-        pli.f3 = args.f3;
+        pli.f1 = effective_f1;
+        pli.f2 = effective_f2;
+        pli.f3 = effective_f3;
         pli.do_max = args.max;
-        if args.nobias {
+        if effective_nobias {
             pli.do_biasfilter = false;
         }
         if args.nonull2 {
@@ -489,17 +534,21 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             pli.domz_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
         }
 
-        // Score sequences. For --cpu 1, stream the target database like C HMMER
-        // instead of cloning the entire sequence set before scoring.
-        let f1 = args.f1;
-        let f2 = args.f2;
-        let f3 = args.f3;
+        // Score sequences. For --cpu 0/1, stream the target database like C
+        // HMMER instead of cloning the entire sequence set before scoring.
+        let f1 = effective_f1;
+        let f2 = effective_f2;
+        let f3 = effective_f3;
         let do_max = args.max;
-        let nobias = args.nobias;
+        let nobias = effective_nobias;
         let nonull2 = args.nonull2;
         let seed = args.seed;
-        let do_alignment = !args.noali || args.domtblout.is_some() || args.pfamtblout.is_some();
-        let do_alignment_display = !args.noali;
+        let wants_alignment_file = args.ali_outfile.is_some();
+        let do_alignment = !args.noali
+            || args.domtblout.is_some()
+            || args.pfamtblout.is_some()
+            || wants_alignment_file;
+        let do_alignment_display = !args.noali || wants_alignment_file;
         let mut total_residues: u64 = 0;
         let mut n_targets: u64 = 0;
 
@@ -519,13 +568,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             eprintln!("Error writing output: {}", e);
             std::process::exit(1);
         });
-        if args.cpu == 1 {
+        if args.cpu <= 1 {
             let mut local_bg = bg.clone();
             let mut local_gm = gm.clone();
             let mut local_om = om.clone();
             let mut local_pli = Pipeline::new();
             local_pli.new_model(&local_gm);
-            local_pli.use_bit_cutoffs = pli.use_bit_cutoffs;
+            copy_reporting_thresholds(&mut local_pli, &pli);
             if local_pli.use_bit_cutoffs != hmmer_pure_rs::pipeline::BitCutoff::None {
                 local_pli
                     .new_model_thresholds(&hmm.cutoff)
@@ -547,17 +596,56 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             local_pli.do_alignment = do_alignment;
             local_pli.do_alignment_display = do_alignment_display;
             local_pli.seed = seed;
+            local_pli.z = pli.z;
+            local_pli.z_setby = pli.z_setby;
+            local_pli.domz = pli.domz;
+            local_pli.domz_setby = pli.domz_setby;
 
             let mut sqf = open_target_seq_file(&args.seqdb, &abc, args.tformat.as_deref())
                 .unwrap_or_else(|e| {
                     eprintln!("Error opening sequence file: {}", e);
                     std::process::exit(1);
                 });
+            let mut restrict_started = args.restrictdb_stkey.is_none();
+            if let Some(stkey) = args.restrictdb_stkey.as_deref() {
+                sqf = open_restricted_target_seq_file(
+                    &args.seqdb,
+                    &abc,
+                    args.tformat.as_deref(),
+                    stkey,
+                    args.ssifile.as_deref(),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("Error opening restricted sequence file: {}", e);
+                    std::process::exit(1);
+                });
+                restrict_started = true;
+            }
             let mut sq = Sequence::new();
+            let mut restrict_seen = 0usize;
             while sqf.read(&mut sq).unwrap_or_else(|e| {
                 eprintln!("Error reading sequence file: {}", e);
                 std::process::exit(1);
             }) {
+                if !restrict_started {
+                    if args
+                        .restrictdb_stkey
+                        .as_deref()
+                        .is_some_and(|key| sq.name == key)
+                    {
+                        restrict_started = true;
+                    } else {
+                        sq.reuse();
+                        continue;
+                    }
+                }
+                if args
+                    .restrictdb_n
+                    .is_some_and(|limit| restrict_seen >= limit)
+                {
+                    break;
+                }
+                restrict_seen += 1;
                 total_residues += sq.n as u64;
                 n_targets += 1;
 
@@ -596,13 +684,48 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     eprintln!("Error opening sequence file: {}", e);
                     std::process::exit(1);
                 });
+            let mut restrict_started = args.restrictdb_stkey.is_none();
+            if let Some(stkey) = args.restrictdb_stkey.as_deref() {
+                sqf = open_restricted_target_seq_file(
+                    &args.seqdb,
+                    &abc,
+                    args.tformat.as_deref(),
+                    stkey,
+                    args.ssifile.as_deref(),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("Error opening restricted sequence file: {}", e);
+                    std::process::exit(1);
+                });
+                restrict_started = true;
+            }
             let mut sq = Sequence::new();
             let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
+            let mut restrict_seen = 0usize;
 
             loop {
                 while batch.len() < TARGET_BATCH_SIZE {
                     match sqf.read(&mut sq) {
                         Ok(true) => {
+                            if !restrict_started {
+                                if args
+                                    .restrictdb_stkey
+                                    .as_deref()
+                                    .is_some_and(|key| sq.name == key)
+                                {
+                                    restrict_started = true;
+                                } else {
+                                    sq.reuse();
+                                    continue;
+                                }
+                            }
+                            if args
+                                .restrictdb_n
+                                .is_some_and(|limit| restrict_seen >= limit)
+                            {
+                                break;
+                            }
+                            restrict_seen += 1;
                             total_residues += sq.n as u64;
                             n_targets += 1;
                             batch.push(sq.clone());
@@ -628,7 +751,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                             let local_gm = (*shared_gm).clone();
                             let mut local_pli = Pipeline::new();
                             local_pli.new_model(&local_gm);
-                            local_pli.use_bit_cutoffs = pli.use_bit_cutoffs;
+                            copy_reporting_thresholds(&mut local_pli, &pli);
                             if local_pli.use_bit_cutoffs != hmmer_pure_rs::pipeline::BitCutoff::None
                             {
                                 local_pli
@@ -651,6 +774,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                             local_pli.do_alignment = do_alignment;
                             local_pli.do_alignment_display = do_alignment_display;
                             local_pli.seed = seed;
+                            local_pli.z = pli.z;
+                            local_pli.z_setby = pli.z_setby;
+                            local_pli.domz = pli.domz;
+                            local_pli.domz_setby = pli.domz_setby;
                             (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
                         },
                         |(local_bg, local_gm, local_om, local_pli), sq| {
@@ -722,7 +849,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         // Set domz: user-specified, or auto = nreported from first pass
         let domz = match pli.domz_setby {
             hmmer_pure_rs::pipeline::ZSetBy::Option => pli.domz,
-            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => th.nreported.max(1) as f64,
+            hmmer_pure_rs::pipeline::ZSetBy::Ntargets => th.nreported as f64,
         };
         // Re-threshold with correct domz for domain-level E-values
         if domz != z {
@@ -730,6 +857,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
 
         let show_acc = args.show_acc;
+        let target_namew = th
+            .hits
+            .iter()
+            .map(|hit| shown_hit_name(hit, show_acc).len())
+            .max()
+            .unwrap_or(0)
+            .max(8);
+        let target_descw = if textw > 0 {
+            textw.saturating_sub(target_namew + 61).max(32)
+        } else {
+            0
+        };
 
         // Per-sequence hit table
         writeln!(
@@ -744,12 +883,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         .unwrap();
         writeln!(
             out,
-            "    E-value  score  bias    E-value  score  bias    exp  N  Sequence Description"
+            "    E-value  score  bias    E-value  score  bias    exp  N  {:<target_namew$} Description",
+            "Sequence"
         )
         .unwrap();
         writeln!(
             out,
-            "    ------- ------ -----    ------- ------ -----   ---- --  -------- -----------"
+            "    ------- ------ -----    ------- ------ -----   ---- --  {:<target_namew$} -----------",
+            "--------"
         )
         .unwrap();
 
@@ -764,29 +905,29 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 have_printed_incthresh = true;
             }
             any_reported = true;
-            let evalue = z * hit.lnp.exp();
+            let evalue = evalue_from_lnp(z, hit.lnp);
             let best_dom = best_domain(hit);
-            let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+            let dom_evalue = best_dom
+                .map(|d| evalue_from_lnp(z, d.lnp))
+                .unwrap_or(evalue);
             let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
             let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
+            let desc = if hit.desc.is_empty() { "" } else { &hit.desc };
+            let desc = truncate_for_textw(desc, target_descw);
 
             writeln!(
                 out,
-                "  {} {:6.1} {:5.1}  {} {:6.1} {:5.1}  {:4.1} {:2}  {} {}",
+                "  {} {} {}  {} {} {}  {} {:2}  {:<target_namew$}  {}",
                 hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score,
-                hit.bias,
+                hmmer_pure_rs::output::fmt_score(hit.score),
+                hmmer_pure_rs::output::fmt_bias(hit.bias),
                 hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-                dom_score,
-                dom_bias,
-                hit.nexpected,
+                hmmer_pure_rs::output::fmt_score(dom_score),
+                hmmer_pure_rs::output::fmt_bias(dom_bias),
+                fmt_width5_1(hit.nexpected as f64),
                 hit.nreported,
-                if show_acc && !hit.acc.is_empty() {
-                    &hit.acc
-                } else {
-                    &hit.name
-                },
-                if hit.desc.is_empty() { "" } else { &hit.desc },
+                shown_hit_name(hit, show_acc),
+                desc,
             )
             .unwrap();
         }
@@ -800,125 +941,148 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
 
         writeln!(out).unwrap();
+        writeln!(out).unwrap();
 
-        // Domain annotation for each sequence
-        if !args.noali {
+        // Domain annotation for each sequence. C HMMER still prints the domain
+        // table under --noali; only the alignment blocks are suppressed.
+        if args.noali {
+            writeln!(out, "Domain annotation for each sequence:").unwrap();
+        } else {
             writeln!(out, "Domain annotation for each sequence (and alignments):").unwrap();
+        }
 
-            for hit in &th.hits {
-                if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
-                    continue;
-                }
+        for hit in &th.hits {
+            if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
+                continue;
+            }
+
+            let domain_descw = if textw > 0 {
+                textw
+                    .saturating_sub(shown_hit_name(hit, show_acc).len() + 5)
+                    .max(32)
+            } else {
+                0
+            };
+            let desc = truncate_for_textw(&hit.desc, domain_descw);
+            writeln!(out, ">> {}  {}", shown_hit_name(hit, show_acc), desc).unwrap();
+
+            if hit.nreported == 0 {
+                writeln!(
+                    out,
+                    "   [No individual domains that satisfy reporting thresholds (although complete target did)]"
+                )
+                .unwrap();
+                writeln!(out).unwrap();
+                continue;
+            }
+
+            writeln!(out, "   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc").unwrap();
+            writeln!(out, " ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----").unwrap();
+
+            let mut reported_idx = 0usize;
+            for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+                reported_idx += 1;
+                let c_evalue = evalue_from_lnp(domz, dom.lnp);
+                let i_evalue = evalue_from_lnp(z, dom.lnp);
+                let indicator = if dom.is_included {
+                    '!'
+                } else if dom.is_reported {
+                    '?'
+                } else {
+                    '?'
+                };
+
+                let (hf, ht) = if let Some(ref ad) = dom.ad {
+                    (ad.hmmfrom, ad.hmmto)
+                } else {
+                    (1, hmm.m)
+                };
+                // Boundary indicators
+                let hmm_left = if hf == 1 { '[' } else { '.' };
+                let hmm_right = if ht == hmm.m { ']' } else { '.' };
+                let seq_left = if dom.iali == 1 { '[' } else { '.' };
+                let seq_right = if dom.jali == hit.n as i64 { ']' } else { '.' };
+                let env_left = if dom.ienv == 1 { '[' } else { '.' };
+                let env_right = if dom.jenv == hit.n as i64 { ']' } else { '.' };
+                let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
 
                 writeln!(
                     out,
-                    ">> {}  {}",
-                    if show_acc && !hit.acc.is_empty() {
-                        &hit.acc
-                    } else {
-                        &hit.name
-                    },
-                    hit.desc
+                    " {:3} {} {} {} {} {} {:7} {:7} {}{} {:7} {:7} {}{} {:7} {:7} {}{} {}",
+                    reported_idx,
+                    indicator,
+                    hmmer_pure_rs::output::fmt_score(dom.bitscore),
+                    hmmer_pure_rs::output::fmt_bias(dom.dombias),
+                    hmmer_pure_rs::output::fmt_evalue(c_evalue),
+                    hmmer_pure_rs::output::fmt_evalue(i_evalue),
+                    hf,
+                    ht,
+                    hmm_left,
+                    hmm_right,
+                    dom.iali,
+                    dom.jali,
+                    seq_left,
+                    seq_right,
+                    dom.ienv,
+                    dom.jenv,
+                    env_left,
+                    env_right,
+                    hmmer_pure_rs::output::fmt_fixed2(acc as f64),
                 )
                 .unwrap();
-                writeln!(out, "   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc").unwrap();
-                writeln!(out, " ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----").unwrap();
+            }
 
+            writeln!(out).unwrap();
+
+            // Text alignments for each domain
+            if !args.noali {
+                writeln!(out, "  Alignments for each domain:").unwrap();
                 let mut reported_idx = 0usize;
                 for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
                     reported_idx += 1;
-                    let c_evalue = domz * dom.lnp.exp();
-                    let i_evalue = z * dom.lnp.exp();
-                    let indicator = if dom.is_included {
-                        '!'
-                    } else if dom.is_reported {
-                        '?'
-                    } else {
-                        '?'
-                    };
-
-                    let (hf, ht) = if let Some(ref ad) = dom.ad {
-                        (ad.hmmfrom, ad.hmmto)
-                    } else {
-                        (1, hmm.m)
-                    };
-                    // Boundary indicators
-                    let hmm_left = if hf == 1 { '[' } else { '.' };
-                    let hmm_right = if ht == hmm.m { ']' } else { '.' };
-                    let seq_left = if dom.iali == dom.ienv { hmm_left } else { '.' };
-                    let seq_right = if dom.jali == dom.jenv { hmm_right } else { '.' };
-                    let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
-
                     writeln!(
                         out,
-                        " {:3} {} {:6.1} {:5.1} {} {} {:7} {:7} {}{} {:7} {:7} {}{} {:7} {:7} {}{} {:.2}",
+                        "  == domain {}  score: {} bits;  conditional E-value: {}",
                         reported_idx,
-                        indicator,
-                        dom.bitscore,
-                        dom.dombias,
-                        hmmer_pure_rs::output::fmt_evalue(c_evalue),
-                        hmmer_pure_rs::output::fmt_evalue(i_evalue),
-                        hf, ht,
-                        hmm_left, hmm_right,
-                        dom.iali, dom.jali,
-                        seq_left, seq_right,
-                        dom.ienv, dom.jenv,
-                        seq_left, seq_right,
-                        acc,
-                    ).unwrap();
-                }
+                        hmmer_pure_rs::output::fmt_fixed1(dom.bitscore as f64),
+                        hmmer_pure_rs::output::fmt_evalue(evalue_from_lnp(domz, dom.lnp)).trim()
+                    )
+                    .unwrap();
 
-                writeln!(out).unwrap();
-
-                // Text alignments for each domain
-                if !args.noali {
-                    writeln!(out, "  Alignments for each domain:").unwrap();
-                    let mut reported_idx = 0usize;
-                    for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
-                        reported_idx += 1;
-                        writeln!(
-                            out,
-                            "  == domain {}  score: {:.1} bits;  conditional E-value: {}",
-                            reported_idx,
-                            dom.bitscore,
-                            hmmer_pure_rs::output::fmt_evalue(domz * dom.lnp.exp()).trim()
-                        )
-                        .unwrap();
-
-                        if let Some(ref ad) = dom.ad {
-                            // Build CS line from hmm.cs over the alignment span.
-                            let cs_line = hmm.cs.as_ref().map(|cs| {
-                                let mut s = String::with_capacity(ad.model.len());
-                                let mut cs_idx = ad.hmmfrom;
-                                for ch in ad.model.chars() {
-                                    if ch == '.' {
-                                        s.push('.');
+                    if let Some(ref ad) = dom.ad {
+                        // Build CS line from hmm.cs over the alignment span.
+                        let cs_line = hmm.cs.as_ref().map(|cs| {
+                            let mut s = String::with_capacity(ad.model.len());
+                            let mut cs_idx = ad.hmmfrom;
+                            for ch in ad.model.chars() {
+                                if ch == '.' {
+                                    s.push('.');
+                                } else {
+                                    s.push(if cs_idx < cs.len() {
+                                        cs[cs_idx] as char
                                     } else {
-                                        s.push(if cs_idx < cs.len() {
-                                            cs[cs_idx] as char
-                                        } else {
-                                            ' '
-                                        });
-                                        cs_idx += 1;
-                                    }
+                                        ' '
+                                    });
+                                    cs_idx += 1;
                                 }
-                                s
-                            });
-                            hmmer_pure_rs::tophits::print_alidisplay_blocks(
-                                &mut out,
-                                &hmm.name,
-                                &hit.name,
-                                ad,
-                                cs_line.as_deref(),
-                                textw,
-                            );
-                        }
-                        writeln!(out).unwrap();
+                            }
+                            s
+                        });
+                        hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                            &mut out,
+                            &hmm.name,
+                            &hit.name,
+                            ad,
+                            cs_line.as_deref(),
+                            textw,
+                        );
                     }
+                    writeln!(out).unwrap();
                 }
             }
         }
 
+        writeln!(out).unwrap();
         writeln!(out).unwrap();
 
         // Statistics
@@ -940,55 +1104,82 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         } else {
             0.0
         };
+        let frac_bias = if pli.n_targets > 0 {
+            pli.n_past_bias as f64 / pli.n_targets as f64
+        } else {
+            0.0
+        };
 
         writeln!(out, "Internal pipeline statistics summary:").unwrap();
         writeln!(out, "-------------------------------------").unwrap();
         writeln!(
             out,
-            "Query model(s):                  {:>10}  ({} nodes)",
+            "Query model(s):                  {:>11}  ({} nodes)",
             1, hmm.m
         )
         .unwrap();
         writeln!(
             out,
-            "Target sequences:                {:>10}  ({} residues searched)",
+            "Target sequences:                {:>11}  ({} residues searched)",
             pli.n_targets, total_residues
         )
         .unwrap();
         writeln!(
             out,
-            "Passed MSV filter:               {:>10}  ({:.4}); expected {:.1} ({:.2})",
-            pli.n_past_msv, frac_msv, expected_msv, pli.f1
+            "Passed MSV filter:               {:>11}  ({}); expected {} ({})",
+            pli.n_past_msv,
+            hmmer_pure_rs::output::fmt_g(frac_msv),
+            hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+            hmmer_pure_rs::output::fmt_g(pli.f1)
         )
         .unwrap();
         writeln!(
             out,
-            "Passed bias filter:              {:>10}  ({:.4}); expected {:.1} ({:.2})",
-            pli.n_past_bias, frac_msv, expected_msv, pli.f1
+            "Passed bias filter:              {:>11}  ({}); expected {} ({})",
+            pli.n_past_bias,
+            hmmer_pure_rs::output::fmt_g(frac_bias),
+            hmmer_pure_rs::output::fmt_fixed1(expected_msv),
+            hmmer_pure_rs::output::fmt_g(pli.f1)
         )
         .unwrap();
         writeln!(
             out,
-            "Passed Vit filter:               {:>10}  ({:.4}); expected {:.1} ({:.4})",
-            pli.n_past_vit, frac_vit, expected_vit, pli.f2
+            "Passed Vit filter:               {:>11}  ({}); expected {} ({})",
+            pli.n_past_vit,
+            hmmer_pure_rs::output::fmt_g(frac_vit),
+            hmmer_pure_rs::output::fmt_fixed1(expected_vit),
+            hmmer_pure_rs::output::fmt_g(pli.f2)
         )
         .unwrap();
         writeln!(
             out,
-            "Passed Fwd filter:               {:>10}  ({:.4}); expected {:.1} ({:.0e})",
-            pli.n_past_fwd, frac_fwd, expected_fwd, pli.f3
+            "Passed Fwd filter:               {:>11}  ({}); expected {} ({})",
+            pli.n_past_fwd,
+            hmmer_pure_rs::output::fmt_g(frac_fwd),
+            hmmer_pure_rs::output::fmt_fixed1(expected_fwd),
+            hmmer_pure_rs::output::fmt_g(pli.f3)
         )
         .unwrap();
         writeln!(
             out,
-            "Initial search space (Z):        {:>10}  [actual number of targets]",
-            pli.n_targets
+            "Initial search space (Z):        {}  {}",
+            hmmer_pure_rs::output::fmt_width11_0(z),
+            if pli.z_setby == hmmer_pure_rs::pipeline::ZSetBy::Option {
+                "[as set by --Z on cmdline]"
+            } else {
+                "[actual number of targets]"
+            }
         )
         .unwrap();
         writeln!(
             out,
-            "Domain search space  (domZ):     {:>10}  [number of targets reported over threshold]",
-            th.nreported
+            "Domain search space  (domZ):     {}  {}",
+            hmmer_pure_rs::output::fmt_width11_0(domz),
+            if pli.domz_setby == hmmer_pure_rs::pipeline::ZSetBy::Option {
+                "[as set by --domZ on cmdline]"
+            } else {
+                "[number of targets reported over threshold]"
+            }
         )
         .unwrap();
 
@@ -1009,7 +1200,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             );
         }
         if let Some(ref mut f) = pfamtblout_file {
-            write_pfamtblout(f, &hmm.name, hmm.acc.as_deref(), hmm.m, &th, z, domz);
+            write_pfamtblout_with_pipeline(
+                f,
+                &hmm.name,
+                hmm.acc.as_deref(),
+                hmm.m,
+                &th,
+                &pli,
+                z,
+                domz,
+            );
         }
         if let Some(ref mut f) = ali_outfile {
             write_ali_output(f, hmm, &th, domz, textw);
@@ -1065,20 +1265,191 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// Read one or more profile HMMs from `path`, auto-dispatching by extension.
-///
-/// `.h3m` files use the binary HMMER3 reader; everything else uses the ASCII
-/// reader. Corresponds to C `p7_hmmfile_Read` (binary or ASCII selected
-/// internally by `p7_hmmfile_Open`).
+pub(crate) fn create_output_file_or_exit(
+    path: &std::path::Path,
+    message_template: &str,
+) -> std::fs::File {
+    std::fs::File::create(path).unwrap_or_else(|_| {
+        eprintln!(
+            "{}",
+            message_template.replace("{path}", &path.display().to_string())
+        );
+        std::process::exit(1);
+    })
+}
+
+fn write_hmmsearch_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
+    if command_line_has_option(cmdline, "-E") {
+        writeln!(
+            out,
+            "# sequence reporting threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.e_value)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.score_threshold {
+        writeln!(
+            out,
+            "# sequence reporting threshold:    score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--domE") {
+        writeln!(
+            out,
+            "# domain reporting threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.dom_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.dom_t {
+        writeln!(
+            out,
+            "# domain reporting threshold:      score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incE") {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.inc_e)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_t {
+        writeln!(
+            out,
+            "# sequence inclusion threshold:    score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--incdomE") {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      E-value <= {}",
+            hmmer_pure_rs::output::fmt_g(args.inc_dome)
+        )
+        .unwrap();
+    }
+    if let Some(score) = args.inc_dom_t {
+        writeln!(
+            out,
+            "# domain inclusion threshold:      score >= {}",
+            hmmer_pure_rs::output::fmt_g(score as f64)
+        )
+        .unwrap();
+    }
+    if args.cut_ga {
+        writeln!(out, "# model-specific thresholding:     GA cutoffs").unwrap();
+    }
+    if args.cut_nc {
+        writeln!(out, "# model-specific thresholding:     NC cutoffs").unwrap();
+    }
+    if args.cut_tc {
+        writeln!(out, "# model-specific thresholding:     TC cutoffs").unwrap();
+    }
+    if args.max {
+        writeln!(
+            out,
+            "# Max sensitivity mode:            on [all heuristic filters off]"
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F1") {
+        writeln!(
+            out,
+            "# MSV filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f1)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F2") {
+        writeln!(
+            out,
+            "# Vit filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f2)
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--F3") {
+        writeln!(
+            out,
+            "# Fwd filter P threshold:       <= {}",
+            hmmer_pure_rs::output::fmt_g(args.f3)
+        )
+        .unwrap();
+    }
+    if args.nobias {
+        writeln!(out, "# biased composition HMM filter:   off").unwrap();
+    }
+    if args.nonull2 {
+        writeln!(out, "# null2 bias corrections:          off").unwrap();
+    }
+    if let Some(z) = args.z_value {
+        writeln!(
+            out,
+            "# sequence search space set to:    {}",
+            hmmer_pure_rs::output::fmt_fixed0(z)
+        )
+        .unwrap();
+    }
+    if let Some(domz) = args.domz_value {
+        writeln!(
+            out,
+            "# domain search space set to:      {}",
+            hmmer_pure_rs::output::fmt_fixed0(domz)
+        )
+        .unwrap();
+    }
+    if let Some(stkey) = &args.restrictdb_stkey {
+        writeln!(out, "# Restrict db to start at seq key: {}", stkey).unwrap();
+    }
+    if let Some(n) = args.restrictdb_n {
+        writeln!(out, "# Restrict db to # target seqs:    {}", n).unwrap();
+    }
+    if let Some(ssifile) = &args.ssifile {
+        writeln!(
+            out,
+            "# Override ssi file to:            {}",
+            ssifile.display()
+        )
+        .unwrap();
+    }
+    if command_line_has_option(cmdline, "--seed") {
+        if args.seed == 0 {
+            writeln!(out, "# random number seed:              one-time arbitrary").unwrap();
+        } else {
+            writeln!(out, "# random number seed set to:       {}", args.seed).unwrap();
+        }
+    }
+}
+
+fn command_line_has_option(cmdline: &str, option: &str) -> bool {
+    let compact_short = option
+        .strip_prefix('-')
+        .filter(|rest| !rest.starts_with('-') && rest.chars().count() == 1)
+        .map(|_| option);
+    cmdline.split_whitespace().any(|token| {
+        token == option
+            || token.starts_with(&format!("{option}="))
+            || compact_short
+                .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
+    })
+}
+
+/// Read one or more profile HMMs from `path`, auto-dispatching ASCII vs binary
+/// by magic bytes like C `p7_hmmfile_Open`.
 fn read_hmms(
     path: &std::path::Path,
 ) -> hmmer_pure_rs::errors::HmmerResult<Vec<hmmer_pure_rs::Hmm>> {
     if path == std::path::Path::new("-") {
-        hmmfile::read_hmms(BufReader::new(std::io::stdin().lock()))
-    } else if path.extension().is_some_and(|ext| ext == "h3m") {
-        hmmfile_binary::read_binary_hmm_file(path)
+        hmmfile::read_hmms_auto(BufReader::new(std::io::stdin().lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto(path)
     }
 }
 
@@ -1181,26 +1552,28 @@ pub fn write_tblout<W: Write>(
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
-        let evalue = z * hit.lnp.exp();
+        let evalue = evalue_from_lnp(z, hit.lnp);
         let best_dom = best_domain(hit);
-        let dom_evalue = best_dom.map(|d| z * d.lnp.exp()).unwrap_or(evalue);
+        let dom_evalue = best_dom
+            .map(|d| evalue_from_lnp(z, d.lnp))
+            .unwrap_or(evalue);
         let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
         let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
 
         writeln!(
             f,
-            "{:<tnamew$} {:<taccw$} {:<qnamew$} {:<qaccw$} {} {:>6.1} {:>5.1} {} {:>6.1} {:>5.1} {:>5.1} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
+            "{:<tnamew$} {:<taccw$} {:<qnamew$} {:<qaccw$} {} {} {} {} {} {} {:>5} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
             hit.name,
             if hit.acc.is_empty() { "-" } else { &hit.acc },
             qname,
             qacc_s,
             hmmer_pure_rs::output::fmt_evalue(evalue),
-            hit.score,
-            hit.bias,
+            hmmer_pure_rs::output::fmt_score(hit.score),
+            hmmer_pure_rs::output::fmt_bias(hit.bias),
             hmmer_pure_rs::output::fmt_evalue(dom_evalue),
-            dom_score,
-            dom_bias,
-            hit.nexpected,
+            hmmer_pure_rs::output::fmt_score(dom_score),
+            hmmer_pure_rs::output::fmt_bias(dom_bias),
+            hmmer_pure_rs::output::fmt_width5_1(hit.nexpected as f64),
             hit.nregions,
             hit.nclustered,
             hit.noverlaps,
@@ -1217,6 +1590,271 @@ pub fn best_domain(hit: &Hit) -> Option<&Domain> {
     hit.dcl
         .iter()
         .max_by(|a, b| a.bitscore.total_cmp(&b.bitscore))
+}
+
+#[inline]
+fn evalue_from_lnp(scale: f64, lnp: f64) -> f64 {
+    scale * c_exp_f64(lnp)
+}
+
+fn shown_hit_name(hit: &Hit, show_acc: bool) -> &str {
+    if show_acc && !hit.acc.is_empty() {
+        &hit.acc
+    } else {
+        &hit.name
+    }
+}
+
+fn truncate_for_textw(s: &str, width: usize) -> String {
+    if width == 0 {
+        return s.to_string();
+    }
+    s.chars().take(width).collect()
+}
+
+pub fn write_standard_stdout_tables<W: Write>(
+    out: &mut W,
+    th: &TopHits,
+    model_name: &str,
+    model_len: usize,
+    model_cs: Option<&[u8]>,
+    z: f64,
+    domz: f64,
+    textw: usize,
+    show_acc: bool,
+    noali: bool,
+    show_hit_status: bool,
+) {
+    let target_namew = th
+        .hits
+        .iter()
+        .map(|hit| shown_hit_name(hit, show_acc).len())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let target_descw = if textw > 0 {
+        textw.saturating_sub(target_namew + 61).max(32)
+    } else {
+        0
+    };
+
+    writeln!(
+        out,
+        "Scores for complete sequences (score includes all domains):"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "   --- full sequence ---   --- best 1 domain ---    -#dom-"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    E-value  score  bias    E-value  score  bias    exp  N  {:<target_namew$} Description",
+        "Sequence"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    ------- ------ -----    ------- ------ -----   ---- --  {:<target_namew$} -----------",
+        "--------"
+    )
+    .unwrap();
+
+    let mut any_reported = false;
+    let mut have_printed_incthresh = false;
+    for hit in &th.hits {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
+            continue;
+        }
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 && !have_printed_incthresh {
+            writeln!(out, "  ------ inclusion threshold ------").unwrap();
+            have_printed_incthresh = true;
+        }
+        any_reported = true;
+        let evalue = evalue_from_lnp(z, hit.lnp);
+        let best_dom = best_domain(hit);
+        let dom_evalue = best_dom
+            .map(|d| evalue_from_lnp(z, d.lnp))
+            .unwrap_or(evalue);
+        let dom_score = best_dom.map(|d| d.bitscore).unwrap_or(hit.score);
+        let dom_bias = best_dom.map(|d| d.dombias).unwrap_or(hit.bias);
+        let desc = truncate_for_textw(&hit.desc, target_descw);
+        let status = if show_hit_status
+            && hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0
+            && hit.flags & hmmer_pure_rs::tophits::P7_IS_NEW != 0
+        {
+            '+'
+        } else if show_hit_status && hit.flags & hmmer_pure_rs::tophits::P7_IS_DROPPED != 0 {
+            '-'
+        } else {
+            ' '
+        };
+
+        writeln!(
+            out,
+            "{} {} {} {}  {} {} {}  {} {:2}  {:<target_namew$}  {}",
+            status,
+            hmmer_pure_rs::output::fmt_evalue(evalue),
+            fmt_score(hit.score),
+            fmt_bias(hit.bias),
+            hmmer_pure_rs::output::fmt_evalue(dom_evalue),
+            fmt_score(dom_score),
+            fmt_bias(dom_bias),
+            fmt_width5_1(hit.nexpected as f64),
+            hit.nreported,
+            shown_hit_name(hit, show_acc),
+            desc,
+        )
+        .unwrap();
+    }
+
+    if !any_reported {
+        writeln!(
+            out,
+            "\n   [No hits detected that satisfy reporting thresholds]"
+        )
+        .unwrap();
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out).unwrap();
+
+    if noali {
+        writeln!(out, "Domain annotation for each sequence:").unwrap();
+    } else {
+        writeln!(out, "Domain annotation for each sequence (and alignments):").unwrap();
+    }
+
+    for hit in &th.hits {
+        if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
+            continue;
+        }
+
+        let domain_descw = if textw > 0 {
+            textw
+                .saturating_sub(shown_hit_name(hit, show_acc).len() + 5)
+                .max(32)
+        } else {
+            0
+        };
+        let desc = truncate_for_textw(&hit.desc, domain_descw);
+        writeln!(out, ">> {}  {}", shown_hit_name(hit, show_acc), desc).unwrap();
+
+        if hit.nreported == 0 {
+            writeln!(
+                out,
+                "   [No individual domains that satisfy reporting thresholds (although complete target did)]"
+            )
+            .unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+
+        writeln!(out, "   #    score  bias  c-Evalue  i-Evalue hmmfrom  hmm to    alifrom  ali to    envfrom  env to     acc").unwrap();
+        writeln!(out, " ---   ------ ----- --------- --------- ------- -------    ------- -------    ------- -------    ----").unwrap();
+
+        let mut reported_idx = 0usize;
+        for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+            reported_idx += 1;
+            let c_evalue = evalue_from_lnp(domz, dom.lnp);
+            let i_evalue = evalue_from_lnp(z, dom.lnp);
+            let indicator = if dom.is_included { '!' } else { '?' };
+
+            let (hf, ht) = if let Some(ref ad) = dom.ad {
+                (ad.hmmfrom, ad.hmmto)
+            } else {
+                (1, model_len)
+            };
+            let hmm_left = if hf == 1 { '[' } else { '.' };
+            let hmm_right = if ht == model_len { ']' } else { '.' };
+            let seq_left = if dom.iali == 1 { '[' } else { '.' };
+            let seq_right = if dom.jali == hit.n as i64 { ']' } else { '.' };
+            let env_left = if dom.ienv == 1 { '[' } else { '.' };
+            let env_right = if dom.jenv == hit.n as i64 { ']' } else { '.' };
+            let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
+
+            writeln!(
+                out,
+                " {:3} {} {} {} {} {} {:7} {:7} {}{} {:7} {:7} {}{} {:7} {:7} {}{} {}",
+                reported_idx,
+                indicator,
+                fmt_score(dom.bitscore),
+                fmt_bias(dom.dombias),
+                hmmer_pure_rs::output::fmt_evalue(c_evalue),
+                hmmer_pure_rs::output::fmt_evalue(i_evalue),
+                hf,
+                ht,
+                hmm_left,
+                hmm_right,
+                dom.iali,
+                dom.jali,
+                seq_left,
+                seq_right,
+                dom.ienv,
+                dom.jenv,
+                env_left,
+                env_right,
+                fmt_fixed2(acc as f64),
+            )
+            .unwrap();
+        }
+
+        writeln!(out).unwrap();
+
+        if !noali {
+            writeln!(out, "  Alignments for each domain:").unwrap();
+            let mut reported_idx = 0usize;
+            for dom in hit.dcl.iter().filter(|dom| dom.is_reported) {
+                reported_idx += 1;
+                writeln!(
+                    out,
+                    "  == domain {}  score: {} bits;  conditional E-value: {}",
+                    reported_idx,
+                    fmt_fixed1(dom.bitscore as f64),
+                    hmmer_pure_rs::output::fmt_evalue(evalue_from_lnp(domz, dom.lnp)).trim()
+                )
+                .unwrap();
+
+                if let Some(ref ad) = dom.ad {
+                    let mut ad_for_print = ad.clone();
+                    if ad_for_print.rfline.is_empty() {
+                        ad_for_print.model = ad_for_print.model.to_ascii_lowercase();
+                        ad_for_print.mline = ad_for_print.mline.to_ascii_lowercase();
+                    }
+                    let cs_line = model_cs.map(|cs| {
+                        let mut s = String::with_capacity(ad.model.len());
+                        let mut cs_idx = ad.hmmfrom;
+                        for ch in ad.model.chars() {
+                            if ch == '.' {
+                                s.push('.');
+                            } else {
+                                s.push(if cs_idx < cs.len() {
+                                    cs[cs_idx] as char
+                                } else {
+                                    ' '
+                                });
+                                cs_idx += 1;
+                            }
+                        }
+                        s
+                    });
+                    hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                        out,
+                        model_name,
+                        &hit.name,
+                        &ad_for_print,
+                        cs_line.as_deref(),
+                        textw,
+                    );
+                }
+                writeln!(out).unwrap();
+            }
+        }
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out).unwrap();
 }
 
 /// Write per-domain tabular output (`--domtblout`).
@@ -1329,7 +1967,7 @@ pub fn write_domtblout<W: Write>(
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
-        let evalue = z * hit.lnp.exp();
+        let evalue = evalue_from_lnp(z, hit.lnp);
 
         let mut reported_idx = 0usize;
         for dom in &hit.dcl {
@@ -1337,8 +1975,8 @@ pub fn write_domtblout<W: Write>(
                 continue;
             }
             reported_idx += 1;
-            let c_evalue = domz * dom.lnp.exp();
-            let i_evalue = z * dom.lnp.exp();
+            let c_evalue = evalue_from_lnp(domz, dom.lnp);
+            let i_evalue = evalue_from_lnp(z, dom.lnp);
             let (hmmfrom, hmmto, acc) = if let Some(ref ad) = dom.ad {
                 let acc = dom.oasc / (1.0 + (dom.jenv - dom.ienv).abs() as f32);
                 (ad.hmmfrom, ad.hmmto, acc)
@@ -1347,8 +1985,8 @@ pub fn write_domtblout<W: Write>(
             };
 
             writeln!(
-                f,
-                "{:<tnamew$} {:<taccw$} {:>5} {:<qnamew$} {:<qaccw$} {:>5} {} {:>6.1} {:>5.1} {:>3} {:>3} {} {} {:>6.1} {:>5.1} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>4.2} {}",
+            f,
+                "{:<tnamew$} {:<taccw$} {:>5} {:<qnamew$} {:<qaccw$} {:>5} {} {} {} {:>3} {:>3} {} {} {} {} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {} {}",
                 hit.name,
                 if hit.acc.is_empty() { "-" } else { &hit.acc },
                 hit.n,
@@ -1356,21 +1994,21 @@ pub fn write_domtblout<W: Write>(
                 qacc_s,
                 qlen,
                 hmmer_pure_rs::output::fmt_evalue(evalue),
-                hit.score,
-                hit.bias,
+                hmmer_pure_rs::output::fmt_score(hit.score),
+                hmmer_pure_rs::output::fmt_bias(hit.bias),
                 reported_idx,
                 hit.nreported,
                 hmmer_pure_rs::output::fmt_evalue(c_evalue),
                 hmmer_pure_rs::output::fmt_evalue(i_evalue),
-                dom.bitscore,
-                dom.dombias,
+                hmmer_pure_rs::output::fmt_score(dom.bitscore),
+                hmmer_pure_rs::output::fmt_bias(dom.dombias),
                 hmmfrom,
                 hmmto,
                 dom.iali,
                 dom.jali,
                 dom.ienv,
                 dom.jenv,
-                acc,
+                hmmer_pure_rs::output::fmt_width4_2(acc as f64),
                 if hit.desc.is_empty() { "-" } else { &hit.desc },
             ).unwrap();
         }
@@ -1380,15 +2018,28 @@ pub fn write_domtblout<W: Write>(
 /// Write Pfam-format tabular output (`--pfamtblout`).
 ///
 /// Two sections: sequence scores then domain scores, both restricted to
-/// reported hits. Domain rows are re-sorted by bitscore (descending), with
-/// hit/domain indices as tie-breakers. Matches the Pfam-style block emitted
-/// by C `p7_tophits_TabularXfam` in `hmmer/src/p7_tophits.c`.
+/// reported hits. Domain rows are re-sorted as C pseudo-hits, using the full
+/// sort-key comparator from `p7_tophits_TabularXfam`.
 pub fn write_pfamtblout<W: Write>(
     f: &mut W,
     _qname: &str,
     _qacc: Option<&str>,
     qlen: usize,
     th: &TopHits,
+    z: f64,
+    _domz: f64,
+) {
+    let pli = Pipeline::new();
+    write_pfamtblout_with_pipeline(f, _qname, _qacc, qlen, th, &pli, z, _domz);
+}
+
+pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
+    f: &mut W,
+    _qname: &str,
+    _qacc: Option<&str>,
+    qlen: usize,
+    th: &TopHits,
+    pli: &Pipeline,
     z: f64,
     _domz: f64,
 ) {
@@ -1434,16 +2085,16 @@ pub fn write_pfamtblout<W: Write>(
         if hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED == 0 {
             continue;
         }
-        let evalue = z * hit.lnp.exp();
+        let evalue = evalue_from_lnp(z, hit.lnp);
         writeln!(
             f,
-            "{:<tnamew$}  {:>6.1} {:>9} {:>3} {:>5.1} {:>5.1}    {}",
+            "{:<tnamew$}  {} {:>9} {:>3} {:>5} {}    {}",
             hit.name,
-            hit.score,
+            hmmer_pure_rs::output::fmt_score(hit.score),
             hmmer_pure_rs::output::fmt_evalue(evalue),
             hit.ndom,
-            hit.nexpected,
-            hit.bias,
+            hmmer_pure_rs::output::fmt_width5_1(hit.nexpected as f64),
+            hmmer_pure_rs::output::fmt_bias(hit.bias),
             if hit.desc.is_empty() { "-" } else { &hit.desc },
         )
         .unwrap();
@@ -1501,15 +2152,10 @@ pub fn write_pfamtblout<W: Write>(
             }
         }
     }
-    reported_domains.sort_by(|a, b| {
-        b.3.bitscore
-            .total_cmp(&a.3.bitscore)
-            .then_with(|| a.0.cmp(&b.0))
-            .then_with(|| a.1.cmp(&b.1))
-    });
+    reported_domains.sort_by(|a, b| compare_pfamtblout_domain_pseudo_hits(a, b, pli));
 
     for (_hit_idx, dom_idx, hit, dom) in reported_domains {
-        let i_evalue = z * dom.lnp.exp();
+        let i_evalue = evalue_from_lnp(z, dom.lnp);
         let (hmmfrom, hmmto) = if let Some(ref ad) = dom.ad {
             (ad.hmmfrom, ad.hmmto)
         } else {
@@ -1517,12 +2163,12 @@ pub fn write_pfamtblout<W: Write>(
         };
         writeln!(
             f,
-            "{:<tnamew$}  {:>6.1} {:>9} {:>5} {:>5.1} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}     {}",
+            "{:<tnamew$}  {} {:>9} {:>5} {} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}     {}",
             hit.name,
-            dom.bitscore,
+            hmmer_pure_rs::output::fmt_score(dom.bitscore),
             hmmer_pure_rs::output::fmt_evalue(i_evalue),
             dom_idx + 1,
-            dom.dombias,
+            hmmer_pure_rs::output::fmt_bias(dom.dombias),
             dom.ienv,
             dom.jenv,
             dom.iali,
@@ -1533,6 +2179,28 @@ pub fn write_pfamtblout<W: Write>(
         )
         .unwrap();
     }
+}
+
+fn compare_pfamtblout_domain_pseudo_hits(
+    a: &(usize, usize, &Hit, &Domain),
+    b: &(usize, usize, &Hit, &Domain),
+    pli: &Pipeline,
+) -> std::cmp::Ordering {
+    let a_key = pli.hit_sortkey(a.3.bitscore, a.3.lnp);
+    let b_key = pli.hit_sortkey(b.3.bitscore, b.3.lnp);
+    a_key
+        .partial_cmp(&b_key)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.2.name.cmp(&b.2.name))
+        .then_with(|| {
+            let a_dir = if a.3.iali < a.3.jali { 1 } else { -1 };
+            let b_dir = if b.3.iali < b.3.jali { 1 } else { -1 };
+            if a_dir != b_dir {
+                b_dir.cmp(&a_dir)
+            } else {
+                a.3.iali.cmp(&b.3.iali)
+            }
+        })
 }
 
 pub fn write_table_footer<W: Write>(
@@ -1569,7 +2237,7 @@ pub fn write_table_footer<W: Write>(
 /// each included domain's aligned sequence (`AliDisplay::aseq`). The C
 /// equivalent is `p7_tophits_Alignment` → `esl_msafile_Write` in
 /// `hmmer/src/p7_tophits.c`; this is a lightweight stand-in.
-fn write_ali_output<W: Write>(
+pub(crate) fn write_ali_output<W: Write>(
     f: &mut W,
     hmm: &hmmer_pure_rs::hmm::Hmm,
     th: &TopHits,
@@ -1608,11 +2276,161 @@ fn open_target_seq_file(
     abc: &Alphabet,
     tformat: Option<&str>,
 ) -> hmmer_pure_rs::errors::HmmerResult<sequence::SeqFile<Box<dyn std::io::Read>>> {
-    if tformat.is_some_and(|format| format.eq_ignore_ascii_case("fasta")) {
-        sequence::open_fasta_seq_file(path, abc)
+    if let Some(format) = tformat {
+        sequence::open_seq_file_with_format(path, abc, SequenceFormat::from_name(format).unwrap())
     } else {
         sequence::open_seq_file(path, abc)
     }
+}
+
+pub(crate) fn open_restricted_target_seq_file(
+    path: &Path,
+    abc: &Alphabet,
+    tformat: Option<&str>,
+    stkey: &str,
+    ssifile: Option<&Path>,
+) -> Result<sequence::SeqFile<Box<dyn std::io::Read>>, String> {
+    if path == Path::new("-") {
+        return Err("can't open an SSI index for standard input".to_string());
+    }
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        return Err("can't open an SSI index for a .gz compressed seq file".to_string());
+    }
+    let ssi_path = ssifile
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| hmmer_pure_rs::ssi::path_with_appended_suffix(path, ".ssi"));
+    let offset = lookup_ssi_primary_offset(&ssi_path, stkey)?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to open sequence file {}: {e}", path.display()))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("failed to seek sequence file {}: {e}", path.display()))?;
+    let reader: Box<dyn Read> = Box::new(file);
+    let sqf = sequence::SeqFile::new(reader, abc.clone());
+    Ok(if let Some(format) = tformat {
+        sqf.with_format(SequenceFormat::from_name(format).unwrap())
+    } else {
+        sqf
+    })
+}
+
+fn lookup_ssi_primary_offset(ssi_path: &Path, key: &str) -> Result<u64, String> {
+    let mut file = std::fs::File::open(ssi_path)
+        .map_err(|e| format!("failed to open SSI index {}: {e}", ssi_path.display()))?;
+    let magic = read_be_u32(&mut file)?;
+    if magic != 0xd3d3c9b3 {
+        return Err(format!("bad SSI magic in {}", ssi_path.display()));
+    }
+    let _flags = read_be_u32(&mut file)?;
+    let offsz = read_be_u32(&mut file)?;
+    let nfiles = read_be_u16(&mut file)?;
+    let nprimary = read_be_u64(&mut file)?;
+    let nsecondary = read_be_u64(&mut file)?;
+    let flen = read_be_u32(&mut file)? as usize;
+    let plen = read_be_u32(&mut file)? as usize;
+    let slen = read_be_u32(&mut file)? as usize;
+    let frecsize = read_be_u32(&mut file)? as usize;
+    let precsize = read_be_u32(&mut file)? as usize;
+    let srecsize = read_be_u32(&mut file)? as usize;
+    let _foffset = read_be_offset(&mut file, offsz)?;
+    let poffset = read_be_offset(&mut file, offsz)?;
+    let soffset = read_be_offset(&mut file, offsz)?;
+    if (offsz != 4 && offsz != 8) || nfiles != 1 {
+        return Err(format!("unsupported SSI header in {}", ssi_path.display()));
+    }
+    if frecsize != flen + 16
+        || precsize != plen + 2 + 2 * offsz as usize + 8
+        || srecsize != slen + plen
+    {
+        return Err(format!(
+            "SSI index {} has inconsistent record sizes",
+            ssi_path.display()
+        ));
+    }
+
+    let mut primary_offsets = std::collections::HashMap::new();
+    file.seek(SeekFrom::Start(poffset))
+        .map_err(|e| format!("failed to read SSI index {}: {e}", ssi_path.display()))?;
+    for _ in 0..nprimary {
+        let primary = read_fixed_string(&mut file, plen)?;
+        let file_idx = read_be_u16(&mut file)?;
+        let offset = read_be_offset(&mut file, offsz)?;
+        let _data_offset = read_be_offset(&mut file, offsz)?;
+        let _record_len = read_be_i64(&mut file)?;
+        if file_idx == 0 {
+            primary_offsets.insert(primary, offset);
+        }
+    }
+    if let Some(offset) = primary_offsets.get(key).copied() {
+        return Ok(offset);
+    }
+
+    file.seek(SeekFrom::Start(soffset))
+        .map_err(|e| format!("failed to read SSI index {}: {e}", ssi_path.display()))?;
+    for _ in 0..nsecondary {
+        let secondary = read_fixed_string(&mut file, slen)?;
+        let primary = read_fixed_string(&mut file, plen)?;
+        if secondary == key {
+            return primary_offsets.get(&primary).copied().ok_or_else(|| {
+                format!(
+                    "SSI index {} secondary key {key} references missing primary {primary}",
+                    ssi_path.display()
+                )
+            });
+        }
+    }
+    Err(format!(
+        "sequence {key} not found in SSI index {}",
+        ssi_path.display()
+    ))
+}
+
+fn read_fixed_string<R: Read>(reader: &mut R, len: usize) -> Result<String, String> {
+    let mut buf = vec![0u8; len];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| format!("failed to read SSI index: {e}"))?;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(String::from_utf8_lossy(&buf[..end]).to_string())
+}
+
+fn read_be_u16<R: Read>(reader: &mut R) -> Result<u16, String> {
+    let mut buf = [0u8; 2];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| format!("failed to read SSI index: {e}"))?;
+    Ok(u16::from_be_bytes(buf))
+}
+
+fn read_be_u32<R: Read>(reader: &mut R) -> Result<u32, String> {
+    let mut buf = [0u8; 4];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| format!("failed to read SSI index: {e}"))?;
+    Ok(u32::from_be_bytes(buf))
+}
+
+fn read_be_u64<R: Read>(reader: &mut R) -> Result<u64, String> {
+    let mut buf = [0u8; 8];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| format!("failed to read SSI index: {e}"))?;
+    Ok(u64::from_be_bytes(buf))
+}
+
+fn read_be_offset<R: Read>(reader: &mut R, offsz: u32) -> Result<u64, String> {
+    match offsz {
+        4 => read_be_u32(reader).map(u64::from),
+        8 => read_be_u64(reader),
+        _ => Err(format!("unsupported SSI offset size {offsz}")),
+    }
+}
+
+fn read_be_i64<R: Read>(reader: &mut R) -> Result<i64, String> {
+    let mut buf = [0u8; 8];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| format!("failed to read SSI index: {e}"))?;
+    Ok(i64::from_be_bytes(buf))
 }
 
 #[cfg(test)]
@@ -1636,6 +2454,15 @@ mod tests {
             is_included: reported,
             ad: None,
         }
+    }
+
+    fn domain_with_alignment(bitscore: f32, reported: bool, iali: i64, jali: i64) -> Domain {
+        let mut dom = domain(bitscore, reported);
+        dom.iali = iali;
+        dom.jali = jali;
+        dom.ienv = iali.min(jali);
+        dom.jenv = iali.max(jali);
+        dom
     }
 
     fn hit_with_name(name: &str, domains: Vec<Domain>, flags: u32) -> Hit {
@@ -1711,7 +2538,8 @@ mod tests {
         ));
 
         let mut out = Vec::new();
-        write_pfamtblout(&mut out, "query", None, 42, &th, 1.0, 1.0);
+        let pli = Pipeline::new();
+        write_pfamtblout_with_pipeline(&mut out, "query", None, 42, &th, &pli, 1.0, 1.0);
         let out = String::from_utf8(out).unwrap();
 
         assert!(out.contains("long-reported-target-name    10.0"));
@@ -1720,5 +2548,61 @@ mod tests {
             line.starts_with("long-reported-target-name")
                 && line.split_whitespace().nth(3) == Some("2")
         }));
+    }
+
+    #[test]
+    fn pfamtblout_domain_pseudo_hits_use_c_tie_breakers() {
+        let mut th = TopHits::new();
+        th.hits.push(hit_with_name(
+            "target",
+            vec![
+                domain_with_alignment(20.0, true, 30, 20),
+                domain_with_alignment(20.0, true, 5, 15),
+            ],
+            P7_IS_REPORTED | P7_IS_INCLUDED,
+        ));
+
+        let mut out = Vec::new();
+        let pli = Pipeline::new();
+        write_pfamtblout_with_pipeline(&mut out, "query", None, 42, &th, &pli, 1.0, 1.0);
+        let out = String::from_utf8(out).unwrap();
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|line| line.starts_with("target"))
+            .collect();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].split_whitespace().nth(3), Some("2"));
+        assert_eq!(rows[2].split_whitespace().nth(3), Some("1"));
+    }
+
+    #[test]
+    fn pfamtblout_domain_pseudo_hits_use_live_score_sort_mode() {
+        let mut low_lnp_high_score = domain(50.0, true);
+        low_lnp_high_score.lnp = -1.0;
+        let mut high_lnp_low_score = domain(10.0, true);
+        high_lnp_low_score.lnp = -100.0;
+
+        let mut th = TopHits::new();
+        th.hits.push(hit_with_name(
+            "target",
+            vec![low_lnp_high_score, high_lnp_low_score],
+            P7_IS_REPORTED | P7_IS_INCLUDED,
+        ));
+
+        let mut out = Vec::new();
+        let mut pli = Pipeline::new();
+        pli.inc_t = Some(20.0);
+        pli.inc_by_e = false;
+        write_pfamtblout_with_pipeline(&mut out, "query", None, 42, &th, &pli, 1.0, 1.0);
+        let out = String::from_utf8(out).unwrap();
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|line| line.starts_with("target"))
+            .collect();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].split_whitespace().nth(1), Some("50.0"));
+        assert_eq!(rows[2].split_whitespace().nth(1), Some("10.0"));
     }
 }

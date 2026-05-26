@@ -5,6 +5,8 @@ use std::arch::aarch64::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
+#[cfg(target_arch = "aarch64")]
+use crate::util::cmath::c_log_f64;
 
 /// Result of the NEON Forward parser. Currently unused (the parser returns `f32`
 /// directly, with `-inf` signalling overflow / non-finite outputs).
@@ -145,7 +147,7 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
                 dmo!(q) = vmulq_f32(dmo!(q), sv);
                 imo!(q) = vmulq_f32(imo!(q), sv);
             }
-            totscale += xe.ln();
+            totscale += c_log_f64(xe as f64) as f32;
             xe = 1.0;
         }
     }
@@ -153,7 +155,7 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     if xc.is_nan() || (l > 0 && xc == 0.0) || xc.is_infinite() {
         return f32::NEG_INFINITY;
     }
-    totscale + (xc * om.xf[P7O_C][P7O_MOVE]).ln()
+    totscale + c_log_f64((xc * om.xf[P7O_C][P7O_MOVE]) as f64) as f32
 }
 
 /// Non-aarch64 stub for [`neon_forward_parser`]; always returns `-inf`.

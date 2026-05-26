@@ -4,6 +4,7 @@
 use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::Profile;
+use crate::util::cmath::c_logf_to_f32;
 
 /// The MSV score algorithm (slow, correct reference version).
 ///
@@ -15,11 +16,11 @@ use crate::profile::Profile;
 /// them to 0). Counterpart of `p7_GMSV`.
 pub fn g_msv(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx, nu: f32) -> f32 {
     let m = gm.m;
-    let tloop = (l as f32 / (l as f32 + 3.0)).ln();
-    let tmove = (3.0_f32 / (l as f32 + 3.0)).ln();
-    let tbmk = (2.0_f32 / (m as f32 * (m as f32 + 1.0))).ln();
-    let tej = ((nu - 1.0) / nu).ln();
-    let tec = (1.0_f32 / nu).ln();
+    let tloop = c_logf_to_f32(l as f32 / (l as f32 + 3.0));
+    let tmove = c_logf_to_f32(3.0_f32 / (l as f32 + 3.0));
+    let tbmk = c_logf_to_f32(2.0_f32 / (m as f32 * (m as f32 + 1.0)));
+    let tej = c_logf_to_f32((nu - 1.0) / nu);
+    let tec = c_logf_to_f32(1.0_f32 / nu);
 
     // Initialization of row 0
     gx.set_xmx(0, P7G_N, 0.0);

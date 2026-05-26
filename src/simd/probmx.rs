@@ -3,6 +3,7 @@
 //! Used for domain decoding without needing full per-M-state DP rows.
 
 use crate::dp::gmx::*;
+use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
 
 /// Special state indices in xmx array.
 pub const PXE: usize = 0;
@@ -538,7 +539,7 @@ pub fn p_null2_from_pmx(
     for i in ienv..=jenv {
         let x = dsq[i] as usize;
         if x < null2.len() && null2[x] > 0.0 {
-            correction += null2[x].ln();
+            correction += c_logf_to_f32(null2[x]);
         }
     }
     correction
@@ -557,7 +558,7 @@ pub fn match_odds_from_rsc(rsc: &[Vec<f32>], k: usize, m: usize) -> Vec<f32> {
             if x < rsc.len() && idx < rsc[x].len() {
                 let msc = rsc[x][idx];
                 if msc > f32::NEG_INFINITY {
-                    odds[x * width + node] = msc.exp();
+                    odds[x * width + node] = c_expf_to_f32(msc);
                 }
             }
         }
@@ -767,7 +768,7 @@ pub fn p_null2_odds_from_pmx(
     let mut exp_j = 0.0_f32;
 
     for i in ienv..=jenv {
-        let dp_scale = ((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
+        let dp_scale = c_expf_to_f32((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32) * inv_total;
 
         let mut denom = 0.0_f32;
 
@@ -780,7 +781,7 @@ pub fn p_null2_odds_from_pmx(
 
         // N/J/C specials (use fwd[i-1] * bck[i] * transition)
         let sp_scale = if i > 0 {
-            ((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total
+            c_expf_to_f32((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32) * inv_total
         } else {
             dp_scale
         };
@@ -1294,7 +1295,7 @@ fn p_null2_odds_from_striped_pmx(
 
     unsafe {
         for i in 1..=ld {
-            let dp_scale = ((*fs.add(i) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
+            let dp_scale = c_expf_to_f32((*fs.add(i) + *bs.add(i) - bck_scale0) as f32) * inv_total;
             let frow = i * fwd.striped_row_width;
             let brow = i * bck.striped_row_width;
 
@@ -1314,7 +1315,8 @@ fn p_null2_odds_from_striped_pmx(
                 }
             }
 
-            let sp_scale = ((*fs.add(i - 1) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
+            let sp_scale =
+                c_expf_to_f32((*fs.add(i - 1) + *bs.add(i) - bck_scale0) as f32) * inv_total;
             let pn = *fx.add((i - 1) * NXCELLS + PXN)
                 * *bx.add(i * NXCELLS + PXN)
                 * njc_loop[0]
@@ -1431,7 +1433,7 @@ fn p_null2_odds_from_striped_pmx_reuse(
 
     unsafe {
         for i in 1..=ld {
-            let dp_scale = ((*fs.add(i) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
+            let dp_scale = c_expf_to_f32((*fs.add(i) + *bs.add(i) - bck_scale0) as f32) * inv_total;
             let frow = i * fwd.striped_row_width;
             let brow = i * bck.striped_row_width;
 
@@ -1451,7 +1453,8 @@ fn p_null2_odds_from_striped_pmx_reuse(
                 }
             }
 
-            let sp_scale = ((*fs.add(i - 1) + *bs.add(i) - bck_scale0) as f32).exp() * inv_total;
+            let sp_scale =
+                c_expf_to_f32((*fs.add(i - 1) + *bs.add(i) - bck_scale0) as f32) * inv_total;
             let pn = *fx.add((i - 1) * NXCELLS + PXN)
                 * *bx.add(i * NXCELLS + PXN)
                 * njc_loop[0]
@@ -1553,7 +1556,7 @@ fn p_null2_correction(
     let mut exp_j = 0.0_f32;
 
     for i in ienv..=jenv {
-        let dp_scale = ((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
+        let dp_scale = c_expf_to_f32((fwd.scale[i] + bck.scale[i] - bck_scale0) as f32) * inv_total;
 
         for node in 1..=m {
             let mp = fwd.mmx(i, node) * bck.mmx(i, node) * dp_scale;
@@ -1562,7 +1565,8 @@ fn p_null2_correction(
             exp_i[node] += ip;
         }
 
-        let sp_scale = ((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32).exp() * inv_total;
+        let sp_scale =
+            c_expf_to_f32((fwd.scale[i - 1] + bck.scale[i] - bck_scale0) as f32) * inv_total;
         exp_n += fwd.xmx(i - 1, PXN) * bck.xmx(i, PXN) * sp_scale;
         exp_j += fwd.xmx(i - 1, PXJ) * bck.xmx(i, PXJ) * sp_scale;
         exp_c += fwd.xmx(i - 1, PXC) * bck.xmx(i, PXC) * sp_scale;
@@ -1598,13 +1602,13 @@ fn p_null2_correction(
             if x < rsc.len() && node * 2 < rsc[x].len() {
                 let msc = rsc[x][node * 2]; // log-odds emission score
                 if msc > f32::NEG_INFINITY {
-                    val += exp_m[node] * msc.exp();
+                    val += exp_m[node] * c_expf_to_f32(msc);
                 }
             }
         }
         val += insert_total + xfactor;
         if val > 0.0 {
-            correction += val.ln();
+            correction += c_logf_to_f32(val);
         }
     }
     correction

@@ -16,6 +16,7 @@ use hmmer_pure_rs::profile::{
 };
 use hmmer_pure_rs::sequence::Sequence;
 use hmmer_pure_rs::trace::{State, Trace};
+use hmmer_pure_rs::util::cmath::c_exp_to_f32;
 use hmmer_pure_rs::util::random::MersenneTwister;
 
 #[derive(Parser)]
@@ -213,9 +214,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 fn read_hmms_maybe_stdin(path: &std::path::Path) -> hmmer_pure_rs::errors::HmmerResult<Vec<Hmm>> {
     if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        hmmfile::read_hmms(BufReader::new(stdin.lock()))
+        hmmfile::read_hmms_auto(BufReader::new(stdin.lock()))
     } else {
-        hmmfile::read_hmm_file(path)
+        hmmfile::read_hmm_file_auto(path)
     }
 }
 
@@ -452,14 +453,17 @@ fn profile_emit(hmm: &Hmm, gm: &Profile, bg: &Bg, rng: &mut MersenneTwister) -> 
 }
 
 fn sample_special(rng: &mut MersenneTwister, gm: &Profile, state: usize) -> usize {
-    let probs = [gm.xsc[state][P7P_LOOP].exp(), gm.xsc[state][P7P_MOVE].exp()];
+    let probs = [
+        c_exp_to_f32(gm.xsc[state][P7P_LOOP] as f64),
+        c_exp_to_f32(gm.xsc[state][P7P_MOVE] as f64),
+    ];
     rng.sample_discrete(&probs)
 }
 
 fn sample_endpoints(rng: &mut MersenneTwister, gm: &Profile) -> (usize, usize) {
     let mut pstart = vec![0.0_f32; gm.m + 1];
     for (k, pk) in pstart.iter_mut().enumerate().take(gm.m + 1).skip(1) {
-        *pk = gm.tsc(k - 1, P7P_BM).exp() * (gm.m - k + 1) as f32;
+        *pk = c_exp_to_f32(gm.tsc(k - 1, P7P_BM) as f64) * (gm.m - k + 1) as f32;
     }
     let kstart = rng.sample_discrete(&pstart);
     let kend = kstart + rng.roll(gm.m - kstart + 1);
