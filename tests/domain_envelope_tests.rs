@@ -74,6 +74,7 @@ fn run_p7_pipeline_full(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<Domain
         dsq,
         n: seq.len(),
         l: seq.len(),
+        taxid: -1,
     };
 
     pli.run(&mut gm, &mut om, &bg_obj, hmm, &sq, &mut th);
@@ -116,6 +117,7 @@ fn run_p7_pipeline(hmm: &hmmer_pure_rs::hmm::Hmm, seq: &[u8]) -> Vec<(usize, usi
         dsq,
         n: seq.len(),
         l: seq.len(),
+        taxid: -1,
     };
 
     pli.run(&mut gm, &mut om, &bg_obj, hmm, &sq, &mut th);

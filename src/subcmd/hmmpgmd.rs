@@ -721,6 +721,7 @@ fn score_hmmdb_sequence_model(
         dsq: dsq.to_vec(),
         n: l,
         l,
+        taxid: -1,
     };
 
     let mut pli = Pipeline::new();

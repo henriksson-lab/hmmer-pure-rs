@@ -1620,6 +1620,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         dsq: rc_dsq,
                         n: sq.n,
                         l: sq.l,
+                        taxid: -1,
                     };
                     let fm_windows = fm_seed_candidate_windows_with_config(
                         &target_db,
@@ -3959,12 +3960,14 @@ fn fm_extend_seed_diagonal(
     }
 
     let extend = 10usize.max(ssv_length.saturating_sub(seed_len));
-    // C FM_extendSeed (fm_ssv.c:655): model_start = max(1, diag->k - extend + 1),
-    // where diag->k is the model position at the *start* of the seed. The "+ 1"
-    // matters once the seed sits more than `extend` positions into the model;
-    // without it the Rust extension reached one model node further upstream than
-    // C, shifting the clipped best sub-diagonal coordinates and score.
-    let mut model_start = (seed_model_start + 1).saturating_sub(extend).max(1);
+    // NOTE: this is the seed-then-rescore approximation's extension window, NOT a
+    // 1:1 port of C `FM_extendSeed`; the downstream window extension + MSV
+    // rescore recompute final coordinates. Adding C's `model_start = k-extend+1`
+    // "+ 1" here was tried and is observably neutral on the current fixtures
+    // (the longtarget span differences in the failing `test_nhmmer_3box_*` /
+    // `..._max_*` C-parity tests come from the FM seed-vs-exact-SSV gap, not this
+    // line), so the simpler long-standing no-`+1` form is kept.
+    let mut model_start = seed_model_start.saturating_sub(extend).max(1);
     let mut model_end = (seed_model_start + seed_len + extend - 1).min(hmm.m);
     let mut target_start = seq_seed_start0 as isize - (seed_model_start - model_start) as isize;
     let mut target_end = seq_seed_start0 as isize + (model_end - seed_model_start) as isize;
@@ -7655,6 +7658,7 @@ fn c_style_blocked_msv_residue_count(
             n: end - start + 1,
             l: end - start + 1,
             dsq: block_dsq,
+            taxid: -1,
         };
         total += msv_residue_count_for_longtarget_window(&block_sq, hmm, om, bg, max_length, f1);
 
@@ -8178,6 +8182,7 @@ fn search_longtarget(
             dsq: win_dsq,
             n: win_len,
             l: win_len,
+            taxid: -1,
         };
 
         let mut lgm = gm.clone();

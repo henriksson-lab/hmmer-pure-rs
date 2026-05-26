@@ -14,6 +14,7 @@ pub mod bck_filter;
 pub mod fwd_filter;
 #[cfg(target_arch = "x86_64")]
 pub mod msv_filter;
+pub mod fm_ssv;
 pub mod probmx;
 #[cfg(target_arch = "x86_64")]
 pub mod ssv_filter;

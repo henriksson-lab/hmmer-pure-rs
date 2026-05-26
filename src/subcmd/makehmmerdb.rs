@@ -962,9 +962,19 @@ fn assign_ambiguities_to_blocks(
         block.ambig_count = 0;
     }
 
+    // Match C's emission order (makehmmerdb.c:656-668): C records ambiguity
+    // ranges while walking each FM *block's* text, sequence-window by
+    // sequence-window, residue by residue. So the flat `ambig_list` is
+    // BLOCK-major (in block order), then within a block in the order the
+    // window's residues are scanned (i.e. global position order). Because
+    // `seq_data` already lists windows in block order, iterating windows
+    // (outer) then ambiguity ranges in their recorded position order (inner)
+    // reproduces C's exact ordering — including re-emitting a degenerate run
+    // that falls in an inter-block overlap region once per block, since the
+    // continuation window re-reads (and thus re-records) those residues.
     let mut compact_idx = 0usize;
-    for range in ambig_ranges {
-        for seq in seq_data {
+    for seq in seq_data {
+        for range in ambig_ranges {
             if intersect_ambiguity_with_sequence(range, seq).is_some() {
                 if let Some(block) = blocks.get_mut(seq.block_id) {
                     if block.ambig_count == 0 {
@@ -1358,7 +1368,12 @@ fn write_c_fm_record<W: Write + ?Sized>(
     out.write_all(&checked_u32(record.term_loc, "terminal location")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.seq_offset, "seq_offset")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.ambig_offset, "ambig_offset")?.to_le_bytes())?;
-    out.write_all(&checked_u32(block.overlap_bases, "overlap")?.to_le_bytes())?;
+    // C writes the block's overlap (`block->list[0].C`) ONLY for the forward
+    // (reversed-text) FM record (makehmmerdb.c:694); the reverse-strand record
+    // is emitted with overlap=0 (makehmmerdb.c:700). The forward record is the
+    // one built from reversed text, i.e. `reverse_text_for_bwt == true`.
+    let overlap = if reverse_text_for_bwt { block.overlap_bases } else { 0 };
+    out.write_all(&checked_u32(overlap, "overlap")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.seq_count, "seq_count")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.ambig_count, "ambig_count")?.to_le_bytes())?;
 
@@ -1636,9 +1651,18 @@ fn compact_ambiguity_ranges(
     compact_starts: &[usize],
     ambig_ranges: &[AmbiguityRange],
 ) -> Vec<AmbiguityRange> {
+    // Emit in C's order: BLOCK-major (sequence-window order), then position
+    // order within a window. C records each range in `block_length`
+    // (block-LOCAL) coordinates while scanning the block's concatenated text
+    // (makehmmerdb.c:644,664-667 — `block_length` is the running offset within
+    // the block, which `compact_start` reproduces here as the window's start
+    // within its block). Iterating windows (outer) then ranges (inner) matches
+    // both that ordering and that coordinate basis, and re-emits overlap-region
+    // ranges once per block exactly as C re-reads the overlap context. See the
+    // matching loop nesting in `assign_ambiguities_to_blocks`.
     let mut compact_ranges = Vec::new();
-    for range in ambig_ranges {
-        for (seq, &compact_start) in seq_data.iter().zip(compact_starts) {
+    for (seq, &compact_start) in seq_data.iter().zip(compact_starts) {
+        for range in ambig_ranges {
             if let Some(intersection) = intersect_ambiguity_with_sequence(range, seq) {
                 compact_ranges.push(AmbiguityRange {
                     lower: compact_start + (intersection.lower - seq.fm_start),
@@ -1930,6 +1954,57 @@ mod tests {
             vec![
                 AmbiguityRange { lower: 8, upper: 9 },
                 AmbiguityRange { lower: 1, upper: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_block_overlap_ambiguities_emitted_in_c_block_major_order() {
+        // Regression for the multi-block degenerate ordering bug: a single long
+        // sequence split across blocks with FM_BLOCK_OVERLAP context, carrying
+        // TWO degenerate runs. The first run sits entirely in block 0's tail and
+        // is re-read into block 1's overlap context; the second run starts in
+        // block 0 and also lands in the overlap. C records ambiguity ranges
+        // while walking each block's text in turn (makehmmerdb.c:656-668), so
+        // the flat list is BLOCK-major (block 0's runs first, in position order,
+        // then block 1's re-read of the same runs in block-LOCAL coordinates) —
+        // NOT range-major. With block_size=20 and overlap=5, block 0 = [0..20),
+        // block 1 re-reads [15..30) (overlap=5). Two degenerate runs at global
+        // [16,17] and [18,19] both fall in the overlap region.
+        let input = vec![test_seq(0, 0, 30, 0)];
+        let (seqs, mut blocks) = build_readblock_like_records(&input, 20, 5);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1].overlap_bases, 5);
+        // windows: block 0 = fm_start 0 len 20; block 1 = fm_start 15 len 15.
+        assert_eq!(
+            seqs.iter().map(|s| (s.fm_start, s.length)).collect::<Vec<_>>(),
+            vec![(0, 20), (15, 15)]
+        );
+
+        let ambig_ranges = vec![
+            AmbiguityRange { lower: 16, upper: 17 },
+            AmbiguityRange { lower: 18, upper: 19 },
+        ];
+        assign_ambiguities_to_blocks(&seqs, &ambig_ranges, &mut blocks);
+        // Block 0 sees both runs (offset 0, count 2); block 1 re-reads both from
+        // the overlap (offset 2, count 2). The per-block offsets index the flat
+        // list in block-major order.
+        assert_eq!((blocks[0].ambig_offset, blocks[0].ambig_count), (0, 2));
+        assert_eq!((blocks[1].ambig_offset, blocks[1].ambig_count), (2, 2));
+
+        let compact_starts = c_block_compact_sequence_starts(&seqs, &blocks);
+        assert_eq!(compact_starts, vec![0, 0]);
+        // C order (block-major, block-local coords): block 0's two runs at
+        // global 16-17 and 18-19, then block 1's re-read at block-local
+        // 16-15=1..2 and 18-15=3..4. A range-major emission would instead
+        // interleave them as 16-17, 1-2, 18-19, 3-4 — the bug we fixed.
+        assert_eq!(
+            compact_ambiguity_ranges(&seqs, &compact_starts, &ambig_ranges),
+            vec![
+                AmbiguityRange { lower: 16, upper: 17 },
+                AmbiguityRange { lower: 18, upper: 19 },
+                AmbiguityRange { lower: 1, upper: 2 },
+                AmbiguityRange { lower: 3, upper: 4 },
             ]
         );
     }

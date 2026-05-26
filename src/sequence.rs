@@ -19,6 +19,9 @@ pub struct Sequence {
     pub n: usize,
     /// Full source length (same as n for complete sequences)
     pub l: usize,
+    /// NCBI taxonomy id (dsqdata metadata); `-1` = unset, matching C's
+    /// `esl_dsqdata` sentinel.
+    pub taxid: i32,
 }
 
 impl Sequence {
@@ -34,6 +37,7 @@ impl Sequence {
             dsq: vec![DSQ_SENTINEL],
             n: 0,
             l: 0,
+            taxid: -1,
         }
     }
 
@@ -51,6 +55,7 @@ impl Sequence {
         self.dsq.push(DSQ_SENTINEL);
         self.n = 0;
         self.l = 0;
+        self.taxid = -1;
     }
 }
 

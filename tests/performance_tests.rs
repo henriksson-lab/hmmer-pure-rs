@@ -62,6 +62,7 @@ fn run_p7_timed(
         dsq,
         n: seq.len(),
         l: seq.len(),
+        taxid: -1,
     };
 
     let start = Instant::now();

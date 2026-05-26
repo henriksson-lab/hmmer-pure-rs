@@ -205,9 +205,10 @@ fn phmmer_seed_and_calibration_tuning_match_bundled_c_rows() {
     let output = run_phmmer(&query, &target, &args);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("# random number seed set to:       7\n"));
-    assert!(stdout.contains("# seq number for MSV Gumbel mu fit: 20\n"));
-    assert!(stdout.contains("# seq number for Vit Gumbel mu fit: 20\n"));
-    assert!(stdout.contains("# seq number for Fwd exp tau fit:   20\n"));
+    // phmmer (like jackhmmer) prints the comma form, matching bundled C phmmer.
+    assert!(stdout.contains("# seq number, MSV Gumbel mu fit:   20\n"));
+    assert!(stdout.contains("# seq number, Vit Gumbel mu fit:   20\n"));
+    assert!(stdout.contains("# seq number, Fwd exp tau fit:     20\n"));
 
     let rust_tbl = std::fs::read_to_string(tblout).unwrap();
     let c_tbl = run_c_phmmer_tblout(

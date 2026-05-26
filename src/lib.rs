@@ -30,7 +30,7 @@
 //!
 //! // Search a sequence programmatically
 //! let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");
-//! let sq = Sequence { name: "query".into(), acc: String::new(), desc: String::new(), dsq, n: 20, l: 20 };
+//! let sq = Sequence { name: "query".into(), acc: String::new(), desc: String::new(), dsq, n: 20, l: 20, taxid: -1 };
 //! pli.run(&mut gm, &mut om, &bg, hmm, &sq, &mut th);
 //!
 //! // Access results

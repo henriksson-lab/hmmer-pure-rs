@@ -1046,6 +1046,7 @@ mod tests {
             dsq,
             n: 20,
             l: 20,
+            taxid: -1,
         };
 
         bg.set_length(sq.n);

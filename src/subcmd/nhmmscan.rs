@@ -503,6 +503,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     dsq: rc_dsq,
                     n: sq.n,
                     l: sq.l,
+                    taxid: -1,
                 };
                 let mut rc_hits = crate::subcmd::nhmmer::search_sequence(
                     &rc_sq,

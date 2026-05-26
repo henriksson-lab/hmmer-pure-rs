@@ -62,13 +62,9 @@
 //! by C are interoperable regardless of the differing tag derivation methods.
 //!
 //! ## Taxid
-//! The metadata format stores a per-sequence `int32` taxid field. This port reads
-//! (and validates the format of) the taxid but **does not store it**, because
-//! [`Sequence`] has no `taxid` field. Wiring taxid storage through requires adding
-//! `pub taxid: i32` to `Sequence` in `src/sequence.rs`; that is a cross-file
-//! change outside the permitted scope of `dsqdata.rs`. When writing, taxid is
-//! emitted as `-1` (none), which is correct for sequences sourced from
-//! [`Sequence`] objects.
+//! The metadata format stores a per-sequence `int32` taxid field (`-1` = none),
+//! matching C `esl_dsqdata`'s `chu->taxid[i]`. It is read into and written from
+//! [`Sequence::taxid`], so a write→read round-trip preserves it.
 //!
 //! ## Threaded loader
 //! Easel's reader uses a loader thread (disk I/O) and several unpacker threads
@@ -309,10 +305,7 @@ fn unpack2(psq: &[u32], start: usize, out: &mut Vec<Dsq>) -> HmmerResult<(usize,
 /// `alphabet` must be nucleic (DNA/RNA) or amino; nucleic uses 2-bit packing,
 /// amino uses 5-bit packing, matching C.
 ///
-/// Taxids are written as `-1` (none) because [`Sequence`] carries no `taxid`
-/// field. Storing the taxid would require adding `pub taxid: i32` to
-/// `Sequence` in `src/sequence.rs` — a cross-file dependency outside the
-/// permitted scope of `dsqdata.rs`.
+/// Each sequence's `taxid` is written from [`Sequence::taxid`] (`-1` = none).
 pub fn write_dsqdata(
     basename: &Path,
     sequences: &[Sequence],
@@ -387,11 +380,11 @@ pub fn write_dsqdata(
         }
         spos += psq.len() as i64;
 
-        // Metadata: name\0 acc\0 desc\0 taxid(int32 = -1)
+        // Metadata: name\0 acc\0 desc\0 taxid(int32; -1 = none)
         mpos += write_cstr(&mut mfp, sq.name.as_bytes())? as i64;
         mpos += write_cstr(&mut mfp, sq.acc.as_bytes())? as i64;
         mpos += write_cstr(&mut mfp, sq.desc.as_bytes())? as i64;
-        write_i32(&mut mfp, -1)?;
+        write_i32(&mut mfp, sq.taxid)?;
         mpos += 4;
 
         // Index record: inclusive END offsets (hence -1).
@@ -698,10 +691,9 @@ fn unpack_chunk(
                 "dsqdata: metadata record truncated (taxid)".into(),
             ));
         }
-        // taxid is read (format-validated) but not stored: Sequence has no
-        // taxid field. Adding storage requires `pub taxid: i32` on Sequence
-        // in src/sequence.rs — a cross-file dependency outside dsqdata.rs.
-        let _taxid = i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        // taxid: a per-sequence NCBI taxonomy id (int32; -1 = none), matching
+        // C `esl_dsqdata`'s `chu->taxid[i]`.
+        let taxid = i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
         meta_last = rec.metadata_end;
 
         let mut dsq = Vec::with_capacity(l + 2);
@@ -716,6 +708,7 @@ fn unpack_chunk(
             dsq,
             n: l,
             l,
+            taxid,
         });
     }
     Ok(())
@@ -859,6 +852,7 @@ mod tests {
                 dsq: abc.digitize(b"ACDEFGHIKLMNPQRSTVWY"),
                 n: 20,
                 l: 20,
+                taxid: -1,
             },
             Sequence {
                 name: "seq2".into(),
@@ -867,6 +861,7 @@ mod tests {
                 dsq: abc.digitize(b"MKV"),
                 n: 3,
                 l: 3,
+                taxid: -1,
             },
         ];
 
@@ -898,6 +893,7 @@ mod tests {
             dsq: abc.digitize(raw),
             n: raw.len(),
             l: raw.len(),
+            taxid: -1,
         }];
 
         let base = tmp("dna");
@@ -919,6 +915,7 @@ mod tests {
             dsq: vec![DSQ_SENTINEL, DSQ_SENTINEL],
             n: 0,
             l: 0,
+            taxid: -1,
         }];
         let base = tmp("empty");
         write_dsqdata(&base, &seqs, &abc).unwrap();
@@ -962,15 +959,11 @@ mod tests {
         cleanup(&base);
     }
 
-    /// Verify taxid field: write a database (taxid will be -1 for all seqs),
-    /// read it back and confirm the metadata (name, acc, desc, sequence) is
-    /// intact. This exercises the taxid parse path in `unpack_chunk` and
-    /// ensures the format-validation of the taxid int32 does not corrupt the
-    /// surrounding name/acc/desc data.
-    ///
-    /// Full taxid *storage* round-trip (write non-(-1) taxids) requires a
-    /// `taxid` field on `Sequence` (src/sequence.rs dependency — see module
-    /// docs). This test validates the read-side format correctness only.
+    /// Full taxid storage round-trip: write sequences carrying distinct
+    /// (non-(-1) and -1) taxids, read them back, and confirm each taxid is
+    /// preserved along with the surrounding name/acc/desc/sequence metadata.
+    /// Exercises both `write_dsqdata` (emits `sq.taxid`) and `unpack_chunk`
+    /// (stores the parsed int32 into `Sequence::taxid`).
     #[test]
     fn taxid_metadata_roundtrip() {
         let abc = Alphabet::amino();
@@ -982,6 +975,7 @@ mod tests {
                 dsq: abc.digitize(b"MKVLWA"),
                 n: 6,
                 l: 6,
+                taxid: 9606,
             },
             Sequence {
                 name: "taxseq2".into(),
@@ -990,6 +984,7 @@ mod tests {
                 dsq: abc.digitize(b"ACDEF"),
                 n: 5,
                 l: 5,
+                taxid: -1,
             },
         ];
 
@@ -997,18 +992,20 @@ mod tests {
         write_dsqdata(&base, &seqs, &abc).unwrap();
         let got = read_dsqdata(&base).unwrap();
 
-        // Metadata must survive the write→taxid-parse→read cycle intact.
+        // Metadata (incl. taxid) must survive the write→read cycle intact.
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].name, "taxseq1");
         assert_eq!(got[0].acc, "AC001");
         assert_eq!(got[0].desc, "organism A");
         assert_eq!(got[0].n, 6);
         assert_eq!(got[0].dsq, seqs[0].dsq);
+        assert_eq!(got[0].taxid, 9606);
         assert_eq!(got[1].name, "taxseq2");
         assert_eq!(got[1].acc, "");
         assert_eq!(got[1].desc, "organism B");
         assert_eq!(got[1].n, 5);
         assert_eq!(got[1].dsq, seqs[1].dsq);
+        assert_eq!(got[1].taxid, -1);
 
         cleanup(&base);
     }
@@ -1036,6 +1033,7 @@ mod tests {
                     dsq: abc.digitize(&raw),
                     n,
                     l: n,
+                    taxid: -1,
                 }
             })
             .collect();

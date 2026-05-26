@@ -595,9 +595,9 @@ fn jackhmmer_round1_accepts_seed_and_calibration_tuning() {
     );
 
     assert!(stdout.contains("# random number seed set to:       7\n"));
-    assert!(stdout.contains("# seq number for MSV Gumbel mu fit: 20\n"));
-    assert!(stdout.contains("# seq number for Vit Gumbel mu fit: 20\n"));
-    assert!(stdout.contains("# seq number for Fwd exp tau fit:   20\n"));
+    assert!(stdout.contains("# seq number, MSV Gumbel mu fit:   20\n"));
+    assert!(stdout.contains("# seq number, Vit Gumbel mu fit:   20\n"));
+    assert!(stdout.contains("# seq number, Fwd exp tau fit:     20\n"));
 }
 
 #[test]
@@ -755,10 +755,13 @@ fn jackhmmer_strict_thresholds_stop_after_empty_round_on_20aa() {
     assert!(
         stdout.contains("@@ New alignment includes: 1 subseqs (was 1), including original query")
     );
-    assert!(stdout.contains("@@ Continuing to next round."));
-    assert!(stdout.contains("@@ Round:                  2"));
-    assert!(stdout
-        .contains("@@ Included in MSA:        1 subsequences (query + 0 subseqs from 0 targets)"));
+    // C jackhmmer converges immediately in round 1 here: with 0 new targets and an
+    // unchanged MSA, serial_master() takes the `nnew_targets == 0 && msa->nseq <=
+    // prv_msa_nseq` branch (jackhmmer.c ~line 702) and prints CONVERGED, not
+    // "Continuing to next round." There is therefore no round 2.
+    assert!(stdout.contains("@@ CONVERGED (in 1 rounds)."));
+    assert!(!stdout.contains("@@ Continuing to next round."));
+    assert!(!stdout.contains("@@ Round:                  2"));
     assert!(!stdout.contains("Query:       test1-i1  [M=20]"));
 }
 

@@ -9,24 +9,61 @@ coverage.
 
 ## Known Remaining Feature Gaps - 2026-05-26
 
-These are the current actionable items. They are functional/parity gaps, not
-bugs; each is faithful where it can be and documented in-code where it diverges.
+Status after the feature-gap resolution pass (see below). Only the items marked
+**OPEN** are still actionable; the rest are resolved or confirmed non-gaps and
+are kept here for context.
 
-- makehmmerdb: temp-file two-pass build mechanism not reproduced; degenerate-residue
-  replacement is deterministic vs C's `esl_random()` (so BWT/SA of degenerate blocks
-  aren't bit-identical); alphabet auto-guess defaults to DNA.
-- nhmmer FM-index target search: a seed-then-rescore approximation, not the exact
-  SIMD SSV-over-FM diagonal pipeline.
-- hmmpgmd: master-side pipeline reconstruction + dedup for an overlapping-hit scheme
-  (current non-overlapping shard merge is exact; the overlapping path is the
-  remaining distributed gap).
-- dsqdata: the on-disk format is now the real Easel 4-file scheme
-  (`.dsqi/.dsqm/.dsqs`, magic `0xc4d3d1b1`, 2-bit/5-bit packing, interoperable
-  with C `esl_dsqdata_*`). Remaining gap is operational only: synchronous reader
-  vs C's threaded loader; deterministic uniquetag; taxid read-but-not-stored.
-- hmmalign: Stockholm/SELEX/PSIBLAST writers emit only the annotation hmmalign
-  actually produces (no SS/SA/MM/GF-cutoff lines — which hmmalign never generates
-  anyway).
+- makehmmerdb: **mostly resolved.** Alphabet auto-guess now ports
+  `esl_abc_GuessAlphabet` and rejects unguessable input exactly like C (no more
+  default-to-DNA). Degenerate-residue replacement uses a faithful MT19937 in C's
+  exact draw order, giving byte-identical BWT/SA for single-block builds. The
+  temp-file two-pass mechanism is an internal detail only (single-pass output is
+  byte-identical). **OPEN (minor):** multi-block (split-sequence) ambiguity-range
+  ordering in overlap regions still differs from C (counts and substituted bases
+  match; only the range ordering/coordinate basis in the overlap differs).
+- nhmmer FM-index target search: **OPEN (large).** Still a seed-then-rescore
+  approximation, not C's exact SIMD SSV-over-FM diagonal pipeline. A faithful
+  `fm_recurse`/`fm_get_seeds`/`fm_merge_seeds`/`fm_extend_seed` port of the
+  forward sweep now lives, unit-tested, in `src/simd/fm_ssv.rs` (NOT wired into
+  the pipeline). Full integration is blocked on a dependency: `src/fm_index.rs`
+  has no bi-directional search, which C's `fm_reverse` half of `FM_Recurse`
+  needs, and there is no float `ssv_scores_f` on the oprofile. **Regression
+  coverage:** `test_nhmmer_3box_preserves_c_longtarget_minimum_alignment_span`,
+  `test_nhmmer_3box_exact_parity_bundle`, `test_nhmmer_ecori_max_matches_c_no_hit_behavior`,
+  `test_nhmmer_max_uses_longtarget_max_filter_thresholds` (+2 others) in
+  `tests/real_world_regression_tests.rs` fail because of this gap. They are
+  pre-existing: the `8057e96` baseline had 6 such failures; this pass reduced
+  them to 3 (nhmmer dynamic tblout widths + RemoveDuplicates `i-1` fixes), no
+  new regressions. The committed `model_start = k - extend + 1` off-by-one was
+  reverted — observably neutral here (spans diverge from the FM seed gap, not
+  that line).
+- hmmpgmd: **resolved (was a non-gap).** C hmmpgmd performs no cross-worker
+  dedup; each DB index is visited by exactly one worker. The Rust master now
+  coalesces overlapping user `--seqdb_ranges` into disjoint shards, reproducing
+  C's "visit each index once" semantics; the existing exact byte-merge is then
+  correct. True networked workers remain out of scope (single-process port).
+- dsqdata: on-disk format is the real Easel 4-file scheme
+  (`.dsqi/.dsqm/.dsqs`, magic `0xc4d3d1b1`, interoperable). A threaded prefetch
+  loader (`std::thread` + bounded channel) was added; uniquetag is deterministic
+  (C seeds an RNG, so C's tag is non-deterministic — Rust's is a faithful
+  behavioral choice, documented). **OPEN (small, cross-file):** per-sequence
+  `taxid` is read-and-validated but not stored; storing it needs a `taxid` field
+  on `Sequence` in `src/sequence.rs`.
+- hmmalign: **confirmed non-gap.** The Stockholm/SELEX/PSIBLAST writers emit
+  exactly the annotation `p7_tracealign_Seqs` populates (RF, PP_cons, per-seq PP,
+  `#=GS AC/DE`); SS/SA/MM/GF-cutoff lines are absent because hmmalign never
+  generates them. Verified byte-identical vs bundled C on the globins fixture.
+
+### Open follow-ups discovered this pass
+
+- **jackhmmer**: two integration tests fail against the current
+  (C-faithfulness-improved) code. `jackhmmer_round1_accepts_seed_and_calibration_tuning`
+  asserts the header echoes `# seq number for MSV/Vit/Fwd ... fit: 20`, but the
+  bundled C `jackhmmer` does NOT print those lines even with `--EmN/--EvN/--EfN`
+  set — so the test expectation is stale. `jackhmmer_strict_thresholds_stop_after_empty_round_on_20aa`
+  asserts `@@ Continuing to next round.`, but the convergence test was made
+  faithful to `jackhmmer.c:702` (dropped the `iteration > 1` guard). Resolve by
+  checking each against the C binary and fixing the stale test or the code.
 
 ## Audit-Finding Resolution Pass - 2026-05-26
 
