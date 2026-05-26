@@ -917,7 +917,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     rebuild_weighting,
                     rebuild_effn,
                     rebuild_prior,
-                    CalibrationConfig::default(),
+                    // jackhmmer.c uses one P7_BUILDER (created once with the
+                    // user's --EmL/--EmN/--EvL/--EvN/--EfL/--EfN/--Eft) for
+                    // every round, so round 2+ rebuilds must calibrate with
+                    // the same config as round 1, not Easel defaults.
+                    calibration_config,
                     args.seed,
                 );
                 if !query_sq.desc.is_empty() {
@@ -1136,8 +1140,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             )
             .unwrap();
 
-            if n_new == 0 && new_included_names.len() <= prev_included_names.len() && iteration > 1
-            {
+            // Convergence test, faithful to jackhmmer.c serial_master() line 702:
+            //   `if (nnew_targets == 0 && msa->nseq <= prv_msa_nseq)`.
+            // C compares the new MSA's subsequence count against the previous
+            // round's; it has no `iteration > 1` guard (round 1 with no
+            // included hits converges immediately, msa->nseq==1<=prv==1).
+            if n_new == 0 && msa_nseq <= prev_msa_nseq {
                 writeln!(out, "@@").unwrap();
                 writeln!(out, "@@ CONVERGED (in {} rounds). ", iteration).unwrap();
                 writeln!(out, "@@").unwrap();

@@ -1883,8 +1883,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out).unwrap();
         writeln!(
             out,
-            "Annotation for each hit{} :",
-            if args.noali { "" } else { "  (and alignments)" }
+            // C p7_tophits.c:1277: "Annotation for each hit %s:\n" where %s is
+            // " (and alignments)" or "". The literal space after "hit" stays, so
+            // the --noali line is "...hit :" (space before colon) and the
+            // alignment line is "...hit  (and alignments):" (colon, no space).
+            "Annotation for each hit {}:",
+            if args.noali { "" } else { " (and alignments)" }
         )
         .unwrap();
         // C p7_tophits.c:1471: emit "No targets detected" when nothing was

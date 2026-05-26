@@ -775,7 +775,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 lpli.seed = args.seed;
                 lpli.new_model(&lgm);
                 configure_thresholds(&mut lpli, &args);
-                apply_model_thresholds_or_exit(&mut lpli, &hmm);
 
                 lb.set_length(sq.n);
 
@@ -812,7 +811,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         {
             let mut tmp_pli = Pipeline::new();
             configure_thresholds(&mut tmp_pli, &args);
-            apply_model_thresholds_or_exit(&mut tmp_pli, &hmm);
             tmp_pli.do_biasfilter = !args.nobias;
             tmp_pli.do_null2 = !args.nonull2;
             th.threshold(&tmp_pli, z, z);
@@ -1140,22 +1138,34 @@ fn configure_thresholds(pli: &mut Pipeline, args: &Args) {
         pli.inc_dom_t = Some(t);
         pli.incdom_by_e = false;
     }
-    if args.cut_ga {
-        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::GA;
+    // Model-specific thresholding (--cut_ga/--cut_tc/--cut_nc) is unused in phmmer:
+    // the query model is built from a single sequence and never carries GA/TC/NC
+    // cutoffs. C (hmmer/src/phmmer.c) still configures the pipeline for these
+    // options (p7_pipeline.c:293-316): it sets by_E=FALSE and T=incT=domT=incdomT=0.0
+    // and use_bit_cutoffs=p7H_*, then calls p7_pli_NewModel() WITHOUT checking its
+    // return status (phmmer.c:565). The subsequent p7_pli_NewModelThresholds() fails
+    // silently with eslEINVAL ("bit thresholds unavailable"), leaving T at 0.0, so the
+    // effective behavior is "report/include by score >= 0.0". We replicate that exactly
+    // here, and (unlike hmmsearch/hmmscan) phmmer never calls new_model_thresholds().
+    let cutoff = if args.cut_ga {
+        Some(hmmer_pure_rs::pipeline::BitCutoff::GA)
     } else if args.cut_tc {
-        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::TC;
+        Some(hmmer_pure_rs::pipeline::BitCutoff::TC)
     } else if args.cut_nc {
-        pli.use_bit_cutoffs = hmmer_pure_rs::pipeline::BitCutoff::NC;
-    }
-}
-
-fn apply_model_thresholds_or_exit(pli: &mut Pipeline, hmm: &hmmer_pure_rs::hmm::Hmm) {
-    if pli.use_bit_cutoffs == hmmer_pure_rs::pipeline::BitCutoff::None {
-        return;
-    }
-    if let Err(e) = pli.new_model_thresholds(&hmm.cutoff) {
-        eprintln!("Error: {} for model {}", e, hmm.name);
-        std::process::exit(1);
+        Some(hmmer_pure_rs::pipeline::BitCutoff::NC)
+    } else {
+        None
+    };
+    if let Some(bc) = cutoff {
+        pli.use_bit_cutoffs = bc;
+        pli.by_e = false;
+        pli.dom_by_e = false;
+        pli.inc_by_e = false;
+        pli.incdom_by_e = false;
+        pli.t = Some(0.0);
+        pli.dom_t = Some(0.0);
+        pli.inc_t = Some(0.0);
+        pli.inc_dom_t = Some(0.0);
     }
 }
 

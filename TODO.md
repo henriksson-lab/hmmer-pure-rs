@@ -9,6 +9,26 @@ benchmark, or failed experiment changes the next useful target.
 These notes come from the latest parallel C/Rust audit. Preserve evidence for
 active parity/speed claims until each item has regression coverage.
 
+## Known Remaining Feature Gaps - 2026-05-26
+
+Documented best-effort gaps after the subcommand feature-completeness pass.
+These are functional/parity gaps, not bugs; each is faithful where it can be and
+documented in-code where it diverges.
+
+- makehmmerdb: temp-file two-pass build mechanism not reproduced; degenerate-residue
+  replacement is deterministic vs C's `esl_random()` (so BWT/SA of degenerate blocks
+  aren't bit-identical); alphabet auto-guess defaults to DNA.
+- nhmmer FM-index target search: a seed-then-rescore approximation, not the exact
+  SIMD SSV-over-FM diagonal pipeline.
+- hmmpgmd: master-side pipeline reconstruction + dedup for an overlapping-hit scheme
+  (current non-overlapping shard merge is exact; the overlapping path is the
+  remaining distributed gap).
+- dsqdata: synchronous reader vs C's threaded loader; deterministic uniquetag;
+  taxid read-but-not-stored.
+- hmmalign: Stockholm/SELEX/PSIBLAST writers emit only the annotation hmmalign
+  actually produces (no SS/SA/MM/GF-cutoff lines — which hmmalign never generates
+  anyway).
+
 ## Ground Rules
 
 - Prefer faithful C behavior over idiomatic Rust when they differ in arithmetic,

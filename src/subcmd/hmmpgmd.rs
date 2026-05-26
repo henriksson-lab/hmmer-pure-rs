@@ -1761,6 +1761,28 @@ fn shutdown_worker_connection(stream: &mut TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
+// Master-side merge of per-worker serialized search payloads.
+//
+// Mirrors C `forward_results()` (hmmer/src/hmmdmstr.c): gather every worker's
+// P7_HIT byte records, sort them, and re-emit one HMMD_SEARCH_STATS block with
+// a fresh hit_offsets array followed by the concatenated hit payloads.
+//
+// C re-runs `p7_tophits_Threshold(&th, pli)` over the merged list to recompute
+// nreported/nincluded against the global Z. Here each worker is dispatched with
+// the *global* nmodels/nseqs (see `searched_counts` / `serialize_c_search_payload`,
+// which derive Z from those totals) and only searches a *non-overlapping* DB
+// shard, so a hit appears in exactly one worker. Per-hit reporting/inclusion
+// thresholds are independent given a fixed Z, hence summing the per-shard
+// nreported/nincluded is identical to a single global threshold pass — we keep
+// the C-compatible totals without needing access to the pipeline state here.
+//
+// DISTRIBUTED-COORDINATION GAP: the global stats (Z, domZ, n_past_*) are taken
+// from the master's totals plus summed worker filter counts; this file does not
+// reconstruct a P7_PIPELINE on the master to re-run Threshold, because the
+// pipeline thresholds object is per-query and not part of the serialized wire
+// payload. This is faithful for the non-overlapping shard scheme used here; an
+// overlapping/duplicated-hit scheme would additionally need master-side
+// dedup + a true global Threshold pass.
 fn merge_worker_payloads(
     partials: &[Vec<u8>],
     total_nmodels: u64,
@@ -3371,6 +3393,113 @@ mod tests {
 
         payload.extend_from_slice(b"garbage");
         assert!(parse_worker_payload(&payload).is_err());
+    }
+
+    fn sample_search_hit_with_domains() -> SearchHit {
+        let n = 5usize;
+        let ad = AliDisplay {
+            model: "MKLVE".to_string(),
+            mline: "MK+VE".to_string(),
+            aseq: "MKIVE".to_string(),
+            ppline: "*****".to_string(),
+            rfline: "xxxxx".to_string(),
+            hmmfrom: 1,
+            hmmto: n,
+            sqfrom: 10,
+            sqto: 14,
+        };
+        let domain = Domain {
+            iali: 10,
+            jali: 14,
+            ienv: 9,
+            jenv: 15,
+            bitscore: 42.5,
+            lnp: -30.0,
+            dombias: 0.5,
+            oasc: 4.5,
+            envsc: 50.0,
+            domcorrection: 1.0,
+            is_reported: true,
+            is_included: true,
+            ad: Some(ad),
+        };
+        SearchHit {
+            name: "target1".to_string(),
+            acc: "ACC1".to_string(),
+            desc: "a description".to_string(),
+            window_length: 0,
+            sortkey: 42.5,
+            score: 42.5,
+            pre_score: 43.0,
+            sum_score: 42.5,
+            lnp: -30.0,
+            pre_lnp: -29.0,
+            sum_lnp: -30.0,
+            nexpected: 1.0,
+            nregions: 1,
+            nclustered: 0,
+            noverlaps: 0,
+            nenvelopes: 1,
+            flags: 0,
+            nreported: 1,
+            nincluded: 1,
+            best_domain: 0,
+            seqidx: 0,
+            subseq_start: 0,
+            hmm_name: "modelA".to_string(),
+            hmm_acc: "PF00001".to_string(),
+            hmm_desc: "model description".to_string(),
+            seq_name: "target1".to_string(),
+            seq_acc: "ACC1".to_string(),
+            seq_desc: "a description".to_string(),
+            model_length: n as i32,
+            sequence_length: 100,
+            domains: vec![domain],
+        }
+    }
+
+    #[test]
+    fn full_hit_payload_passes_full_validation() {
+        // Serialize a hit carrying a full P7_DOMAIN + P7_ALIDISPLAY payload and
+        // confirm it round-trips through full (not shell-only) validation:
+        // domain record + alidisplay record with all lines/strings present.
+        let hit = sample_search_hit_with_domains();
+        let mut out = Vec::new();
+        serialize_p7_hit(&mut out, &hit);
+
+        // Hit base + name/acc/desc, then exactly one domain (size 92) and one
+        // alidisplay record must consume the whole buffer.
+        let end = serialized_hit_payload_end(&out, 0).expect("hit payload should validate");
+        assert_eq!(end, out.len(), "full hit payload must be exactly consumed");
+        validate_serialized_hit_payload(&out).expect("full hit payload must validate");
+
+        // The single domain must be exactly the C base size (no scores_per_pos).
+        let hit_size = u32::from_be_bytes(out[0..4].try_into().unwrap()) as usize;
+        let domain_size =
+            u32::from_be_bytes(out[hit_size..hit_size + 4].try_into().unwrap()) as usize;
+        assert_eq!(domain_size, P7_DOMAIN_BASE_SIZE);
+
+        let (iali, jali) = serialized_hit_first_domain_alipos(&out).unwrap();
+        assert_eq!((iali, jali), (10, 14));
+        assert_eq!(serialized_hit_name(&out).unwrap(), "target1");
+    }
+
+    #[test]
+    fn full_hit_payload_round_trips_through_search_payload_and_merge() {
+        // A complete search payload with a real domain/alidisplay hit must parse
+        // and merge (master-side gather) without falling back to shell records.
+        let mut results = vec![sample_search_hit_with_domains()];
+        let payload = serialize_c_search_payload(1, 2, &mut results);
+
+        let parsed = parse_worker_payload(&payload).expect("search payload must parse");
+        assert_eq!(parsed.hits.len(), 1);
+        assert_eq!(parsed.hits[0].name, "target1");
+
+        let merged = merge_worker_payloads(&[payload], 1, 2).expect("merge must succeed");
+        let reparsed = parse_worker_payload(&merged).expect("merged payload must parse");
+        assert_eq!(reparsed.hits.len(), 1);
+        // Merged hit bytes are byte-identical to the original serialized hit.
+        assert_eq!(reparsed.hits[0].bytes, parsed.hits[0].bytes);
     }
 
     #[test]

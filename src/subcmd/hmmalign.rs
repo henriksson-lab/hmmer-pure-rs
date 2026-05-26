@@ -107,20 +107,43 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     enum OutFormat {
         Stockholm,
+        Pfam,
         A2m,
         Psiblast,
+        Afa,
+        Clustal,
+        ClustalLike,
+        Selex,
+        Phylip,
+        Phylips,
     }
-    let outformat = if args.outformat.eq_ignore_ascii_case("stockholm")
-        || args.outformat.eq_ignore_ascii_case("pfam")
-    {
+    // Mirrors the format names accepted by Easel's esl_msafile_EncodeFormat()
+    // that hmmalign passes through esl_msafile_Write(). "pfam" is the Stockholm
+    // single-block variant: Easel writes Stockholm in 200-column blocks but Pfam
+    // in a single block spanning the whole alignment.
+    let outformat = if args.outformat.eq_ignore_ascii_case("stockholm") {
         OutFormat::Stockholm
+    } else if args.outformat.eq_ignore_ascii_case("pfam") {
+        OutFormat::Pfam
     } else if args.outformat.eq_ignore_ascii_case("a2m") {
         OutFormat::A2m
     } else if args.outformat.eq_ignore_ascii_case("psiblast") {
         OutFormat::Psiblast
+    } else if args.outformat.eq_ignore_ascii_case("afa") {
+        OutFormat::Afa
+    } else if args.outformat.eq_ignore_ascii_case("clustal") {
+        OutFormat::Clustal
+    } else if args.outformat.eq_ignore_ascii_case("clustallike") {
+        OutFormat::ClustalLike
+    } else if args.outformat.eq_ignore_ascii_case("selex") {
+        OutFormat::Selex
+    } else if args.outformat.eq_ignore_ascii_case("phylip") {
+        OutFormat::Phylip
+    } else if args.outformat.eq_ignore_ascii_case("phylips") {
+        OutFormat::Phylips
     } else {
         eprintln!(
-            "unsupported --outformat {:?}; implemented: Stockholm, Pfam, A2M, PSIBLAST",
+            "{} is not a recognized output MSA file format",
             args.outformat
         );
         return std::process::ExitCode::from(2);
@@ -205,12 +228,33 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     };
     match outformat {
         OutFormat::Stockholm => write_stockholm(out, &msa),
+        OutFormat::Pfam => write_stockholm_blocked(out, &msa, msa.rfline.len().max(1)),
         OutFormat::A2m => write_a2m(
             out,
             &msa,
             hmm.abc_type == hmmer_pure_rs::alphabet::AlphabetType::Amino,
         ),
-        OutFormat::Psiblast => write_psiblast(out, &msa),
+        OutFormat::Psiblast => {
+            msa::write_psiblast(out, &write_rows(&msa), Some(&msa.rfline)).unwrap();
+        }
+        OutFormat::Afa => {
+            msa::write_afa(out, &write_rows(&msa)).unwrap();
+        }
+        OutFormat::Clustal => {
+            msa::write_clustal(out, &write_rows(&msa), false, EASEL_VERSION).unwrap();
+        }
+        OutFormat::ClustalLike => {
+            msa::write_clustal(out, &write_rows(&msa), true, EASEL_VERSION).unwrap();
+        }
+        OutFormat::Selex => {
+            msa::write_selex(out, &write_rows(&msa), Some(&msa.rfline)).unwrap();
+        }
+        OutFormat::Phylip => {
+            msa::write_phylip(out, &write_rows(&msa), false).unwrap();
+        }
+        OutFormat::Phylips => {
+            msa::write_phylip(out, &write_rows(&msa), true).unwrap();
+        }
     }
     std::process::ExitCode::SUCCESS
 }
@@ -247,84 +291,115 @@ fn open_seq_file_maybe_stdin(
 
 /// Emit a Stockholm 1.0 representation of the assembled alignment, including
 /// per-row PP annotation and `#=GC PP_cons` / `#=GC RF` consensus lines.
+///
+/// Faithful port of Easel's `stockholm_write` (`esl_msafile_stockholm.c`) for
+/// the subset of annotation that `hmmalign` produces: per-row `#=GR <name> PP`,
+/// `#=GC PP_cons`, `#=GC RF`, and optional `#=GS <name> AC/DE`. Stockholm format
+/// wraps the alignment in 200-column blocks; the left margin width matches C's
+/// `margin` computation so sequence, GR, and GC lines stay in register.
 fn write_stockholm(out: &mut dyn Write, msa: &TextMsa) {
-    let name_width = msa
-        .rows
-        .iter()
-        .map(|row| row.name.len())
-        .max()
-        .unwrap_or(0)
-        .max("#=GC PP_cons".len())
-        .max("#=GC RF".len())
-        .max(13);
+    write_stockholm_blocked(out, msa, 200);
+}
+
+/// Shared Stockholm/Pfam writer; `cpl` is the residues-per-line block width
+/// (200 for Stockholm, alen for Pfam — Easel's `stockholm_write` <cpl> arg).
+fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
+    let maxname = msa.rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
+
+    // maxgc: GC tags emitted here are PP_cons (7) and RF (2) => 7.
+    let mut maxgc = 0usize;
+    maxgc = maxgc.max(7); // PP_cons
+    maxgc = maxgc.max(2); // RF
+    // maxgr: GR tag emitted here is PP (2).
+    let maxgr = 2usize;
+
+    let mut margin = maxname + 1;
+    if maxgc > 0 && maxgc + 6 > margin {
+        margin = maxgc + 6;
+    }
+    if maxgr > 0 && maxname + maxgr + 7 > margin {
+        margin = maxname + maxgr + 7;
+    }
 
     writeln!(out, "# STOCKHOLM 1.0").unwrap();
+
+    // GF section: hmmalign's MSA carries no #=GF annotation, but Easel always
+    // closes the GF section with a blank line.
     writeln!(out).unwrap();
 
-    for row in &msa.rows {
-        if let Some(acc) = &row.acc {
-            if !acc.is_empty() {
-                writeln!(
-                    out,
-                    "#=GS {:<width$} AC {}",
-                    row.name,
-                    acc,
-                    width = name_width - 5
-                )
-                .unwrap();
+    // GS section: per-sequence AC and DE blocks, each terminated by a blank line
+    // when present (matching Easel's separate msa->sqacc / msa->sqdesc loops).
+    if msa.rows.iter().any(|row| row.acc.is_some()) {
+        for row in &msa.rows {
+            if let Some(acc) = &row.acc {
+                if !acc.is_empty() {
+                    writeln!(out, "#=GS {:<width$} AC {}", row.name, acc, width = maxname)
+                        .unwrap();
+                }
             }
         }
-        if let Some(desc) = &row.desc {
-            if !desc.is_empty() {
-                writeln!(
-                    out,
-                    "#=GS {:<width$} DE {}",
-                    row.name,
-                    desc,
-                    width = name_width - 5
-                )
-                .unwrap();
-            }
-        }
+        writeln!(out).unwrap();
     }
-    if msa
-        .rows
-        .iter()
-        .any(|row| row.acc.is_some() || row.desc.is_some())
-    {
+    if msa.rows.iter().any(|row| row.desc.is_some()) {
+        for row in &msa.rows {
+            if let Some(desc) = &row.desc {
+                if !desc.is_empty() {
+                    writeln!(out, "#=GS {:<width$} DE {}", row.name, desc, width = maxname)
+                        .unwrap();
+                }
+            }
+        }
         writeln!(out).unwrap();
     }
 
-    for row in &msa.rows {
-        writeln!(out, "{:<width$} {}", row.name, row.aseq, width = name_width).unwrap();
-        if let Some(ppline) = &row.ppline {
+    // Alignment section, in <cpl>-column blocks.
+    let alen = msa.rfline.len();
+    let mut currpos = 0usize;
+    while currpos < alen {
+        let end = (currpos + cpl).min(alen);
+        if currpos > 0 {
+            writeln!(out).unwrap();
+        }
+        for row in &msa.rows {
             writeln!(
                 out,
                 "{:<width$} {}",
-                format!("#=GR {} PP", row.name),
-                ppline,
-                width = name_width
+                row.name,
+                &row.aseq[currpos..end],
+                width = margin - 1
             )
             .unwrap();
+            if let Some(ppline) = &row.ppline {
+                writeln!(
+                    out,
+                    "#=GR {:<namew$} {:<tagw$} {}",
+                    row.name,
+                    "PP",
+                    &ppline[currpos..end],
+                    namew = maxname,
+                    tagw = margin - maxname - 7
+                )
+                .unwrap();
+            }
         }
+        writeln!(
+            out,
+            "#=GC {:<tagw$} {}",
+            "PP_cons",
+            &msa.pp_cons[currpos..end],
+            tagw = margin - 6
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "#=GC {:<tagw$} {}",
+            "RF",
+            &msa.rfline[currpos..end],
+            tagw = margin - 6
+        )
+        .unwrap();
+        currpos = end;
     }
-
-    writeln!(
-        out,
-        "{:<width$} {}",
-        "#=GC PP_cons",
-        msa.pp_cons,
-        width = name_width
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "{:<width$} {}",
-        "#=GC RF",
-        msa.rfline,
-        width = name_width
-    )
-    .unwrap();
     writeln!(out, "//").unwrap();
 }
 
@@ -366,18 +441,22 @@ fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     }
 }
 
-/// Emit PSIBLAST-style aligned rows. Easel renders nonresidue alignment
-/// placeholders as `-` in this format while preserving inserted residues.
-fn write_psiblast(out: &mut dyn Write, msa: &TextMsa) {
-    let name_width = msa.rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
-    for row in &msa.rows {
-        let seq: String = row
-            .aseq
-            .chars()
-            .map(|ch| if ch == '.' { '-' } else { ch })
-            .collect();
-        writeln!(out, "{:<width$}  {}", row.name, seq, width = name_width).unwrap();
-    }
+/// Easel version string, used in the CLUSTAL-like header line. Matches the
+/// `EASEL_VERSION` substituted by `hmmer/configure.ac` (currently "0.49").
+const EASEL_VERSION: &str = "0.49";
+
+/// Borrow the assembled `TextMsa` rows as the generic `msa::WriteRow` view used
+/// by the reusable text-MSA writers in `src/msa.rs`.
+fn write_rows(msa: &TextMsa) -> Vec<msa::WriteRow<'_>> {
+    msa.rows
+        .iter()
+        .map(|row| msa::WriteRow {
+            name: &row.name,
+            acc: row.acc.as_deref(),
+            desc: row.desc.as_deref(),
+            aseq: &row.aseq,
+        })
+        .collect()
 }
 
 /// Align every input sequence to `hmm` (Forward/Backward + posterior decoding +

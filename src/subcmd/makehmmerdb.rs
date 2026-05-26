@@ -83,12 +83,40 @@ struct Args {
 /// Entry point for `makehmmerdb`: turn a (DNA) FASTA into an FM-index database
 /// consumable by `nhmmer`'s SSV pre-filter.
 ///
-/// Concatenates every sequence into a single `$`-separated text, builds BWT
-/// + suffix array records via the `FmIndex` builder, and serializes C-layout
-/// metadata plus FM records as the top-level stream by default. `--container`
-/// preserves the older Rust `HMMERDB` wrapper with custom per-block FM indexes,
-/// metadata for descriptions/accessions, block windows, overlap, ambiguity
-/// ranges, and C-layout metadata/FM-record extensions.
+/// Concatenates every sequence into a single `$`-separated text, partitions it
+/// into FM-index blocks via `build_readblock_like_records()` (which mirrors C
+/// `esl_sqio_ReadBlock()` per-sequence windowing — see that function), builds
+/// BWT + suffix array records, and by default serializes the native C FM-index
+/// stream as the top-level file (byte-faithful `FM_METADATA` header from
+/// `fwrite()` in makehmmerdb.c:726-763 followed by per-block `FM_DATA` records
+/// from buildAndWriteFMIndex(), makehmmerdb.c:315-340). `--container` preserves
+/// the older Rust `HMMERDB` wrapper with custom per-block FM indexes, metadata
+/// for descriptions/accessions, block windows, overlap, ambiguity ranges, and
+/// the same C-layout metadata/FM-record extensions appended after it.
+///
+/// Faithfulness notes (what matches C byte-for-byte vs. what still differs):
+///   * MATCHES C: the metadata header field order/widths (fwd_only, alph_type,
+///     alph_size, charBits, freq_SA, freq_cnt_sb, freq_cnt_b, block_count(u16),
+///     seq_count, ambig count, char_count(u64)); per-sequence metadata
+///     (target_id, target_start(u64), fm_start, length, name/acc/source/desc
+///     lengths(u16) and NUL-terminated strings written in name,acc,source,desc
+///     order); ambiguity ranges (int lower/upper); and each block's FM record
+///     (N, term_loc, seq_offset, ambig_offset, overlap, seq_cnt, ambig_cnt,
+///     then packed T (forward record only), packed BWT, SA samples (forward
+///     only), occCnts_b, occCnts_sb). Within a block, sequences are
+///     concatenated with NO inter-sequence separator and one trailing `$`/0.
+///   * MATCHES C: per-sequence block windowing — short sequences read whole,
+///     long sequences split with FM_BLOCK_OVERLAP leading context, the
+///     `max(block_size-size, block_size*0.05)` request-size shortening.
+///   * DIFFERS from C (documented gap): the FM-index *temp-file two-pass*
+///     (esl_tmpfile + rewind/copy) is not reproduced; records are streamed
+///     directly. The output bytes are identical, only the build mechanism
+///     differs. Ambiguity residue replacement is DETERMINISTIC (first canonical
+///     member) instead of C's `esl_random()*4` random pick — so the BWT/SA of
+///     blocks containing degenerate residues will not be bit-identical to a C
+///     build (positions/counts are correct, the substituted bases differ).
+///   * DIFFERS from C: `esl_sqfile_GuessAlphabet` auto-detection is not wired;
+///     callers must assert --dna/--rna/--amino (defaults to DNA).
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 
@@ -465,6 +493,26 @@ fn deterministic_degenerate_replacement(abc: &Alphabet, dsq: u8) -> u8 {
         .unwrap_or_else(|| abc.sym[0])
 }
 
+/// Partition the input sequences into FM-index blocks, mirroring the
+/// per-sequence windowing of C `esl_sqio_ReadBlock()` (long_target mode) as
+/// driven by makehmmerdb.c's main loop.
+///
+/// C model (esl_sqio_ascii.c `sqascii_ReadBlock`, makehmmerdb.c:563-704):
+///   * `block_size_bases` (= `--block_size` * 1e6) bounds the NEW residues per
+///     block; `size` counts `n - C` (window length minus retained context).
+///   * Each whole sequence shorter than the remaining budget is read in one
+///     window and added intact (an EOD is "burned off"). A block closes once
+///     `size >= block_size`.
+///   * A *single* sequence longer than a window is split across blocks; the
+///     continuation window re-reads `FM_BLOCK_OVERLAP` (`overlap_bases`) bases
+///     of the same sequence as leading context (`->C`). `block->list[0].C`
+///     becomes the block's `overlap` field.
+///   * Non-init windows request `max(block_size - size, block_size * 0.05)`
+///     new residues, keeping blocks near `block_size`.
+///
+/// Overlap is therefore retained ONLY when continuing the same long sequence
+/// across a block boundary — a boundary that falls between two distinct
+/// sequences carries no overlap, unlike the previous global-text chopper.
 fn build_readblock_like_records(
     input_seqs: &[SequenceMetadata],
     block_size_bases: usize,
@@ -476,35 +524,32 @@ fn build_readblock_like_records(
     }
 
     let block_size = block_size_bases.max(1);
-    let effective_overlap = overlap_bases.min(block_size.saturating_sub(1));
+    let max_overlap = overlap_bases.min(block_size.saturating_sub(1));
+    let slop = ((block_size as f64) * 0.05).ceil() as usize;
+
     let mut seq_data = Vec::new();
     let mut blocks = Vec::new();
-    let mut block_start = 0usize;
-    while block_start < compact_len {
-        let block_end = (block_start + block_size).min(compact_len);
-        let overlap = if blocks.is_empty() {
-            0
-        } else {
-            effective_overlap.min(block_end - block_start)
-        };
-        let seq_offset = seq_data.len();
-        let block_id = blocks.len();
-        push_block_sequence_windows(
-            input_seqs,
-            block_start,
-            block_end,
-            block_id,
-            overlap,
-            &mut seq_data,
-        );
+
+    // Currently-open block accumulator.
+    let mut block_id = 0usize;
+    let mut seq_offset = 0usize;
+    let mut size = 0usize; // NEW residues in the open block (matches C's `size`)
+    let mut block_overlap = 0usize; // C's block->list[0].C for this block
+    let mut block_started = false;
+
+    // Helper to finalize the currently-open block into `blocks`.
+    let finish_block = |blocks: &mut Vec<BlockRecord>,
+                        seq_data: &[SequenceMetadata],
+                        block_id: usize,
+                        seq_offset: usize,
+                        block_overlap: usize| {
         let seq_count = seq_data.len() - seq_offset;
         let (fm_start, length) = if seq_count == 0 {
             (0, 0)
         } else {
             let first = &seq_data[seq_offset];
             let last = &seq_data[seq_data.len() - 1];
-            let end = last.fm_start + last.length;
-            (first.fm_start, end - first.fm_start)
+            (first.fm_start, last.fm_start + last.length - first.fm_start)
         };
         blocks.push(BlockRecord {
             id: block_id,
@@ -514,55 +559,100 @@ fn build_readblock_like_records(
             seq_count,
             ambig_offset: 0,
             ambig_count: 0,
-            overlap_bases: overlap,
+            overlap_bases: block_overlap,
         });
-        if block_end == compact_len {
-            break;
+    };
+
+    for seq in input_seqs {
+        // Residues of this sequence already consumed by a window.
+        let mut consumed = 0usize;
+        // Whether the currently-open window of THIS sequence is a continuation
+        // across a block boundary (i.e. it carries leading overlap context).
+        let mut continuation = false;
+
+        while consumed < seq.length {
+            if !block_started {
+                block_started = true;
+                block_overlap = if continuation {
+                    // Continuation of a split sequence: re-read up to
+                    // FM_BLOCK_OVERLAP bases of context. C does this by setting
+                    // block->list->C, which becomes the block's overlap.
+                    max_overlap.min(consumed)
+                } else {
+                    0
+                };
+                seq_offset = seq_data.len();
+            }
+
+            // C's non-init request size: max(block_size - size, block_size*0.05).
+            let request_size = block_size.saturating_sub(size).max(slop).max(1);
+            let remaining = seq.length - consumed;
+            let new_residues = request_size.min(remaining);
+
+            // The window includes leading overlap context (only when this is
+            // the first window of a continued sequence in a fresh block).
+            let leading_overlap = if continuation && consumed > 0 && size == 0 {
+                max_overlap.min(consumed)
+            } else {
+                0
+            };
+            let window_offset = consumed - leading_overlap;
+            let window_len = leading_overlap + new_residues;
+
+            seq_data.push(SequenceMetadata {
+                target_id: seq.target_id,
+                target_start: seq.target_start + window_offset,
+                fm_start: seq.fm_start + window_offset,
+                length: window_len,
+                block_id,
+                block_offset: 0,
+                overlap_bases: leading_overlap,
+                name: seq.name.clone(),
+                acc: seq.acc.clone(),
+                desc: seq.desc.clone(),
+            });
+
+            consumed += new_residues;
+            size += new_residues;
+
+            // Did this fill the block? (size has reached block_size and the
+            // sequence is not yet exhausted, OR exactly hit the limit).
+            let seq_exhausted = consumed >= seq.length;
+            if size >= block_size {
+                finish_block(&mut blocks, &seq_data, block_id, seq_offset, block_overlap);
+                block_id += 1;
+                size = 0;
+                block_started = false;
+                // If the sequence isn't done, the next window of it is a
+                // continuation that should carry overlap context.
+                continuation = !seq_exhausted;
+            } else {
+                // Sequence finished without filling the block; keep the block
+                // open for the next input sequence (no overlap across the
+                // boundary between distinct sequences).
+                continuation = false;
+            }
         }
-        block_start = block_end.saturating_sub(effective_overlap);
+    }
+
+    // Flush any partially-filled trailing block.
+    if block_started {
+        finish_block(&mut blocks, &seq_data, block_id, seq_offset, block_overlap);
+    }
+
+    // Recompute per-window block_offset (position within the block's text).
+    let mut current_block = usize::MAX;
+    let mut block_offset = 0usize;
+    for window in &mut seq_data {
+        if window.block_id != current_block {
+            current_block = window.block_id;
+            block_offset = 0;
+        }
+        window.block_offset = block_offset;
+        block_offset += window.length;
     }
 
     (seq_data, blocks)
-}
-
-fn push_block_sequence_windows(
-    input_seqs: &[SequenceMetadata],
-    block_start: usize,
-    block_end: usize,
-    block_id: usize,
-    overlap_bases: usize,
-    out: &mut Vec<SequenceMetadata>,
-) {
-    let mut compact_pos = 0usize;
-    let mut block_offset = 0usize;
-    for seq in input_seqs {
-        let seq_start = compact_pos;
-        let seq_end = seq_start + seq.length;
-        compact_pos = seq_end;
-
-        let window_start = block_start.max(seq_start);
-        let window_end = block_end.min(seq_end);
-        if window_start >= window_end {
-            continue;
-        }
-
-        let seq_offset = window_start - seq_start;
-        let length = window_end - window_start;
-        let window_overlap = overlap_bases.saturating_sub(block_offset).min(length);
-        out.push(SequenceMetadata {
-            target_id: seq.target_id,
-            target_start: seq.target_start + seq_offset,
-            fm_start: seq.fm_start + seq_offset,
-            length,
-            block_id,
-            block_offset,
-            overlap_bases: window_overlap,
-            name: seq.name.clone(),
-            acc: seq.acc.clone(),
-            desc: seq.desc.clone(),
-        });
-        block_offset += length;
-    }
 }
 
 fn assign_ambiguities_to_blocks(
@@ -1249,20 +1339,56 @@ mod tests {
 
     #[test]
     fn readblock_records_retain_overlap_without_stalling() {
+        // A single 25-base sequence with block_size=10 and overlap=3, windowed
+        // exactly as C `esl_sqio_ReadBlock()` would: each block reads up to 10
+        // NEW residues; continuation windows re-read 3 bases of leading context
+        // (advancing 10 NEW residues per block, NOT 7). So fm_starts advance by
+        // 10 minus the 3-base re-read = block windows [0..10), [7..20), [17..25).
         let seqs = vec![test_seq(0, 0, 25, 0)];
         let (windows, blocks) = build_readblock_like_records(&seqs, 10, 3);
         let starts: Vec<_> = blocks.iter().map(|block| block.fm_start).collect();
         let overlaps: Vec<_> = blocks.iter().map(|block| block.overlap_bases).collect();
 
-        assert_eq!(starts, vec![0, 7, 14, 21]);
-        assert_eq!(overlaps, vec![0, 3, 3, 3]);
-        assert_eq!(blocks.last().unwrap().length, 4);
+        assert_eq!(starts, vec![0, 7, 17]);
+        assert_eq!(overlaps, vec![0, 3, 3]);
+        assert_eq!(blocks.last().unwrap().length, 8);
         assert_eq!(
             windows
                 .iter()
                 .map(|seq| seq.target_start)
                 .collect::<Vec<_>>(),
-            vec![1, 8, 15, 22]
+            vec![1, 8, 18]
+        );
+    }
+
+    #[test]
+    fn readblock_keeps_short_sequences_whole_without_cross_seq_overlap() {
+        // Several short sequences, each well under block_size, are read whole
+        // and packed into one block. The block boundary between distinct
+        // sequences carries no overlap (matches C: overlap is only retained
+        // when continuing ONE long sequence across a boundary).
+        let seqs = vec![
+            test_seq(0, 0, 8, 0),
+            test_seq(1, 8, 8, 0),
+            test_seq(2, 16, 8, 0),
+        ];
+        let (windows, blocks) = build_readblock_like_records(&seqs, 100, 20);
+
+        // size after each whole seq: 8, 16, 24 (< 100) -> all stay in block 0;
+        // a single trailing block holds all three intact windows, no overlap.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].overlap_bases, 0);
+        assert_eq!(blocks[0].seq_count, 3);
+        assert_eq!(
+            windows.iter().map(|w| w.length).collect::<Vec<_>>(),
+            vec![8, 8, 8]
+        );
+        assert!(windows.iter().all(|w| w.overlap_bases == 0));
+        // block_offset is the running position within the block's concatenated
+        // text, independent of the original global fm_start values.
+        assert_eq!(
+            windows.iter().map(|w| w.block_offset).collect::<Vec<_>>(),
+            vec![0, 8, 16]
         );
     }
 

@@ -370,7 +370,13 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .unwrap();
         }
         ScoreMode::Viterbi | ScoreMode::Hybrid | ScoreMode::Msv => {
-            write_gumbel_summary(&mut out, &hmm.name, model_params, &histogram).unwrap();
+            let alilens_opt = if args.alignment_stats {
+                Some(alilens.as_slice())
+            } else {
+                None
+            };
+            write_gumbel_summary(&mut out, &hmm.name, model_params, &histogram, alilens_opt)
+                .unwrap();
         }
     }
 
@@ -776,6 +782,14 @@ fn forward_tail_fits(args: &Args, histogram: &ScoreHistogram) -> Vec<ForwardTail
     fits
 }
 
+/// Format a value the way C's `%8.4f` does: render the digits with C's
+/// `%.4f` (via `fmt_fixed4`, which calls the C library), then right-justify
+/// to a minimum field width of 8 with spaces. C printf never truncates when
+/// the content exceeds the width, matching Rust's `{:>8}` on the string.
+fn fmt_w8_4(val: f64) -> String {
+    format!("{:>8}", fmt_fixed4(val))
+}
+
 fn write_forward_tail_summary(
     args: &Args,
     out: &mut dyn Write,
@@ -793,19 +807,21 @@ fn write_forward_tail_summary(
             histogram.sorted.len() as f64 * fit.tailp * exponential::surv(x10, fit.mu, 0.693147);
         let e10p = histogram.sorted.len() as f64
             * exponential::surv(x10, model_params.mu, model_params.lambda);
+        // C: fprintf("%-20s  %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f\n",
+        //            name, tailp, mu, lambda, E10, mufix(=mu), E10fix, pmu, plambda, E10p)
         writeln!(
             out,
-            "{:<20}  {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4}",
+            "{:<20}  {} {} {} {} {} {} {} {} {}",
             hmm_name,
-            fit.tailp,
-            fit.mu,
-            fit.lambda,
-            e10,
-            fit.mu,
-            e10fix,
-            model_params.mu,
-            model_params.lambda,
-            e10p
+            fmt_w8_4(fit.tailp),
+            fmt_w8_4(fit.mu),
+            fmt_w8_4(fit.lambda),
+            fmt_w8_4(e10),
+            fmt_w8_4(fit.mu),
+            fmt_w8_4(e10fix),
+            fmt_w8_4(model_params.mu),
+            fmt_w8_4(model_params.lambda),
+            fmt_w8_4(e10p)
         )?;
     }
     Ok(())
@@ -816,9 +832,13 @@ fn write_gumbel_summary(
     hmm_name: &str,
     model_params: ModelParams,
     histogram: &ScoreHistogram,
+    alilens: Option<&[usize]>,
 ) -> std::io::Result<()> {
     let rank = histogram.sorted.len().min(10).max(1);
     let x10 = histogram.rank(rank);
+
+    // tailp field is always 1.0 for the Gumbel-fit modes.
+    let tailp = 1.0;
 
     let (mu, lambda) = gumbel::fit_complete(&histogram.sorted)
         .unwrap_or_else(|_| fallback_gumbel(&histogram.sorted));
@@ -834,22 +854,56 @@ fn write_gumbel_summary(
     let e10p =
         histogram.sorted.len() as f64 * gumbel::surv(x10, model_params.mu, model_params.lambda);
 
-    writeln!(
+    // C: fprintf("%-20s  %8.4f x11", name, tailp, mu, lambda, E10, mufix, E10fix,
+    //            mufix2, E10fix2, pmu, plambda, E10p)  -- no trailing newline here;
+    // the newline (or the optional -a columns) is appended afterward.
+    write!(
         out,
-        "{:<20}  {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4} {:8.4}",
+        "{:<20}  {} {} {} {} {} {} {} {} {} {} {}",
         hmm_name,
-        1.0,
-        mu,
-        lambda,
-        e10,
-        mufix,
-        e10fix,
-        mufix2,
-        e10fix2,
-        model_params.mu,
-        model_params.lambda,
-        e10p
-    )
+        fmt_w8_4(tailp),
+        fmt_w8_4(mu),
+        fmt_w8_4(lambda),
+        fmt_w8_4(e10),
+        fmt_w8_4(mufix),
+        fmt_w8_4(e10fix),
+        fmt_w8_4(mufix2),
+        fmt_w8_4(e10fix2),
+        fmt_w8_4(model_params.mu),
+        fmt_w8_4(model_params.lambda),
+        fmt_w8_4(e10p)
+    )?;
+
+    if let Some(alilens) = alilens {
+        // C: esl_stats_IMean over the alignment lengths, then
+        //    fprintf(" %8.4f %8.4f\n", almean, sqrt(alvar))
+        let (almean, alvar) = i_mean(alilens);
+        writeln!(out, " {} {}", fmt_w8_4(almean), fmt_w8_4(c_sqrt_f64(alvar)))?;
+    } else {
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// Reproduce Easel's `esl_stats_IMean`: sample mean and (n>1) sample variance
+/// of an integer vector, computed in f64. The variance uses `fabs(...)` to
+/// avoid a tiny negative result for zero variance, matching the C code.
+fn i_mean(x: &[usize]) -> (f64, f64) {
+    let n = x.len();
+    let mut sum = 0.0_f64;
+    let mut sqsum = 0.0_f64;
+    for &xi in x {
+        let xi = xi as f64;
+        sum += xi;
+        sqsum += xi * xi;
+    }
+    let mean = sum / n as f64;
+    let var = if n > 1 {
+        ((sqsum - sum * sum / n as f64) / (n as f64 - 1.0)).abs()
+    } else {
+        0.0
+    };
+    (mean, var)
 }
 
 fn write_gumbel_plot(

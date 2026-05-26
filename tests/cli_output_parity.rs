@@ -3242,7 +3242,9 @@ fn nhmmer_output_file_acc_noali_textw_cpu_seed_and_tblout_work() {
     let text = std::fs::read_to_string(out).unwrap();
     assert!(text.contains("# hits tabular output:             "));
     assert!(text.contains("# number of worker threads:        1\n"));
-    assert!(text.contains("Annotation for each hit:\n"));
+    // C prints "Annotation for each hit %s:\n" with %s="" under --noali, leaving
+    // the literal space after "hit" (verified against bundled C nhmmer).
+    assert!(text.contains("Annotation for each hit :\n"));
     assert!(!text.contains("  Alignment:\n"));
     assert!(text.contains("DF0000629.2"));
 
@@ -7387,18 +7389,29 @@ fn hmmbuild_supports_calibration_tuning_options() {
     let default_hmm = std::fs::read_to_string(default_hmm).unwrap();
     assert!(tuned_hmm.contains("STATS LOCAL MSV"));
     assert!(tuned_hmm.contains("STATS LOCAL FORWARD"));
-    let (_, msv_lambda) = hmm_stat_values(&tuned_hmm, "STATS LOCAL MSV");
+    let (msv_mu, msv_lambda) = hmm_stat_values(&tuned_hmm, "STATS LOCAL MSV");
     let (_, viterbi_lambda) = hmm_stat_values(&tuned_hmm, "STATS LOCAL VITERBI");
-    let (_, forward_lambda) = hmm_stat_values(&tuned_hmm, "STATS LOCAL FORWARD");
-    assert_ne!(
+    let (forward_mu, forward_lambda) = hmm_stat_values(&tuned_hmm, "STATS LOCAL FORWARD");
+    // HMMER's p7_Calibrate (hmmer/src/evalues.c) computes a single lambda via
+    // p7_Lambda and reuses it for the MSV/Viterbi Gumbel fits AND the Forward
+    // exponential tail fit, so all three STATS LOCAL lines share one lambda.
+    // This matches the bundled C hmmbuild output byte-for-byte. The distinctness
+    // of Forward calibration lives in its MU/tau, not its lambda.
+    assert_eq!(
         forward_lambda.to_bits(),
         msv_lambda.to_bits(),
-        "Forward calibration should serialize the fitted Forward lambda"
+        "Forward, MSV and Viterbi share the single calibration lambda (p7_Calibrate/p7_Lambda)"
     );
-    assert_ne!(
+    assert_eq!(
         forward_lambda.to_bits(),
         viterbi_lambda.to_bits(),
-        "Forward calibration should not reuse Viterbi lambda"
+        "Forward, MSV and Viterbi share the single calibration lambda (p7_Calibrate/p7_Lambda)"
+    );
+    // Forward is still calibrated distinctly: its fitted MU differs from MSV's.
+    assert_ne!(
+        forward_mu.to_bits(),
+        msv_mu.to_bits(),
+        "Forward calibration should fit a distinct MU from the MSV Gumbel fit"
     );
     assert_ne!(
         extract_hmm_stats(&tuned_hmm),
