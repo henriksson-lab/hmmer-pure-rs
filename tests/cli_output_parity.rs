@@ -40,6 +40,10 @@ fn c_alimask() -> String {
     format!("{}/hmmer/src/alimask", project_root())
 }
 
+fn c_hmmemit() -> String {
+    format!("{}/hmmer/src/hmmemit", project_root())
+}
+
 fn custom_protein_score_matrix() -> String {
     let residues = "ACDEFGHIKLMNPQRSTVWY";
     let header = residues
@@ -1711,7 +1715,12 @@ fn hmmscan_tblout_has_scan_footer_and_pfamtblout_has_search_footer() {
         pfamtblout.display()
     )));
     assert!(stdout.contains("Accession:   P13368\n"));
-    assert!(stdout.contains("Description: RecName: Full=Protein sevenless; EC=2.7.10.1;\n"));
+    // Multi-line UniProt DE: Easel preserves the continuation line's leading
+    // whitespace (esl_sqio_ascii.c strips only the 5-char "DE   " prefix +
+    // trailing whitespace) and esl_sq_AppendDesc joins with a single space.
+    // C therefore emits the wide inter-field spacing, not a single space.
+    assert!(stdout
+        .contains("Description: RecName: Full=Protein sevenless;          EC=2.7.10.1;\n"));
     assert!(stdout.contains("Internal pipeline statistics summary:\n"));
     assert!(stdout.contains("Domain annotation for each model:\n"));
     assert!(stdout.contains(">> fn3  Fibronectin type III domain\n"));
@@ -2004,7 +2013,12 @@ fn hmmscan_search_space_overrides_are_reported_in_stdout_and_table_footers() {
     for path in [&tblout, &domtblout] {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("# Program:         hmmscan\n"));
-        assert!(text.contains("# Option settings: hmmer scan --noali -Z 123 --domZ 5 "));
+        // Audit F4: the `hmmer` wrapper token is stripped and the subcommand
+        // alias is normalized to the canonical `hmmscan`, matching phmmer/jackhmmer.
+        assert!(
+            text.contains("# Option settings: hmmscan --noali -Z 123 --domZ 5 "),
+            "footer must strip wrapper and normalize to hmmscan: {text}"
+        );
         assert!(text.ends_with("# [ok]\n"));
     }
 }
@@ -6311,6 +6325,33 @@ fn hmmemit_cli_modes_and_output_file_work() {
     assert!(stdout.contains("fn3-sample1"));
     assert!(stdout.contains("fn3-sample2"));
 
+    // `-a` Stockholm output must be byte-identical to the C binary, including
+    // interleaved block wrapping (width 200) and Easel insert rejustification.
+    // A 374-residue model with -N 4 forces multiple wrapped blocks with inserts.
+    if std::path::Path::new(&c_hmmemit()).exists() {
+        for (seed, n, hmm) in [
+            ("5", "4", "hmmer/testsuite/gecco_missed_hmms.hmm"),
+            ("7", "8", "hmmer/testsuite/gecco_missed_hmms.hmm"),
+            ("3", "10", "hmmer/testsuite/minipfam.hmm"),
+            ("7", "2", "hmmer/tutorial/fn3.hmm"),
+        ] {
+            let c = Command::new(c_hmmemit())
+                .args(["-a", "-N", n, "--seed", seed, hmm])
+                .output()
+                .unwrap();
+            let r = Command::new(hmmer())
+                .args(["emit", "-a", "-N", n, "--seed", seed, hmm])
+                .output()
+                .unwrap();
+            assert!(c.status.success() && r.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&r.stdout),
+                String::from_utf8_lossy(&c.stdout),
+                "hmmemit -a output diverges from C for seed={seed} N={n} hmm={hmm}"
+            );
+        }
+    }
+
     let profile = Command::new(hmmer())
         .args([
             "emit",
@@ -8807,11 +8848,11 @@ fn hmmpgmd_first_hit_nreported(payload: &[u8]) -> i32 {
 }
 
 fn hmmpgmd_query_rust_master_hmmdb(hmmdb: &str) -> Vec<u8> {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let cport = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -8945,10 +8986,32 @@ fn reserve_c_hmmpgmd_port(first_port: u16) -> u16 {
     panic!("no high TCP port available for C hmmpgmd");
 }
 
+/// Bind a listener on a port within hmmpgmd's valid `--cport`/`--wport` range
+/// (49151 < n < 65536). Binding to ephemeral port 0 can land below 49152 on
+/// Linux, which hmmpgmd now rejects to match the C option range. A
+/// process-global cursor advances through the range so consecutive calls (and
+/// parallel tests) get distinct ports rather than all reusing the first free
+/// one.
+fn bind_hmmpgmd_listener() -> TcpListener {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    const LO: u16 = 49152;
+    const HI: u16 = 65535; // valid range is 49151 < n < 65536, so n <= 65534
+    let span = (HI - LO) as usize;
+    for _ in 0..span {
+        let idx = NEXT.fetch_add(1, Ordering::Relaxed) % span;
+        let port = LO + idx as u16;
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return listener;
+        }
+    }
+    panic!("no valid hmmpgmd TCP port available");
+}
+
 #[test]
 fn hmmpgmd_serves_hmm_hits_over_tcp() {
     let _guard = hmmpgmd_test_guard();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
@@ -9013,7 +9076,7 @@ fn hmmpgmd_serves_sequence_hits_over_tcp() {
     )
     .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
@@ -9070,11 +9133,11 @@ fn hmmpgmd_serves_sequence_hits_over_tcp() {
 #[test]
 fn hmmpgmd_master_serves_c_framed_client_status() {
     let _guard = hmmpgmd_test_guard();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let cport = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -9156,11 +9219,11 @@ fn hmmpgmd_master_applies_listener_backlog_sizing_options() {
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -9259,11 +9322,11 @@ fn hmmpgmd_master_accepts_c_framed_hmm_query_for_seqdb() {
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let cport = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -9353,10 +9416,10 @@ fn hmmpgmd_worker_accepts_master_init_frame() {
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(client_listener);
     drop(worker_listener);
@@ -9427,10 +9490,10 @@ fn hmmpgmd_master_schedules_c_framed_search_to_worker() {
     std::fs::write(&master_seqdb, ">master_only\nYYYYYYYYYYYYYYYYYYYY\n").unwrap();
     std::fs::write(&worker_seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(client_listener);
     drop(worker_listener);
@@ -9941,11 +10004,11 @@ fn hmmpgmd_master_assigns_hmmdb_shards_with_binary_search_cmd() {
     )
     .unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -11046,11 +11109,11 @@ fn hmmpgmd_master_drops_malformed_worker_payload_and_falls_back() {
     let seqdb = dir.path().join("master-targets.fa");
     std::fs::write(&seqdb, ">fallback_target\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -11148,11 +11211,11 @@ fn hmmpgmd_master_drops_worker_payload_with_malformed_alignment() {
     let seqdb = dir.path().join("master-targets.fa");
     std::fs::write(&seqdb, ">fallback_target\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -11250,11 +11313,11 @@ fn hmmpgmd_master_recovers_from_unknown_control_before_shutdown() {
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -11331,11 +11394,11 @@ fn hmmpgmd_master_uses_reconnected_worker_after_failed_search() {
     let master_seqdb = dir.path().join("master-targets.fa");
     std::fs::write(&master_seqdb, ">master_only\nYYYYYYYYYYYYYYYYYYYY\n").unwrap();
 
-    let client_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client_listener = bind_hmmpgmd_listener();
     let cport = client_listener.local_addr().unwrap().port();
     drop(client_listener);
 
-    let worker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let worker_listener = bind_hmmpgmd_listener();
     let wport = worker_listener.local_addr().unwrap().port();
     drop(worker_listener);
 
@@ -11619,7 +11682,7 @@ fn hmmpgmd_worker_executes_seqdb_search_frame() {
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let wport = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
@@ -11796,7 +11859,7 @@ fn hmmpgmd_worker_binary_seqdb_search_honors_slice() {
     )
     .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let wport = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
@@ -11885,7 +11948,7 @@ fn hmmpgmd_worker_seqdb_hmm_model_cutoffs_error_when_absent_and_succeed_when_pre
     let seqdb = dir.path().join("targets.fa");
     std::fs::write(&seqdb, ">target1\nACDEFGHIKLMNPQRSTVWY\n").unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let wport = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
@@ -11987,7 +12050,7 @@ fn hmmpgmd_worker_executes_hmmdb_binary_scan_shard() {
     )
     .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let wport = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
@@ -12151,7 +12214,7 @@ fn hmmpgmd_start_hmmdb_worker(
     hmmdb: &std::path::Path,
     nmodels: u32,
 ) -> (std::process::Child, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_hmmpgmd_listener();
     let wport = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
@@ -12360,4 +12423,65 @@ fn hmmbuild_autodetects_dna_and_prints_w_column() {
     let hmm = std::fs::read_to_string(hmm_out).unwrap();
     assert!(hmm.contains("ALPH  DNA\n"));
     assert!(hmm.contains("MAXL  "));
+}
+
+/// Audit F3 + F4 (04-scan-iterative-drivers): hmmscan on a model that has no
+/// DESC must print the empty description after the name (">> globins4  " with a
+/// trailing space and no "-"), matching C `p7_tophits_Domains`; and the tabular
+/// footer's "Option settings" must strip the `hmmer` wrapper token to read
+/// `hmmscan ...`, matching the phmmer/jackhmmer footers.
+#[test]
+fn hmmscan_empty_desc_has_no_dash_and_footer_strips_wrapper() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmmdb = dir.path().join("globins4.hmm");
+    std::fs::copy("hmmer/tutorial/globins4.hmm", &hmmdb).unwrap();
+    let press = Command::new(hmmer())
+        .args(["press", "-f", hmmdb.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        press.status.success(),
+        "{}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let tblout = dir.path().join("hits.tbl");
+    let output = Command::new(hmmer())
+        .args([
+            "scan",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmmdb.to_str().unwrap(),
+            "hmmer/tutorial/HBB_HUMAN",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    // F3: empty DESC => ">> globins4  " (name + two spaces, then nothing), not
+    // ">> globins4  -".
+    assert!(
+        stdout.lines().any(|l| l == ">> globins4  "),
+        "missing empty-desc >> line; got: {:?}",
+        stdout.lines().find(|l| l.starts_with(">> globins4"))
+    );
+    assert!(
+        !stdout.contains(">> globins4  -"),
+        "empty desc must not render as a dash"
+    );
+
+    // F4: tabular footer must read "hmmscan ...", not "hmmer hmmscan ...".
+    let tbl = std::fs::read_to_string(&tblout).unwrap();
+    let footer = tbl
+        .lines()
+        .find(|l| l.starts_with("# Option settings:"))
+        .expect("missing Option settings footer");
+    assert!(
+        footer.starts_with("# Option settings: hmmscan "),
+        "footer must strip wrapper token: {footer}"
+    );
+    assert!(
+        !footer.contains("hmmer hmmscan"),
+        "footer must not keep the hmmer wrapper token: {footer}"
+    );
 }

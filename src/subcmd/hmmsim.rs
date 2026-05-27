@@ -77,13 +77,17 @@ struct Args {
     #[arg(long = "pthresh", default_value = "0.02")]
     pthresh: f64,
 
-    #[arg(long = "tmin", default_value = "0.02", value_parser = parse_positive_f64)]
+    // C: --tmin/--tmax are eslARG_REAL with NO range; --tpoints is eslARG_INT
+    // with NO range. C accepts --tmin 0, --tmax 0, negative values, --tpoints 0.
+    // allow_hyphen_values lets the space-separated negative form (e.g. --tmin -1)
+    // parse the same way C does, rather than being treated as an unknown flag.
+    #[arg(long = "tmin", default_value = "0.02", allow_hyphen_values = true)]
     tmin: f64,
 
-    #[arg(long = "tmax", default_value = "0.02", value_parser = parse_positive_f64)]
+    #[arg(long = "tmax", default_value = "0.02", allow_hyphen_values = true)]
     tmax: f64,
 
-    #[arg(long = "tpoints", default_value = "1", value_parser = parse_positive_usize)]
+    #[arg(long = "tpoints", default_value = "1", allow_hyphen_values = true)]
     tpoints: usize,
 
     #[arg(long = "tlinear")]
@@ -170,17 +174,6 @@ fn parse_open_unit_f64(s: &str) -> Result<f64, String> {
         Ok(value)
     } else {
         Err("value must be > 0 and < 1".to_string())
-    }
-}
-
-fn parse_positive_f64(s: &str) -> Result<f64, String> {
-    let value = s
-        .parse::<f64>()
-        .map_err(|e| format!("invalid positive real: {e}"))?;
-    if value > 0.0 && value.is_finite() {
-        Ok(value)
-    } else {
-        Err("value must be finite and > 0".to_string())
     }
 }
 
@@ -770,12 +763,22 @@ fn forward_tail_fits(args: &Args, histogram: &ScoreHistogram) -> Vec<ForwardTail
         if args.tpoints == 1 {
             break;
         }
+        // C (hmmsim.c:815) holds tpoints as a `double`, so `tpoints-1` is float
+        // arithmetic; with --tpoints 0 this is -1.0, not an integer underflow.
+        // Mirror that to match C and avoid a usize subtraction panic.
+        let tpoints = args.tpoints as f64;
+        let prev = tailp;
         if args.tlinear {
-            tailp += (args.tmax - args.tmin) / (args.tpoints - 1) as f64;
+            tailp += (args.tmax - args.tmin) / (tpoints - 1.0);
         } else {
-            tailp *= (c_log_f64(args.tmax / args.tmin) / (args.tpoints - 1) as f64).exp();
+            tailp *= (c_log_f64(args.tmax / args.tmin) / (tpoints - 1.0)).exp();
         }
-        if tailp > args.tmax + 1e-7 {
+        // The sweep only makes sense for tpoints >= 2 with tmax > tmin, where the
+        // step strictly advances tailp toward tmax. For degenerate inputs C accepts
+        // but does not loop (e.g. --tpoints 0 with tmin==tmax leaves the step at a
+        // no-op; C aborts on the empty fit). Guard against non-advancement so we
+        // terminate instead of spinning forever, and cap iterations at tpoints.
+        if !(tailp > prev) || tailp > args.tmax + 1e-7 || fits.len() >= args.tpoints {
             break;
         }
     }

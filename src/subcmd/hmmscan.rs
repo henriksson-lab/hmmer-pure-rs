@@ -246,6 +246,7 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
 /// databases are required and read through the `.h3*` sidecar path.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
+    let table_cmdline = normalize_hmmscan_table_cmdline(&cmdline);
     let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
 
@@ -566,7 +567,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SCAN",
             &args.seqfile,
             &args.hmmdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
     if let Some(ref mut f) = domtblout_file {
@@ -576,7 +577,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SCAN",
             &args.seqfile,
             &args.hmmdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
     if let Some(ref mut f) = pfamtblout_file {
@@ -586,12 +587,33 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SEARCH",
             &args.seqfile,
             &args.hmmdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
 
     writeln!(out, "[ok]").unwrap();
     std::process::ExitCode::SUCCESS
+}
+
+/// Strip the leading `hmmer` wrapper token so the tabular footer's
+/// "Option settings" reads `hmmscan ...` instead of `hmmer hmmscan ...`,
+/// mirroring the phmmer/jackhmmer `normalize_*_table_cmdline` helpers.
+fn normalize_hmmscan_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        // The single-binary dispatch records the wrapper token (`hmmer`) plus the
+        // subcommand the user typed (`hmmscan` or its `scan` alias). Strip the
+        // wrapper and normalize to the canonical `hmmscan` program name.
+        (Some(_wrapper), Some("hmmscan" | "scan")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "hmmscan".to_string()
+            } else {
+                format!("hmmscan {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
 }
 
 fn display_name(hit: &hmmer_pure_rs::tophits::Hit, prefer_acc: bool) -> &str {
@@ -878,8 +900,7 @@ fn write_hmmscan_domain_annotation(
             continue;
         }
 
-        let desc = if hit.desc.is_empty() { "-" } else { &hit.desc };
-        writeln!(out, ">> {}  {}", display_name(hit, prefer_acc), desc).unwrap();
+        writeln!(out, ">> {}  {}", display_name(hit, prefer_acc), hit.desc).unwrap();
         if hit.nreported == 0 {
             writeln!(
                 out,

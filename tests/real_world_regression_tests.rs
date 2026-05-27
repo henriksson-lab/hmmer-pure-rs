@@ -985,6 +985,48 @@ fn test_nhmmer_made1_stdout_matches_golden_after_normalization() {
 }
 
 #[test]
+fn test_nhmmer_nhmmscan_suppress_runtime_footer_lines() {
+    // The non-deterministic run-time footer (`# CPU time:` / `# Mc/sec:`) is
+    // suppressed for determinism, matching hmmsearch/phmmer/hmmscan/jackhmmer.
+    let hmm = test_path("hmmer/tutorial/MADE1.hmm");
+    let target = test_path("hmmer/tutorial/dna_target.fa");
+
+    let nhmmer_stdout = run_nhmmer_stdout(&hmm, &target, &[]);
+    assert!(
+        !nhmmer_stdout.contains("# CPU time:") && !nhmmer_stdout.contains("# Mc/sec:"),
+        "nhmmer must not emit the run-time footer lines:\n{nhmmer_stdout}"
+    );
+
+    // nhmmscan over a pressed copy of the same model.
+    let dir = tempfile::tempdir().unwrap();
+    let ndb = dir.path().join("ndb.hmm");
+    std::fs::copy(&hmm, &ndb).unwrap();
+    let press = Command::new(binary_path("hmmer"))
+        .args(["hmmpress", "-f", ndb.to_str().unwrap()])
+        .output()
+        .expect("failed to run hmmpress");
+    assert!(
+        press.status.success(),
+        "hmmpress failed: {}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let scan = Command::new(binary_path("hmmer"))
+        .args(["nhmmscan", ndb.to_str().unwrap(), &target])
+        .output()
+        .expect("failed to run nhmmscan");
+    assert!(
+        scan.status.success(),
+        "nhmmscan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let scan_stdout = String::from_utf8_lossy(&scan.stdout);
+    assert!(
+        !scan_stdout.contains("# CPU time:") && !scan_stdout.contains("# Mc/sec:"),
+        "nhmmscan must not emit the run-time footer lines:\n{scan_stdout}"
+    );
+}
+
+#[test]
 fn test_nhmmer_made1_watson_and_crick_split_hits_cleanly() {
     let (_both_stdout, both_tbl) = run_nhmmer(
         &test_path("hmmer/tutorial/MADE1.hmm"),

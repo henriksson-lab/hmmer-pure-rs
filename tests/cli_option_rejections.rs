@@ -1076,7 +1076,7 @@ fn hmmpgmd_master_accepts_both_served_databases_at_parse_time() {
 #[test]
 fn hmmpgmd_requires_served_database() {
     let output = Command::new(hmmer())
-        .args(["pgmd", "--port", "9"])
+        .args(["pgmd", "--port", "51371"])
         .output()
         .unwrap();
 
@@ -1136,7 +1136,7 @@ fn hmmpgmd_worker_accepts_c_sizing_options_before_socket_failure() {
             "--cpu",
             "1",
             "--wport",
-            "9",
+            "51372",
         ])
         .output()
         .unwrap();
@@ -1148,6 +1148,53 @@ fn hmmpgmd_worker_accepts_c_sizing_options_before_socket_failure() {
         stderr.contains("Cannot connect to master worker port"),
         "{stderr}"
     );
+}
+
+#[test]
+fn hmmpgmd_rejects_out_of_range_ports() {
+    // C `hmmpgmd.c`: `--cport`/`--wport` carry range "49151<n<65536", so the
+    // valid range is 49152..=65535. Values on or outside the exclusive bounds
+    // (80, 49151, 65536, 70000) are rejected at parse time. Audit M2 / 01-cli-args.
+    for (flag, value) in [
+        ("--cport", "80"),
+        ("--cport", "49151"),
+        ("--cport", "65536"),
+        ("--wport", "49151"),
+        ("--wport", "65536"),
+        ("--wport", "70000"),
+        ("--port", "1024"),
+    ] {
+        let output = Command::new(hmmer())
+            .args(["pgmd", "--master", flag, value, "--seqdb", "missing.fa"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{flag} {value} should be rejected"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("range 49151<n<65536"),
+            "{flag} {value}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn hmmpgmd_accepts_in_range_ports() {
+    // The valid boundary values 49152 and 65535 parse successfully; failure
+    // happens later (loading the missing DB), not at the port range check.
+    for value in ["49152", "65535"] {
+        let output = Command::new(hmmer())
+            .args(["pgmd", "--master", "--cport", value, "--seqdb", "missing.fa"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !stderr.contains("range 49151<n<65536"),
+            "--cport {value} must be accepted: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1254,15 +1301,10 @@ fn hmmsim_rejects_invalid_pthresh_and_missing_required_flags_before_io() {
 
 #[test]
 fn hmmsim_rejects_invalid_calibration_options_before_io() {
-    for option in [
-        "--EmL",
-        "--EmN",
-        "--EvL",
-        "--EvN",
-        "--EfL",
-        "--EfN",
-        "--tpoints",
-    ] {
+    // C: --EmL/--EmN/--EvL/--EvN/--EfL/--EfN are eslARG_INT with range "n>0".
+    // (--tpoints, --tmin, --tmax carry NO range in C — see the acceptance test
+    // hmmsim_accepts_unranged_tail_options_like_c below.)
+    for option in ["--EmL", "--EmN", "--EvL", "--EvN", "--EfL", "--EfN"] {
         let output = Command::new(hmmer())
             .args(["sim", option, "0", "missing.hmm"])
             .output()
@@ -1270,19 +1312,6 @@ fn hmmsim_rejects_invalid_calibration_options_before_io() {
         assert!(!output.status.success(), "{option}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("value must be > 0"), "{option}: {stderr}");
-    }
-
-    for option in ["--tmin", "--tmax"] {
-        let output = Command::new(hmmer())
-            .args(["sim", option, "0", "missing.hmm"])
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{option}");
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            stderr.contains("value must be finite and > 0"),
-            "{option}: {stderr}"
-        );
     }
 
     for bad in ["0", "1"] {
@@ -1295,6 +1324,69 @@ fn hmmsim_rejects_invalid_calibration_options_before_io() {
         assert!(
             stderr.contains("value must be > 0 and < 1"),
             "{bad}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn hmmsim_accepts_unranged_tail_options_like_c() {
+    // C hmmsim.c: --tmin/--tmax are eslARG_REAL and --tpoints is eslARG_INT, all
+    // with range NULL (no constraint). The bundled C binary accepts --tmin 0,
+    // --tmax 0, and --tpoints 0 (verified by running hmmer/src/hmmsim). Rust must
+    // not reject them at parse/validation time. Use --fwd so the forward tail
+    // path actually consumes these options, and a real model so the run reaches IO.
+    for arg in [
+        vec!["sim", "--fwd", "--tmin", "0", "hmmer/tutorial/fn3.hmm"],
+        vec!["sim", "--fwd", "--tmax", "0", "hmmer/tutorial/fn3.hmm"],
+        vec!["sim", "--fwd", "--tpoints", "0", "hmmer/tutorial/fn3.hmm"],
+        vec!["sim", "--fwd", "--tmin", "0", "-N", "10", "-L", "10", "hmmer/tutorial/fn3.hmm"],
+    ] {
+        let output = Command::new(hmmer()).args(&arg).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        // Must not be rejected for being out of range / non-positive.
+        assert!(
+            !stderr.contains("value must be"),
+            "{arg:?} should not be rejected by a positivity guard: {stderr}"
+        );
+        assert!(
+            !stderr.contains("takes integer arg") && !stderr.contains("invalid"),
+            "{arg:?} should parse: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn hmmsim_rejects_conflicting_alignment_styles_before_io() {
+    // C hmmsim.c STYLES = "--fs,--sw,--ls,--s" is a mutually-exclusive toggle group.
+    for pair in [["--fs", "--sw"], ["--ls", "--s"], ["--fs", "--ls"]] {
+        let output = Command::new(hmmer())
+            .args(["sim", pair[0], pair[1], "missing.hmm"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{pair:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("alignment options --fs, --sw, --ls, and --s are mutually exclusive"),
+            "{pair:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn hmmsim_rejects_a_without_viterbi_scoring() {
+    // C hmmsim.c: -a has reqs "--vit". With another algorithm selected (which
+    // toggles --vit off), C errors. (-a alone is fine because --vit is the
+    // default-on algorithm.)
+    for algo in ["--fwd", "--hyb", "--msv"] {
+        let output = Command::new(hmmer())
+            .args(["sim", "-a", algo, "missing.hmm"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{algo}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("-a requires Viterbi scoring"),
+            "{algo}: {stderr}"
         );
     }
 }
@@ -1347,7 +1439,11 @@ fn hmmconvert_rejects_conflicting_ascii_binary_before_io() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("options -a and -b are mutually exclusive"));
+    // C rejects the -a/-b/-2 toggle group at parse time ("Options -a and -b
+    // conflict, toggling each other."); the Rust port enforces the same
+    // mutual exclusion via clap's conflicts_with.
+    assert!(stderr.contains("cannot be used with"));
+    assert!(stderr.contains("-a") && stderr.contains("-b"));
 }
 
 #[test]
@@ -1959,7 +2055,10 @@ fn hmmbuild_rejects_hand_without_rf_and_invalid_architecture_options() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("mutually exclusive"));
+    // C: --fast/--hand are a toggle group (rejected at parse time); the Rust
+    // port enforces this via clap's conflicts_with.
+    assert!(stderr.contains("cannot be used with"));
+    assert!(stderr.contains("--fast") || stderr.contains("--hand"));
 
     let output = Command::new(hmmer())
         .args([
@@ -1973,7 +2072,9 @@ fn hmmbuild_rejects_hand_without_rf_and_invalid_architecture_options() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("--symfrac must be between 0 and 1"));
+    // C: "Option --symfrac takes real-valued arg in range 0<=x<=1; got 1.5".
+    // The Rust port enforces the same 0<=x<=1 range via a clap value_parser.
+    assert!(stderr.contains("--symfrac") && stderr.contains("1.5"));
 
     let output = Command::new(hmmer())
         .args([
@@ -1987,7 +2088,7 @@ fn hmmbuild_rejects_hand_without_rf_and_invalid_architecture_options() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("--fragthresh must be between 0 and 1"));
+    assert!(stderr.contains("--fragthresh") && stderr.contains("1.5"));
 }
 
 #[test]

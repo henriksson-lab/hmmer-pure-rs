@@ -57,15 +57,15 @@ struct Args {
     seqdb: Option<PathBuf>,
 
     /// Legacy alias for --cport
-    #[arg(long = "port")]
+    #[arg(long = "port", value_parser = parse_port)]
     port: Option<u16>,
 
     /// Port to use for client/server communication
-    #[arg(long = "cport", default_value = "51371", conflicts_with = "worker")]
+    #[arg(long = "cport", default_value = "51371", value_parser = parse_port, conflicts_with = "worker")]
     cport: u16,
 
     /// Port to use for server/worker communication
-    #[arg(long = "wport", default_value = "51372")]
+    #[arg(long = "wport", default_value = "51372", value_parser = parse_port)]
     wport: u16,
 
     /// File to write the process id to
@@ -88,6 +88,21 @@ struct Args {
 impl Args {
     fn client_port(&self) -> u16 {
         self.port.unwrap_or(self.cport)
+    }
+}
+
+/// Parse a port value enforcing C's `49151<n<65536` range
+/// (`hmmpgmd.c` `--cport`/`--wport`). C parses as a signed int, so values
+/// outside the u16 range are rejected with the same range message rather than
+/// a type error.
+fn parse_port(s: &str) -> Result<u16, String> {
+    let value = s
+        .parse::<i64>()
+        .map_err(|_| format!("takes integer arg in range 49151<n<65536; got {s}"))?;
+    if value > 49151 && value < 65536 {
+        Ok(value as u16)
+    } else {
+        Err(format!("takes integer arg in range 49151<n<65536; got {s}"))
     }
 }
 

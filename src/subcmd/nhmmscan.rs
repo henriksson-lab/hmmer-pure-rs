@@ -3,7 +3,6 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use clap::Parser;
 
@@ -12,7 +11,7 @@ use hmmer_pure_rs::bg::Bg;
 use hmmer_pure_rs::builder::{self, DEFAULT_WINDOW_BETA};
 use hmmer_pure_rs::hmmfile_binary;
 use hmmer_pure_rs::logsum;
-use hmmer_pure_rs::output::{fmt_bias, fmt_elapsed_seconds, fmt_fixed0, fmt_g, fmt_score};
+use hmmer_pure_rs::output::{fmt_bias, fmt_fixed0, fmt_g, fmt_score};
 use hmmer_pure_rs::pipeline::{BitCutoff, Pipeline};
 use hmmer_pure_rs::pressed;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
@@ -445,7 +444,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let mut sq = Sequence::new();
     let mut query_idx = 0usize;
-    let search_start = Instant::now();
     let search_space = args.z_value.unwrap_or(hmms.len() as f64);
     let search_space_ln = hmmer_pure_rs::util::cmath::c_log_f64(search_space);
     while sqf.read(&mut sq).unwrap_or_else(|e| {
@@ -694,7 +692,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             args.f1,
             args.f2,
             args.f3,
-            search_start.elapsed().as_secs_f64(),
         );
         writeln!(out, "//").unwrap();
 
@@ -1058,7 +1055,6 @@ fn write_nhmmscan_pipeline_stats<W: Write + ?Sized>(
     f1: f64,
     f2: f64,
     f3: f64,
-    elapsed_secs: f64,
 ) {
     let residues_scanned = query_residues.saturating_mul(n_models);
     let frac = |n: u64| {
@@ -1123,28 +1119,10 @@ fn write_nhmmscan_pipeline_stats<W: Write + ?Sized>(
         hmmer_pure_rs::output::fmt_g3(frac(pos_output))
     )
     .unwrap();
-    let total_h = (elapsed_secs / 3600.0) as u64;
-    let total_m = ((elapsed_secs / 60.0) as u64) % 60;
-    let total_s = elapsed_secs - (total_h * 3600 + total_m * 60) as f64;
-    writeln!(
-        out,
-        "# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: {:02}:{:02}:{}",
-        total_h,
-        total_m,
-        fmt_elapsed_seconds(total_s)
-    )
-    .unwrap();
-    let mc_per_sec = if elapsed_secs > 0.0 {
-        (query_residues as f64 * total_nodes as f64) / 1_000_000.0 / elapsed_secs
-    } else {
-        0.0
-    };
-    writeln!(
-        out,
-        "# Mc/sec: {}",
-        hmmer_pure_rs::output::fmt_g3(mc_per_sec)
-    )
-    .unwrap();
+    // Run-time footer (`# CPU time:` / `# Mc/sec:`) is intentionally
+    // suppressed for determinism, matching the hmmsearch/phmmer/hmmscan/
+    // jackhmmer Rust programs (which also omit these non-deterministic timing
+    // lines). C HMMER prints them, but the Rust ports do not.
 }
 
 fn reported_aligned_residues(th: &TopHits) -> u64 {

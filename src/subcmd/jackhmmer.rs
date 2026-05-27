@@ -1212,8 +1212,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     write_stockholm_msa(f, &msa);
                     writeln!(
                         out,
-                        "# Alignment of {} hits saved to:  {}",
-                        msa.nseq.saturating_sub(1),
+                        "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
+                        msa.nseq,
                         args.ali_outfile.as_ref().unwrap().display()
                     )
                     .unwrap();

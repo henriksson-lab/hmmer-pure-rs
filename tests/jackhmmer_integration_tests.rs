@@ -1152,8 +1152,33 @@ fn jackhmmer_a_writes_final_included_alignment() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("# MSA of hits saved to file:"));
-    assert!(stdout.contains("# Alignment of "));
-    assert!(stdout.contains(" saved to:"));
+    // Audit F2: the confirmation line must use C's exact wording (jackhmmer.c:726)
+    // "# Alignment of %d hits satisfying inclusion thresholds saved to: %s" with
+    // a single space before the filename. The count is the MSA's nseq (which
+    // includes the query row), not nseq-1.
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("# Alignment of "))
+        .expect("missing alignment confirmation line");
+    assert!(
+        line.contains(" hits satisfying inclusion thresholds saved to: "),
+        "wrong wording: {line}"
+    );
+    assert!(
+        !line.contains("saved to:  "),
+        "stray double space before filename: {line}"
+    );
+    assert!(
+        line.ends_with(&format!(" saved to: {}", ali_out.display())),
+        "wrong path/spacing: {line}"
+    );
+    // The count must match the number of sequence rows in the written MSA
+    // (the included MSA's nseq, which includes the query), not nseq-1.
+    let count: usize = line
+        .strip_prefix("# Alignment of ")
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok())
+        .expect("could not parse hit count");
 
     let sto = std::fs::read_to_string(&ali_out).expect("missing final alignment output");
     assert!(sto.starts_with("# STOCKHOLM 1.0\n"));
@@ -1161,6 +1186,23 @@ fn jackhmmer_a_writes_final_included_alignment() {
     assert!(sto.contains("#=GF AU jackhmmer (HMMER 3.4)\n"));
     assert!(sto.contains("HBB_HUMAN"));
     assert!(sto.contains("#=GC RF"));
+
+    // The reported count equals the number of aligned sequence rows in the MSA
+    // (query + included subsequences), confirming no off-by-one (audit F2).
+    let mut names = std::collections::BTreeSet::new();
+    for l in sto.lines() {
+        if l.is_empty() || l.starts_with('#') || l == "//" {
+            continue;
+        }
+        if let Some(name) = l.split_whitespace().next() {
+            names.insert(name.to_string());
+        }
+    }
+    assert_eq!(
+        count,
+        names.len(),
+        "reported hit count must equal MSA sequence rows"
+    );
 
     let _ = std::fs::remove_file(&ali_out);
 }

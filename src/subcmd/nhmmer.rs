@@ -22,7 +22,7 @@ use hmmer_pure_rs::hmm::{self as p7hmm, Hmm};
 use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::msa;
-use hmmer_pure_rs::output::{fmt_elapsed_seconds, fmt_evalue, fmt_g, fmt_g3};
+use hmmer_pure_rs::output::{fmt_evalue, fmt_g, fmt_g3};
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::prior::PriorStrategy;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
@@ -1399,7 +1399,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         })
     });
     for (query_idx, hmm) in hmms.iter().enumerate() {
-        let search_start = std::time::Instant::now();
         let abc = match (args.dna, args.rna, hmm.abc_type) {
             (true, _, hmmer_pure_rs::alphabet::AlphabetType::Dna) => Alphabet::dna(),
             (_, true, hmmer_pure_rs::alphabet::AlphabetType::Rna) => Alphabet::rna(),
@@ -2166,27 +2165,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             g3(pos_output as f64 / denom)
         )
         .unwrap();
-        // CPU time / Mc/sec lines. Elapsed wall-clock is recorded; we don't
-        // split user/sys so those remain 0.
-        let elapsed = search_start.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
-        let total_h = (elapsed_secs / 3600.0) as u64;
-        let total_m = ((elapsed_secs / 60.0) as u64) % 60;
-        let total_s = elapsed_secs - (total_h * 3600 + total_m * 60) as f64;
-        writeln!(
-            out,
-            "# CPU time: 0.00u 0.00s 00:00:00.00 Elapsed: {:02}:{:02}:{}",
-            total_h,
-            total_m,
-            fmt_elapsed_seconds(total_s)
-        )
-        .unwrap();
-        let mc_per_sec = if elapsed_secs > 0.0 {
-            (residues_searched * hmm.m as f64) / 1_000_000.0 / elapsed_secs
-        } else {
-            0.0
-        };
-        writeln!(out, "# Mc/sec: {}", fmt_g3(mc_per_sec)).unwrap();
+        // Run-time footer (`# CPU time:` / `# Mc/sec:`) is intentionally
+        // suppressed for determinism, matching the hmmsearch/phmmer/hmmscan/
+        // jackhmmer Rust programs (which also omit these non-deterministic
+        // timing lines). C HMMER prints them, but the Rust ports do not.
 
         // Tblout
         if let Some(ref mut f) = tblout_file {

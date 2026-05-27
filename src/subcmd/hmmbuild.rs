@@ -44,19 +44,19 @@ struct Args {
     informat: Option<String>,
 
     /// Use DNA alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["rna", "amino"])]
     dna: bool,
 
     /// Use RNA alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["dna", "amino"])]
     rna: bool,
 
     /// Use protein alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["dna", "rna"])]
     amino: bool,
 
     /// Assign consensus columns from RF annotation
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "fast")]
     hand: bool,
 
     /// Assign consensus columns by residue fraction
@@ -143,11 +143,11 @@ struct Args {
     stall: bool,
 
     /// Sym fraction threshold for match/insert (default 0.5)
-    #[arg(long = "symfrac", default_value = "0.5")]
+    #[arg(long = "symfrac", default_value = "0.5", value_parser = parse_unit_f32, conflicts_with = "hand")]
     symfrac: f32,
 
     /// Sequence is called a fragment if L <= x*alignment_length
-    #[arg(long = "fragthresh", default_value = "0.5")]
+    #[arg(long = "fragthresh", default_value = "0.5", value_parser = parse_unit_f32)]
     fragthresh: f32,
 
     /// Use single-sequence builder path for one-sequence alignments
@@ -296,6 +296,18 @@ fn parse_unit_f64(s: &str) -> Result<f64, String> {
     }
 }
 
+/// Parse an f32 in C's `0<=x<=1` range (used for --symfrac and --fragthresh).
+fn parse_unit_f32(s: &str) -> Result<f32, String> {
+    let value = s
+        .parse::<f32>()
+        .map_err(|e| format!("invalid real value: {e}"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("value must be >= 0 and <= 1".to_string())
+    }
+}
+
 fn parse_popen(s: &str) -> Result<f32, String> {
     let value = s
         .parse::<f32>()
@@ -371,33 +383,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
     let _stall_compat = args.stall;
 
-    if [args.amino, args.dna, args.rna]
-        .into_iter()
-        .filter(|v| *v)
-        .count()
-        > 1
-    {
-        eprintln!("Error: options --amino, --dna, and --rna are mutually exclusive");
-        std::process::exit(1);
-    }
-    if args.hand && args.fast {
-        eprintln!("Error: options --hand and --fast are mutually exclusive");
-        std::process::exit(1);
-    }
+    // Alphabet (--amino/--dna/--rna) and construction (--fast/--hand) mutual
+    // exclusion, the --symfrac/--fragthresh 0<=x<=1 range, and "--symfrac
+    // requires --fast" (clap: conflicts_with --hand) are all enforced at parse
+    // time by clap, matching C's ALPHOPTS/CONOPTS toggles, range columns, and
+    // --symfrac reqs --fast in hmmbuild.c.
     if wid_was_requested && !args.wblosum {
         eprintln!("Error: --wid only works in combination with --wblosum");
         std::process::exit(1);
     }
     if eid_was_requested && !args.eclust {
         eprintln!("Error: --eid only works in combination with --eclust");
-        std::process::exit(1);
-    }
-    if !(0.0..=1.0).contains(&args.symfrac) {
-        eprintln!("Error: --symfrac must be between 0 and 1");
-        std::process::exit(1);
-    }
-    if !(0.0..=1.0).contains(&args.fragthresh) {
-        eprintln!("Error: --fragthresh must be between 0 and 1");
         std::process::exit(1);
     }
     if matches!(args.w_length, Some(1..=3)) {
@@ -1366,5 +1362,52 @@ mod tests {
         assert!(args.amino);
         assert_eq!(args.hmmfile, PathBuf::from("out.hmm"));
         assert_eq!(args.msafile, PathBuf::from("in.sto"));
+    }
+
+    #[test]
+    fn hmmbuild_rejects_conflicting_alphabet_flags() {
+        // C: ALPHOPTS toggle group -> "Options --amino and --dna conflict".
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--amino", "--dna", "out.hmm", "in.sto"]).is_err()
+        );
+        assert!(Args::try_parse_from(["hmmbuild", "--dna", "--rna", "out.hmm", "in.sto"]).is_err());
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--amino", "--rna", "out.hmm", "in.sto"]).is_err()
+        );
+    }
+
+    #[test]
+    fn hmmbuild_rejects_fast_and_hand_together() {
+        // C: CONOPTS toggle group -> "Options --fast and --hand conflict".
+        assert!(Args::try_parse_from(["hmmbuild", "--fast", "--hand", "out.hmm", "in.sto"]).is_err());
+    }
+
+    #[test]
+    fn hmmbuild_rejects_out_of_range_symfrac_and_fragthresh() {
+        // C: --symfrac/--fragthresh range "0<=x<=1".
+        assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "2", "out.hmm", "in.sto"]).is_err());
+        assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "-0.1", "out.hmm", "in.sto"]).is_err());
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--fragthresh", "2", "out.hmm", "in.sto"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--fragthresh", "-1", "out.hmm", "in.sto"]).is_err()
+        );
+        // Boundary values are accepted (0<=x<=1 is inclusive).
+        assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "0", "out.hmm", "in.sto"]).is_ok());
+        assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "1", "out.hmm", "in.sto"]).is_ok());
+    }
+
+    #[test]
+    fn hmmbuild_symfrac_requires_fast_not_hand() {
+        // C: --symfrac reqs --fast; with --hand (which toggles --fast off) it errors.
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--hand", "--symfrac", "0.6", "out.hmm", "in.sto"])
+                .is_err()
+        );
+        // --symfrac alone (fast is default-on) is fine.
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--symfrac", "0.6", "out.hmm", "in.sto"]).is_ok()
+        );
     }
 }

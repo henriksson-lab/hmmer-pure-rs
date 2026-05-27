@@ -197,10 +197,28 @@ Totals ≈ 6 High, ~24 Med, ~18 Low. **All High findings fixed:**
 New FM-index parity tests (Rust vs bundled C nhmmer on makehmmerdb DBs) added in
 `tests/real_world_regression_tests.rs`.
 
-**Not yet fixed (see reports):** the ~24 Med (CLI toggle-groups & range
-validation across hmmemit/hmmsim/hmmbuild/hmmconvert; run-time footer policy;
-nhmmer FM filter-residue counter pre-merge; multi-segment complement extension
-flip) and Low items.
+**Med findings fixed (2026-05-27 follow-up pass):**
+- CLI toggle-groups & range validation: hmmbuild (`--fast/--hand`, `--amino/--dna/--rna`,
+  `--symfrac`/`--fragthresh` range 0<=x<=1, nucleic popen/pextend defaults confirmed),
+  hmmconvert (`-a/-b/-2` toggle), hmmalign (alphabet toggle), hmmemit (emit-mode &
+  profile-mode toggles, `--minl/--minu` range+requires), hmmsim (relaxed
+  `--tmin/--tmax/--tpoints` to match C's unranged args + fixed a `--tpoints 0` hang;
+  style/algorithm toggle groups), hmmpgmd (`--cport/--wport` range 49151<n<65536).
+- Output parity: hmmemit `-a` wrapped Stockholm + insert rejustification (byte-identical
+  to C); multi-line UniProt `DE` description preserves C column spacing; STATS LOCAL
+  lines padded to C's `%8.4f`/`%8.5f`.
+- Scan drivers: jackhmmer `-A` confirmation line (`msa.nseq`, C wording); hmmscan
+  empty-desc `>>` line drops spurious `-`; hmmscan tabular footer strips `hmmer` wrapper.
+- Run-time footer policy: nhmmer/nhmmscan no longer emit non-deterministic
+  `# CPU time:`/`# Mc/sec:` (now consistent with the other programs).
+- Test-harness follow-ups: hmmpgmd test port helpers reserve in-range ports via an
+  atomic cursor (ephemeral `:0` could land below 49152 and trip the new range check);
+  4 `cli_option_rejections` assertions updated from the removed custom conflict-message
+  text to clap's parse-time messages. Full suite green (17 binaries, 0 failures).
+
+**Not yet fixed (see reports):** nhmmer FM filter-residue counter pre-merge (MED-1) and
+multi-segment complement extension flip (MED-2) — both latent (not triggered on tested
+data); the ~18 Low items.
 
 ## Ground Rules
 

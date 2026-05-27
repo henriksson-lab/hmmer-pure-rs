@@ -15,19 +15,19 @@ use hmmer_pure_rs::hmmfile_binary;
 )]
 struct Args {
     /// Output HMMER3 ASCII format
-    #[arg(short = 'a', action = ArgAction::SetTrue)]
+    #[arg(short = 'a', action = ArgAction::SetTrue, conflicts_with_all = ["binary", "hmmer2"])]
     ascii: bool,
 
     /// Output HMMER3 binary format
-    #[arg(short = 'b', action = ArgAction::SetTrue)]
+    #[arg(short = 'b', action = ArgAction::SetTrue, conflicts_with_all = ["ascii", "hmmer2"])]
     binary: bool,
 
     /// HMMER2 ASCII output is intentionally unsupported in this Rust port
-    #[arg(short = '2', action = ArgAction::SetTrue)]
+    #[arg(short = '2', action = ArgAction::SetTrue, conflicts_with_all = ["ascii", "binary"])]
     hmmer2: bool,
 
     /// Choose output legacy 3.x file format by name
-    #[arg(long = "outfmt")]
+    #[arg(long = "outfmt", conflicts_with = "hmmer2")]
     outfmt: Option<String>,
 
     /// HMM file
@@ -41,10 +41,8 @@ struct Args {
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 
-    if args.ascii && args.binary {
-        eprintln!("Error: options -a and -b are mutually exclusive");
-        std::process::exit(1);
-    }
+    // -a/-b/-2 mutual exclusion (C: "-a,-b,-2" toggle group) is enforced at
+    // parse time by clap.
     if args.hmmer2 {
         eprintln!("Error: hmmconvert -2 HMMER2 ASCII output is intentionally unsupported");
         std::process::exit(1);
@@ -118,15 +116,14 @@ mod tests {
     }
 
     #[test]
-    fn hmmconvert_rejects_ascii_binary_conflict_before_io() {
-        let args = vec![
-            "hmmconvert".to_string(),
-            "-a".to_string(),
-            "-b".to_string(),
-            "missing.hmm".to_string(),
-        ];
-        let parsed = Args::try_parse_from(args).unwrap();
-        assert!(parsed.ascii);
-        assert!(parsed.binary);
+    fn hmmconvert_rejects_format_toggle_conflicts() {
+        // C: -a/-b/-2 share toggle group "-a,-b,-2" -> mutually exclusive.
+        assert!(Args::try_parse_from(["hmmconvert", "-a", "-b", "models.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmconvert", "-a", "-2", "models.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmconvert", "-b", "-2", "models.hmm"]).is_err());
+        // C: --outfmt incompatible with -2.
+        assert!(
+            Args::try_parse_from(["hmmconvert", "-2", "--outfmt", "3/a", "models.hmm"]).is_err()
+        );
     }
 }

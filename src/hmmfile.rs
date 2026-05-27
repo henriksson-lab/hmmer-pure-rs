@@ -1117,23 +1117,27 @@ pub fn write_hmm_with_format<W: std::io::Write>(
             )
             .map_err(HmmerError::Io)?;
         } else {
+            // C: fprintf(fp, "STATS LOCAL MSV      %8.4f %8.5f\n", ...)
+            // (label + spaces, then a width-8 mu, one space, width-8 lambda).
+            // `fmt_fixed4`/`fmt_fixed5` reproduce C's `%.4f`/`%.5f`; right-
+            // justifying in width 8 reproduces the `%8.4f`/`%8.5f` field width.
             writeln!(
                 w,
-                "STATS LOCAL MSV       {}  {}",
+                "STATS LOCAL MSV      {:>8} {:>8}",
                 fmt_fixed4(hmm.evparam[P7_MMU] as f64),
                 fmt_fixed5(hmm.evparam[P7_MLAMBDA] as f64)
             )
             .map_err(HmmerError::Io)?;
             writeln!(
                 w,
-                "STATS LOCAL VITERBI   {}  {}",
+                "STATS LOCAL VITERBI  {:>8} {:>8}",
                 fmt_fixed4(hmm.evparam[P7_VMU] as f64),
                 fmt_fixed5(hmm.evparam[P7_VLAMBDA] as f64)
             )
             .map_err(HmmerError::Io)?;
             writeln!(
                 w,
-                "STATS LOCAL FORWARD   {}  {}",
+                "STATS LOCAL FORWARD  {:>8} {:>8}",
                 fmt_fixed4(hmm.evparam[P7_FTAU] as f64),
                 fmt_fixed5(hmm.evparam[P7_FLAMBDA] as f64)
             )
@@ -1414,6 +1418,41 @@ mod tests {
         assert!(text.contains("GA    25.00 24.50\n"), "{text}");
         assert!(text.contains("TC    30.00 29.50\n"), "{text}");
         assert!(text.contains("NC    -1.00 -2.00\n"), "{text}");
+    }
+
+    #[test]
+    fn writer_pads_stats_local_lines_to_c_field_widths() {
+        // C p7_hmmfile.c writes STATS LOCAL lines as
+        //   "STATS LOCAL MSV      %8.4f %8.5f\n" (and VITERBI/FORWARD).
+        // A mu with magnitude >= 10 produces an 8-char value; C's %8.4f emits
+        // no leading pad, so the field stays width 8. Rust must match exactly.
+        let mut hmm = minimal_hmm("bigmu", AlphabetType::Amino);
+        hmm.flags |= P7H_STATS;
+        hmm.evparam[P7_MMU] = -10.8752;
+        hmm.evparam[P7_MLAMBDA] = 0.70247;
+        hmm.evparam[P7_VMU] = -11.6882;
+        hmm.evparam[P7_VLAMBDA] = 0.70247;
+        hmm.evparam[P7_FTAU] = -5.2290;
+        hmm.evparam[P7_FLAMBDA] = 0.70247;
+
+        let mut buf = Vec::new();
+        write_hmm(&mut buf, &hmm).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        // Byte-for-byte against C `hmmconvert -a` on a model with mu <= -10.
+        assert!(
+            text.contains("STATS LOCAL MSV      -10.8752  0.70247\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("STATS LOCAL VITERBI  -11.6882  0.70247\n"),
+            "{text}"
+        );
+        // 7-char mu still right-justifies in width 8 (one leading pad space).
+        assert!(
+            text.contains("STATS LOCAL FORWARD   -5.2290  0.70247\n"),
+            "{text}"
+        );
     }
 
     #[test]

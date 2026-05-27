@@ -269,16 +269,25 @@ impl<R: Read> SeqFile<R> {
                     break; // end of record
                 }
 
-                if line.starts_with("DE ") {
+                if line.starts_with("DE   ") {
+                    // Match Easel esl_sqio_ascii.c read_uniprot exactly:
+                    //   s = buf + 5;               (strip the 5-char "DE   " prefix)
+                    //   esl_strchop(s, nc-5);       (chop trailing whitespace only)
+                    //   esl_sq_AppendDesc(sq, s);   (join with a single space, but
+                    //                                preserve the continuation line's
+                    //                                leading whitespace)
+                    // Crucially, leading whitespace of continuation lines is *not*
+                    // trimmed, so the original column spacing is retained.
                     let de = line
-                        .strip_prefix("DE   ")
-                        .unwrap_or_else(|| line.get(5..).unwrap_or(""))
-                        .trim_end_matches(['\r', '\n']);
-                    let de = de.trim();
-                    if !de.is_empty() {
-                        if !sq.desc.is_empty() {
-                            sq.desc.push(' ');
-                        }
+                        .get(5..)
+                        .unwrap_or("")
+                        .trim_end_matches(|c: char| c.is_ascii_whitespace());
+                    if sq.desc.is_empty() {
+                        sq.desc.push_str(de);
+                    } else {
+                        // esl_sq_AppendDesc always inserts one space before the new
+                        // text when the existing description is non-empty.
+                        sq.desc.push(' ');
                         sq.desc.push_str(de);
                     }
                 } else if trimmed.starts_with("AC ") && sq.acc.is_empty() {
@@ -557,7 +566,19 @@ mod tests {
         assert!(sqf.read(&mut sq).unwrap());
         assert_eq!(sq.name, "7LESS_DROME");
         assert_eq!(sq.acc, "P13368");
-        assert_eq!(sq.desc, "RecName: Full=Protein sevenless; EC=2.7.10.1;");
+        // Multi-line UniProt DE: Easel (esl_sqio_ascii.c) strips only the 5-char
+        // "DE   " prefix and trailing whitespace, preserving the continuation
+        // line's leading whitespace, then esl_sq_AppendDesc joins with a single
+        // space. The 7LESS_DROME record is:
+        //   DE   RecName: Full=Protein sevenless;
+        //   DE            EC=2.7.10.1;
+        // The continuation keeps 9 leading spaces (12 spaces after "DE" minus
+        // the 3 prefix spaces) and AppendDesc adds 1 separator space => 10
+        // spaces before "EC". Verified byte-for-byte against C phmmer.
+        assert_eq!(
+            sq.desc,
+            "RecName: Full=Protein sevenless;          EC=2.7.10.1;"
+        );
         assert!(
             sq.n > 2500,
             "7LESS_DROME should be >2500 residues, got {}",

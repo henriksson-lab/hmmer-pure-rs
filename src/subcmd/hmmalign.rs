@@ -49,15 +49,15 @@ struct Args {
     informat: Option<String>,
 
     /// Assert protein alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["dna", "rna"])]
     amino: bool,
 
     /// Assert DNA alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["amino", "rna"])]
     dna: bool,
 
     /// Assert RNA alphabet
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["amino", "dna"])]
     rna: bool,
 }
 
@@ -89,15 +89,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         );
         std::process::exit(1);
     }
-    if [args.amino, args.dna, args.rna]
-        .into_iter()
-        .filter(|v| *v)
-        .count()
-        > 1
-    {
-        eprintln!("Error: options --amino, --dna, and --rna are mutually exclusive");
-        std::process::exit(1);
-    }
+    // --amino/--dna/--rna mutual exclusion (C: ALPHOPTS toggle group) is
+    // enforced at parse time by clap.
     let informat = args.informat.as_ref().map(|informat| {
         SequenceFormat::from_name(informat).unwrap_or_else(|| {
             eprintln!("{informat} is not a recognized input sequence file format");
@@ -1065,5 +1058,20 @@ fn pp_to_char(pp: f32) -> char {
         '0'
     } else {
         '.'
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmmalign_rejects_conflicting_alphabet_flags() {
+        // C: ALPHOPTS toggle group -> "Options --amino and --dna conflict".
+        assert!(Args::try_parse_from(["hmmalign", "--amino", "--dna", "m.hmm", "s.fa"]).is_err());
+        assert!(Args::try_parse_from(["hmmalign", "--dna", "--rna", "m.hmm", "s.fa"]).is_err());
+        assert!(Args::try_parse_from(["hmmalign", "--amino", "--rna", "m.hmm", "s.fa"]).is_err());
+        // A single alphabet flag is fine.
+        assert!(Args::try_parse_from(["hmmalign", "--dna", "m.hmm", "s.fa"]).is_ok());
     }
 }

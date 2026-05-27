@@ -4,7 +4,7 @@ use std::io::{BufReader, Write};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, FromArgMatches, Parser};
 
 use hmmer_pure_rs::alphabet::{Alphabet, Dsq, DSQ_SENTINEL};
 use hmmer_pure_rs::bg::Bg;
@@ -18,6 +18,11 @@ use hmmer_pure_rs::sequence::Sequence;
 use hmmer_pure_rs::trace::{State, Trace};
 use hmmer_pure_rs::util::cmath::c_exp_to_f32;
 use hmmer_pure_rs::util::random::MersenneTwister;
+
+/// Easel's interleaved Stockholm writer wraps residues at this column count
+/// (`stockholm_write(fp, msa, 200)` for `eslMSAFILE_STOCKHOLM`,
+/// `esl_msafile_stockholm.c`).
+const STOCKHOLM_CPL: usize = 200;
 
 #[derive(Parser)]
 #[command(
@@ -33,56 +38,80 @@ struct Args {
     hmmfile: PathBuf,
 
     /// Emit alignment
-    #[arg(short = 'a', action = ArgAction::SetTrue)]
+    #[arg(short = 'a', action = ArgAction::SetTrue,
+          conflicts_with_all = ["consensus", "fancy_consensus", "profile"])]
     alignment: bool,
 
     /// Emit consensus sequence
-    #[arg(short = 'c', long, action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long, action = ArgAction::SetTrue,
+          conflicts_with_all = ["alignment", "fancy_consensus", "profile"])]
     consensus: bool,
 
     /// Emit fancy consensus sequence
-    #[arg(short = 'C', action = ArgAction::SetTrue)]
+    #[arg(short = 'C', action = ArgAction::SetTrue,
+          conflicts_with_all = ["alignment", "consensus", "profile"])]
     fancy_consensus: bool,
 
     /// Sample sequences from profile, not core model
-    #[arg(short = 'p', action = ArgAction::SetTrue)]
+    #[arg(short = 'p', action = ArgAction::SetTrue,
+          conflicts_with_all = ["alignment", "consensus", "fancy_consensus"])]
     profile: bool,
 
     /// Expected sequence length for profile emission
+    /// (requires -p; enforced in run() so the default value alone does not trip it)
     #[arg(short = 'L', default_value = "400")]
     length: usize,
 
     /// Configure profile in multihit local mode
-    #[arg(long = "local", action = ArgAction::SetTrue)]
+    #[arg(long = "local", action = ArgAction::SetTrue, requires = "profile",
+          conflicts_with_all = ["unilocal", "glocal", "uniglocal"])]
     local: bool,
 
     /// Configure profile in unihit local mode
-    #[arg(long = "unilocal", action = ArgAction::SetTrue)]
+    #[arg(long = "unilocal", action = ArgAction::SetTrue, requires = "profile",
+          conflicts_with_all = ["local", "glocal", "uniglocal"])]
     unilocal: bool,
 
     /// Configure profile in multihit glocal mode
-    #[arg(long = "glocal", action = ArgAction::SetTrue)]
+    #[arg(long = "glocal", action = ArgAction::SetTrue, requires = "profile",
+          conflicts_with_all = ["local", "unilocal", "uniglocal"])]
     glocal: bool,
 
     /// Configure profile in unihit glocal mode
-    #[arg(long = "uniglocal", action = ArgAction::SetTrue)]
+    #[arg(long = "uniglocal", action = ArgAction::SetTrue, requires = "profile",
+          conflicts_with_all = ["local", "unilocal", "glocal"])]
     uniglocal: bool,
 
     /// Fancy consensus: use any-residue unless best residue probability is at least this
-    #[arg(long = "minl", default_value = "0.0")]
+    /// (range 0<=x<=1; requires -C, enforced in run())
+    #[arg(long = "minl", default_value = "0.0", value_parser = parse_unit_interval)]
     minl: f32,
 
     /// Fancy consensus: uppercase best residue when probability is at least this
-    #[arg(long = "minu", default_value = "0.0")]
+    /// (range 0<=x<=1; requires -C, enforced in run())
+    #[arg(long = "minu", default_value = "0.0", value_parser = parse_unit_interval)]
     minu: f32,
 
     /// Number of sequences to emit
-    #[arg(short = 'N')]
+    #[arg(short = 'N', conflicts_with_all = ["consensus", "fancy_consensus"])]
     n: Option<NonZeroUsize>,
 
     /// Random number seed
     #[arg(long = "seed", default_value = "0")]
     seed: u64,
+}
+
+/// clap value parser for `--minl`/`--minu`: a real number in the closed range
+/// `0 <= x <= 1`, matching C's `eslARG_REAL` range `"0<=x<=1"`.
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| format!("takes real-valued arg in range 0<=x<=1; got {s}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("takes real-valued arg in range 0<=x<=1; got {s}"))
+    }
 }
 
 /// Entry point for `hmmemit`: emit consensus or sampled sequences from each HMM
@@ -91,50 +120,41 @@ struct Args {
 /// With `-c`/`-C`, writes one consensus record per HMM. Otherwise samples
 /// `-N` independent sequences from the core or configured profile model.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
-    let args = Args::parse_from(&args);
+    use clap::parser::ValueSource;
+    use clap::CommandFactory;
 
-    if [
-        args.alignment,
-        args.consensus,
-        args.fancy_consensus,
-        args.profile,
-    ]
-    .into_iter()
-    .filter(|v| *v)
-    .count()
-        > 1
-    {
-        eprintln!("Error: options -a, -c, -C, and -p are mutually exclusive");
+    // Parse once via ArgMatches so we can tell apart values that were given on
+    // the command line from those that came from a clap `default_value`. This is
+    // needed to faithfully reproduce C's `reqs` semantics on `-L`/`--minl`/`--minu`,
+    // which have non-NULL defaults but whose `reqs` (esl_opt_IsOn) fire on
+    // *presence*, not value. The toggle groups (-a/-c/-C/-p, the four mode flags)
+    // and `-N` incompatibilities are enforced by clap attributes on `Args`.
+    let matches = match Args::command().try_get_matches_from(&args) {
+        Ok(m) => m,
+        Err(e) => {
+            e.print().ok();
+            std::process::exit(2);
+        }
+    };
+    let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(a) => a,
+        Err(e) => {
+            e.print().ok();
+            std::process::exit(2);
+        }
+    };
+
+    // C: `-L` reqs `-p`; `--minl`/`--minu` reqs `-C`. Enforced on presence.
+    if given("length") && !args.profile {
+        eprintln!("Error: option -L requires (or has no effect without) option -p");
         std::process::exit(1);
     }
-    if (args.consensus || args.fancy_consensus) && args.n.is_some() {
-        eprintln!("Error: option -N is incompatible with -c and -C");
+    if (given("minl") || given("minu")) && !args.fancy_consensus {
+        eprintln!("Error: options --minl and --minu require (or have no effect without) option -C");
         std::process::exit(1);
     }
-    if !(0.0..=1.0).contains(&args.minl) || !(0.0..=1.0).contains(&args.minu) {
-        eprintln!("Error: --minl and --minu must be in the range 0..1");
-        std::process::exit(1);
-    }
-    if !args.fancy_consensus && (args.minl != 0.0 || args.minu != 0.0) {
-        eprintln!("Error: --minl and --minu require -C");
-        std::process::exit(1);
-    }
-    if args.length == 0 {
-        eprintln!("Error: -L must be positive");
-        std::process::exit(1);
-    }
-    let mode_count = [args.local, args.unilocal, args.glocal, args.uniglocal]
-        .into_iter()
-        .filter(|v| *v)
-        .count();
-    if mode_count > 1 {
-        eprintln!("Error: --local, --unilocal, --glocal, and --uniglocal are mutually exclusive");
-        std::process::exit(1);
-    }
-    if !args.profile && (args.length != 400 || mode_count > 0) {
-        eprintln!("Error: -L and profile mode options require -p");
-        std::process::exit(1);
-    }
+
     let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
         eprintln!("Error reading HMM file: {}", e);
         std::process::exit(1);
@@ -484,6 +504,17 @@ fn sequence_text(abc: &Alphabet, seq: &Sequence) -> Vec<u8> {
         .collect()
 }
 
+/// Write the sampled core-model alignment as interleaved Stockholm, matching
+/// C's `emit_alignment()` (`hmmemit.c`) which builds an MSA via
+/// `p7_tracealign_Seqs(..., p7_ALL_CONSENSUS_COLS, ...)` and writes it with
+/// `esl_msafile_Write(ofp, msa, eslMSAFILE_STOCKHOLM)`.
+///
+/// Reproduces the Easel Stockholm writer layout (`esl_msafile_stockholm.c`,
+/// `stockholm_write`): residues wrapped at [`STOCKHOLM_CPL`] columns into
+/// interleaved blocks separated by a blank line, a left margin sized to the
+/// widest of `maxname+1` and `maxgc+6` (`maxgc == 2` for the RF tag), and a
+/// `#=GC RF` consensus line per block. Inserts are rejustified to match Easel's
+/// `rejustify_insertions_digital()` (`tracealign.c`).
 fn write_stockholm_alignment(
     out: &mut dyn Write,
     hmm: &Hmm,
@@ -492,35 +523,63 @@ fn write_stockholm_alignment(
 ) {
     let traces: Vec<&Trace> = samples.iter().map(|(_, _, tr)| tr).collect();
     let (inscount, matmap, alen) = map_core_alignment(hmm.m, &traces);
-    let name_width = samples
+
+    // Build full-width rows, then rejustify inserts exactly as Easel does.
+    let rows: Vec<Vec<u8>> = samples
+        .iter()
+        .map(|(_, seq, trace)| {
+            let mut row = render_core_alignment_row(abc, seq, trace, &inscount, &matmap, alen);
+            rejustify_insertions(abc, &mut row, hmm.m, &inscount, &matmap);
+            row
+        })
+        .collect();
+    let rf = core_rf_line(hmm.m, &inscount, &matmap, alen);
+
+    // Easel margin = max(maxname+1, maxgc+6). maxgc = 2 (the "RF" tag, clamped
+    // to a minimum of 2 when msa->rf is present). Sequence lines are `%-*s `
+    // with width margin-1; the `#=GC RF` line is `#=GC %-*s ` with the RF tag
+    // padded to margin-6 — both land the residues at column `margin`.
+    let maxname = samples
         .iter()
         .map(|(name, _, _)| name.len())
         .max()
-        .unwrap_or(0)
-        .max("#=GC RF".len());
+        .unwrap_or(0);
+    let maxgc = 2usize;
+    let margin = (maxname + 1).max(maxgc + 6);
 
     writeln!(out, "# STOCKHOLM 1.0").unwrap();
     writeln!(out).unwrap();
-    for (name, seq, trace) in samples {
-        let row = render_core_alignment_row(abc, seq, trace, &inscount, &matmap, alen);
+
+    let mut currpos = 0usize;
+    loop {
+        let acpl = (alen - currpos).min(STOCKHOLM_CPL);
+        if currpos > 0 {
+            writeln!(out).unwrap();
+        }
+        for ((name, _, _), row) in samples.iter().zip(rows.iter()) {
+            writeln!(
+                out,
+                "{:<width$} {}",
+                name,
+                std::str::from_utf8(&row[currpos..currpos + acpl]).unwrap(),
+                width = margin - 1
+            )
+            .unwrap();
+        }
         writeln!(
             out,
-            "{:<width$} {}",
-            name,
-            std::str::from_utf8(&row).unwrap(),
-            width = name_width
+            "#=GC {:<width$} {}",
+            "RF",
+            std::str::from_utf8(&rf[currpos..currpos + acpl]).unwrap(),
+            width = margin - 6
         )
         .unwrap();
+
+        currpos += acpl;
+        if currpos >= alen {
+            break;
+        }
     }
-    let rf = core_rf_line(hmm.m, &inscount, &matmap, alen);
-    writeln!(
-        out,
-        "{:<width$} {}",
-        "#=GC RF",
-        std::str::from_utf8(&rf).unwrap(),
-        width = name_width
-    )
-    .unwrap();
     writeln!(out, "//").unwrap();
 }
 
@@ -577,6 +636,65 @@ fn render_core_alignment_row(
     row
 }
 
+/// Rejustify the inserted residues of a single alignment row, mirroring Easel's
+/// `rejustify_insertions_digital()` (`tracealign.c`). For each node `k` whose
+/// insert column run is longer than 1, residues are split in half: the first
+/// `nres/2` stay left-justified and the remainder are pushed flush-right within
+/// the run (gaps fall in the middle). The N-terminal run (`k == 0`) is fully
+/// right-justified (`nres -> 0` left), and the C-terminal run (`k == m`) is left
+/// untouched (the C loop runs `k = 0 .. m-1`).
+///
+/// Columns are 0-based here: match node `k` (`k >= 1`) occupies `matmap[k]` and
+/// its insert run is `matmap[k]+1 ..= matmap[k]+inscount[k]`; the N-terminal run
+/// is `0 ..= inscount[0]-1`.
+fn rejustify_insertions(
+    abc: &Alphabet,
+    row: &mut [u8],
+    m: usize,
+    inscount: &[usize],
+    matmap: &[usize],
+) {
+    let is_residue = |c: u8| {
+        let up = c.to_ascii_uppercase();
+        up != b'.' && up != b'-' && abc.sym[..abc.k].contains(&up)
+    };
+
+    for k in 0..m {
+        if inscount[k] <= 1 {
+            continue;
+        }
+        // Insert run [lo, hi] inclusive, 0-based.
+        let (lo, hi) = if k == 0 {
+            (0usize, inscount[0] - 1)
+        } else {
+            (matmap[k] + 1, matmap[k] + inscount[k])
+        };
+
+        let nres = row[lo..=hi].iter().filter(|&&c| is_residue(c)).count();
+        // N-terminus is fully right-justified; otherwise split in half (the
+        // number of residues that stay left-justified).
+        let nleft = if k == 0 { 0 } else { nres / 2 };
+        let split = lo + nleft; // first column that receives right-justified content
+
+        // Pack residues toward the right end (hi down to split), then gap-fill.
+        let mut npos = hi as isize;
+        let mut opos = hi as isize;
+        while opos >= split as isize {
+            if !is_residue(row[opos as usize]) {
+                opos -= 1;
+            } else {
+                row[npos as usize] = row[opos as usize];
+                npos -= 1;
+                opos -= 1;
+            }
+        }
+        while npos >= split as isize {
+            row[npos as usize] = b'.';
+            npos -= 1;
+        }
+    }
+}
+
 fn core_rf_line(m: usize, inscount: &[usize], matmap: &[usize], alen: usize) -> Vec<u8> {
     let mut rf = vec![b'.'; alen];
     for k in 1..=m {
@@ -626,6 +744,65 @@ mod tests {
     #[test]
     fn hmmemit_rejects_nonpositive_n() {
         assert!(Args::try_parse_from(["hmmemit", "-N", "0", "model.hmm"]).is_err());
+    }
+
+    #[test]
+    fn hmmemit_emit_mode_toggle_is_mutually_exclusive() {
+        // C EMITOPTS "-a,-c,-C,-p": all pairs conflict at parse time.
+        assert!(Args::try_parse_from(["hmmemit", "-a", "-c", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-a", "-C", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-a", "-p", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-c", "-C", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-c", "-p", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-C", "-p", "model.hmm"]).is_err());
+    }
+
+    #[test]
+    fn hmmemit_n_incompatible_with_consensus_modes() {
+        // C: -N incomp "-c,-C". -N with -a / -p / alone is allowed.
+        assert!(Args::try_parse_from(["hmmemit", "-N", "3", "-c", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-N", "3", "-C", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-N", "3", "-a", "model.hmm"]).is_ok());
+        assert!(Args::try_parse_from(["hmmemit", "-N", "3", "-p", "model.hmm"]).is_ok());
+    }
+
+    #[test]
+    fn hmmemit_mode_flags_toggle_and_require_profile() {
+        // C MODEOPTS: the four mode flags are mutually exclusive...
+        assert!(
+            Args::try_parse_from(["hmmemit", "-p", "--local", "--glocal", "model.hmm"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["hmmemit", "-p", "--unilocal", "--uniglocal", "model.hmm"])
+                .is_err()
+        );
+        // ...and require -p.
+        assert!(Args::try_parse_from(["hmmemit", "--local", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "--glocal", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-p", "--glocal", "model.hmm"]).is_ok());
+    }
+
+    #[test]
+    fn hmmemit_minl_minu_range_is_validated() {
+        // C range "0<=x<=1".
+        assert!(Args::try_parse_from(["hmmemit", "-C", "--minl", "5", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-C", "--minu", "-0.1", "model.hmm"]).is_err());
+        assert!(Args::try_parse_from(["hmmemit", "-C", "--minl", "0.0", "model.hmm"]).is_ok());
+        assert!(Args::try_parse_from(["hmmemit", "-C", "--minu", "1.0", "model.hmm"]).is_ok());
+    }
+
+    #[test]
+    fn rejustify_splits_inserts_like_easel() {
+        // One node (k=1) with an insert run of width 3 holding two residues.
+        // matmap[1]=0 (match col), insert run = cols 1..=3, match2 at col 4.
+        // Easel: nres=2 -> nleft=1; left residue stays at col1, the other
+        // flushes right to col3, gap in the middle: "s.s".
+        let abc = Alphabet::amino();
+        let inscount = vec![0usize, 3usize, 0usize];
+        let matmap = vec![0usize, 0usize, 4usize];
+        let mut row = b"Ass.-".to_vec(); // left-justified inserts before rejustify
+        rejustify_insertions(&abc, &mut row, 2, &inscount, &matmap);
+        assert_eq!(&row, b"As.s-");
     }
 
     #[test]
