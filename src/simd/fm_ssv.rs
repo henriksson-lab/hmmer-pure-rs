@@ -175,6 +175,56 @@ impl SsvScores {
     }
 }
 
+/// Optimal-extension look-ahead tables (C `P7_SCOREDATA.opt_ext_fwd/rev`).
+/// `fwd[k][j]` = the best possible score from extending model position `k`
+/// forward by `j+1` positions (sum of the per-node max match scores); `rev[r][j]`
+/// likewise extending backward from `r`. Used by `FM_Recurse` to prune diagonals
+/// that cannot reach threshold even with a perfect extension near the depth limit.
+#[derive(Debug)]
+struct OptExt {
+    fwd: Vec<[f32; 10]>,
+    rev: Vec<[f32; 10]>,
+}
+
+impl OptExt {
+    /// Faithful port of `scoredata_GetSSVScoreArrays`'s opt_ext loop
+    /// (`p7_scoredata.c`).
+    fn build(scores: &SsvScores) -> Self {
+        let m = scores.m as usize;
+        let mut max_scores = vec![0f32; m + 1];
+        for k in 1..=m {
+            let mut best = 0f32;
+            for x in 0..scores.kp {
+                let v = scores.get(k as i32, x);
+                if v > best {
+                    best = v;
+                }
+            }
+            max_scores[k] = best;
+        }
+        let mut fwd = vec![[0f32; 10]; m + 1];
+        let mut rev = vec![[0f32; 10]; m + 1];
+        for i in 1..m {
+            let mut sc_fwd = 0f32;
+            let mut sc_rev = 0f32;
+            let mut j = 0usize;
+            while j < 10 && i + j + 1 <= m {
+                sc_fwd += max_scores[i + j + 1];
+                fwd[i][j] = sc_fwd;
+                sc_rev += max_scores[m - i - j];
+                rev[m - i][j] = sc_rev;
+                j += 1;
+            }
+            while j < 10 {
+                fwd[i][j] = fwd[i][j - 1];
+                rev[m - i][j] = rev[m - i][j - 1];
+                j += 1;
+            }
+        }
+        OptExt { fwd, rev }
+    }
+}
+
 /// Metadata describing the (DNA) alphabet for the FM trie traversal.
 /// Mirrors the bits of C's `FM_METADATA` the kernel reads: alphabet size and
 /// complement map.
@@ -244,6 +294,16 @@ fn get_passing_diags(
 /// `dp_pairs` is the shared scratch vector C indexes with `first..=last`;
 /// surviving children are appended past `last` and recursed on. We mirror that
 /// exactly using indices into a growable Vec.
+/// Look up `opt_ext[idx][j]`, returning `None` (i.e. do not prune) when the
+/// indices are outside the valid/computed range.
+#[inline]
+fn opt_ext_lookahead(table: &[[f32; 10]], idx: i32, j: i32) -> Option<f32> {
+    if idx < 1 || !(0..10).contains(&j) {
+        return None;
+    }
+    table.get(idx as usize).map(|row| row[j as usize])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fm_recurse(
     depth: i32,
@@ -255,6 +315,7 @@ fn fm_recurse(
     consensus: &[usize],
     sc_thresh_fm: f32,
     config: &FmSsvConfig,
+    opt_ext: &OptExt,
     dp_pairs: &mut Vec<FmDpPair>,
     first: usize,
     last: usize,
@@ -340,12 +401,20 @@ fn fm_recurse(
                 || ((pair.max_consec_pos as usize) < config.consec_pos_req
                     && config.consec_pos_req.saturating_sub(positive_run as usize)
                         == (config.max_depth as i32 - depth + 1) as usize)
+                // C's optimal-extension look-ahead prune: near the depth limit,
+                // drop a diagonal that can't reach threshold even with the best
+                // possible extension. `j = max_depth - depth - 1` (C indexes the
+                // size-10 opt_ext arrays); guarded to a valid j and model range.
+                || (pair.model_direction == ModelDirection::Forward
+                    && depth > config.max_depth as i32 - 10
+                    && opt_ext_lookahead(&opt_ext.fwd, k, config.max_depth as i32 - depth - 1)
+                        .is_some_and(|best| sc + best < sc_thresh_fm))
+                || (pair.model_direction == ModelDirection::Backward
+                    && depth > config.max_depth as i32 - 10
+                    && opt_ext_lookahead(&opt_ext.rev, k - 1, config.max_depth as i32 - depth - 1)
+                        .is_some_and(|best| sc + best < sc_thresh_fm))
             {
                 // pruned - do nothing.
-                // NOTE: C also prunes via the `opt_ext_fwd`/`opt_ext_rev`
-                // optimal-extension lookahead near the depth limit. Omitting it
-                // here only makes Rust prune *less* (explore more), so it cannot
-                // reduce sensitivity; it can be added for exact speed parity.
             } else {
                 // Extendable: append a new DP pair past `last`.
                 dppos += 1;
@@ -396,6 +465,7 @@ fn fm_recurse(
                 consensus,
                 sc_thresh_fm,
                 config,
+                opt_ext,
                 dp_pairs,
                 last + 1,
                 dppos,
@@ -444,6 +514,7 @@ pub fn fm_get_seeds(
 ) -> Vec<FmDiag> {
     let m = scores.m;
     let mut seeds: Vec<FmDiag> = Vec::new();
+    let opt_ext = OptExt::build(scores);
 
     for c in 0..alph.alph_size {
         let base = fm_code_to_base(c);
@@ -523,6 +594,7 @@ pub fn fm_get_seeds(
                 consensus,
                 sc_thresh_fm,
                 config,
+                &opt_ext,
                 &mut dp_fwd,
                 0,
                 last,
@@ -543,6 +615,7 @@ pub fn fm_get_seeds(
                 consensus,
                 sc_thresh_fm,
                 config,
+                &opt_ext,
                 &mut dp_rev,
                 0,
                 last,

@@ -36,7 +36,7 @@ are kept here for context.
   extreme `--max -T -100` stress config Rust over-segments (≈32 vs C's 10
   reported windows) — a long-target windowing/merge detail under all-pass
   Vit/Fwd, not a default-path issue.
-- nhmmer FM-index seed search (Watson strand): **resolved.** The default FM
+- nhmmer FM-index seed search (both strands): **resolved.** The default FM
   path now augments its seed-then-rescore candidate windows with a faithful
   two-sweep port of C `p7_SSVFM_longlarget` / `FM_Recurse` (`src/simd/fm_ssv.rs`,
   wired via `fm_ssv_augment_windows` in `src/subcmd/nhmmer.rs`), which walks the
@@ -59,19 +59,25 @@ are kept here for context.
   - Scores are carried in NATS inside the kernel to mirror C exactly (the kernel
     only emits coordinates, so the unit stays isolated from the bit-based
     downstream).
-  **OPEN (follow-up):** the Crick (reverse-complement) strand still uses only the
-  seed-then-rescore path — `fm_ssv_augment_windows` runs Watson (NoComplement)
-  only. A first attempt to wire the Complement diagonals using the Watson-style
-  `text_len - n - length` coordinate fabricated a spurious reverse hit on the
-  MADE1 TIR fixture (Rust 6 vs C 5, confirmed spurious — absent from C even at
-  `-T 0`), so it was reverted. The correct mapping must port C's complement
-  conversion `fm_getOriginalPosition` (`fm_general.c`): for a complement diag,
-  `fwd_pos = N - n - 1` then a sequence-length reverse-flip (`seg_pos = L -
-  seg_pos + 1`). Validating it needs a fixture with a weak reverse-strand hit C
-  finds but the seed-then-rescore path misses (MADE1's reverse hits are already
-  found), or C-side instrumentation of the complement `diag->n` values. C's
-  `opt_ext_fwd/rev` look-ahead prune is also omitted (only makes Rust explore
-  more, never miss seeds).
+  Both strands are now done. The Crick coordinate mapping ports C
+  `fm_getOriginalPosition` (complement: `fwd_pos = N - n - 1`, N = text_len+1,
+  then a sequence-length reverse-flip → `fm_pos = text_len - n - length + 1` into
+  `fm_push_seed_window`'s Crick branch, verified against C-instrumented
+  `seg_pos`). The kernel's extended diagonals are filtered by C's Gumbel-derived
+  `sc_thresh` (computed from max_length/F1/MMU/MLAMBDA, matching
+  `p7_SSVFM_longlarget`) before windowing — without it the exhaustive kernel's
+  extra raw seeds (306 vs C's 64 post-`FM_extendSeed`+`sc_thresh` complement
+  windows on MADE1) leaked through the lenient seed-then-rescore `>0` gate and
+  fabricated a spurious reverse hit (Rust 6 vs C 5). With the `sc_thresh` filter,
+  MADE1 reports exactly C's 5 hits on both strands. `opt_ext_fwd/rev` look-ahead
+  pruning is also ported in `fm_recurse`.
+  Remaining minor fidelity gaps (not output-affecting on tested fixtures): the
+  kernel still over-generates raw seeds vs C before the `sc_thresh` gate (C does
+  `FM_extendSeed`+`sc_thresh` per seed; Rust extends via the shared
+  `fm_extend_seed_diagonal` and gates the window), and a fixture with a weak
+  reverse hit C finds but the seed-then-rescore path misses would give the Crick
+  augmentation direct positive coverage (MADE1's reverse hits are already found
+  by the seed path).
 - hmmpgmd: **resolved (was a non-gap).** C hmmpgmd performs no cross-worker
   dedup; each DB index is visited by exactly one worker. The Rust master now
   coalesces overlapping user `--seqdb_ranges` into disjoint shards, reproducing
