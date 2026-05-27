@@ -48,7 +48,13 @@ impl OccRank {
         let mut occ_b = vec![0u16; nb * ns];
         let mut running = vec![0u32; ns];
         let mut sb_base = vec![0u32; ns];
-        for pos in 0..bwt.len() {
+        // Iterate inclusively to `bwt.len()` so the trailing sample row(s) at an
+        // exact block/superblock boundary are written. Without this, when
+        // `bwt.len()` is a multiple of FREQ_CNT_B the last block row stays 0 and
+        // `occ(ch, bwt.len())` (used by the very first backward-search step from
+        // the root interval) wrongly returns 0 — making every FM search return
+        // no hits for texts of length ≡ 255 (mod 256).
+        for pos in 0..=bwt.len() {
             // Record samples for the count over bwt[0..pos] (exclusive of pos),
             // matching the half-open Occ semantics used everywhere else.
             if pos % FREQ_CNT_SB == 0 {
@@ -64,8 +70,10 @@ impl OccRank {
                     occ_b[b * ns + s] = (running[s] - sb_base[s]) as u16;
                 }
             }
-            let s = sym_of[bwt[pos] as usize];
-            running[s as usize] += 1;
+            if pos < bwt.len() {
+                let s = sym_of[bwt[pos] as usize];
+                running[s as usize] += 1;
+            }
         }
         OccRank {
             symbols,
@@ -549,5 +557,49 @@ mod tests {
         // Absent pattern: forward search must terminate with no interval.
         assert_eq!(forward_locate(b"ACGTACGTACGTAC"), None);
         assert!(fmf.locate(b"ACGTACGTACGTAC").is_empty());
+    }
+
+    /// Regression: `occ`/`count`/`locate` must be correct at exact block/
+    /// superblock boundaries. Text lengths ≡ 255 (mod 256) make `bwt.len()` a
+    /// multiple of FREQ_CNT_B; a missing trailing sample row previously made
+    /// every search return 0 hits at those lengths.
+    #[test]
+    fn fm_index_occ_correct_at_block_boundaries() {
+        let bases = [b'A', b'C', b'G', b'T'];
+        // Cover text_len around the 256/512 BWT-length boundaries (bwt = len+1).
+        for &text_len in &[254usize, 255, 256, 257, 510, 511, 512, 767] {
+            let text: Vec<u8> = (0..text_len).map(|i| bases[(i * 7 + 3) % 4]).collect();
+            let fm = FmIndex::build(&text);
+            for pat in [
+                &b"ACGT"[..],
+                &b"A"[..],
+                &b"GT"[..],
+                &b"TAC"[..],
+                &b"ACGTAC"[..],
+            ] {
+                if pat.len() > text_len {
+                    continue;
+                }
+                // Brute-force count of overlapping occurrences.
+                let expected = text.windows(pat.len()).filter(|w| *w == pat).count();
+                assert_eq!(
+                    fm.count(pat),
+                    expected,
+                    "count({:?}) wrong at text_len={text_len}",
+                    std::str::from_utf8(pat).unwrap()
+                );
+                let mut got = fm.locate(pat);
+                got.sort_unstable();
+                let mut want: Vec<usize> = (0..text_len)
+                    .filter(|&i| i + pat.len() <= text_len && &text[i..i + pat.len()] == pat)
+                    .collect();
+                want.sort_unstable();
+                assert_eq!(
+                    got, want,
+                    "locate({:?}) wrong at text_len={text_len}",
+                    std::str::from_utf8(pat).unwrap()
+                );
+            }
+        }
     }
 }

@@ -71,13 +71,19 @@ are kept here for context.
   fabricated a spurious reverse hit (Rust 6 vs C 5). With the `sc_thresh` filter,
   MADE1 reports exactly C's 5 hits on both strands. `opt_ext_fwd/rev` look-ahead
   pruning is also ported in `fm_recurse`.
-  Remaining minor fidelity gaps (not output-affecting on tested fixtures): the
-  kernel still over-generates raw seeds vs C before the `sc_thresh` gate (C does
-  `FM_extendSeed`+`sc_thresh` per seed; Rust extends via the shared
-  `fm_extend_seed_diagonal` and gates the window), and a fixture with a weak
-  reverse hit C finds but the seed-then-rescore path misses would give the Crick
-  augmentation direct positive coverage (MADE1's reverse hits are already found
-  by the seed path).
+  The kernel is **seed-for-seed identical to C**: on MADE1 `fm_get_seeds`
+  produces exactly C's 603 raw seeds (297 NoComplement + 306 Complement), with
+  matching `(complementarity, n, k, length)` for every one (verified by diffing
+  C-instrumented `FM_getSeeds` output against the Rust kernel — 0 divergences).
+  This required fixing `get_passing_diags` to use C's `N = text_len + 1` (BWT
+  length incl. sentinel) for the NoComplement coordinate and a constant −1 in the
+  complement (revcomp) frame; the window wiring then collapses to a symmetric
+  `fm_pos = text_len - diag.n - length` for both strands.
+  Remaining minor note (not output-affecting): a fixture with a weak reverse hit
+  C finds but the seed-then-rescore path misses would give the Crick augmentation
+  direct positive coverage (MADE1's reverse hits are already found by the seed
+  path, so this validates "matches C / no spurious" rather than "recovers a
+  Crick-only hit").
 - hmmpgmd: **resolved (was a non-gap).** C hmmpgmd performs no cross-worker
   dedup; each DB index is visited by exactly one worker. The Rust master now
   coalesces overlapping user `--seqdb_ranges` into disjoint shards, reproducing
@@ -152,6 +158,49 @@ Verification: `cargo check` and `cargo check --features tracehash` clean;
 `cargo test --lib` 284 passed; `cargo test --test rust_hmmsearch_tests` 35
 passed; `cargo test --manifest-path tracehash/Cargo.toml` 3 passed;
 `git diff --check` clean. C was not traced this pass.
+
+## Broad Audit Round - 2026-05-27 (CLI / driver / output / IO layer)
+
+Full findings in `reports/audit-20260527/` (5 parallel read-only agents; the
+prior 2026-05-26 audit had explicitly skipped the subcmd/CLI driver layer).
+Totals ≈ 6 High, ~24 Med, ~18 Low. **All High findings fixed:**
+
+- **`-T`/`--incT`/`--domT`/`--incdomT` negative values** rejected by clap
+  (`-T -20`) though C/Easel accepts the space form. Fixed with
+  `allow_hyphen_values = true` on those args across nhmmer, hmmsearch, phmmer,
+  jackhmmer, hmmscan, nhmmscan.
+- **`FmIndex::occ` wrong at exact 256-byte BWT boundaries** (`src/fm_index.rs`):
+  the trailing block/superblock sample row was never written, so `occ(ch,
+  bwt.len())` returned 0 and FM search found NOTHING for texts of length ≡ 255
+  (mod 256). Fixed `OccRank::build` to iterate inclusively to `bwt.len()`;
+  regression test `fm_index_occ_correct_at_block_boundaries`.
+- **nhmmer `--max` / FM-index F1** (`src/subcmd/nhmmer.rs`): used `0.3` under
+  `--max` and never raised the FM default to `0.03`. C (`nhmmer.c:1020-1029`)
+  sets F1 = 0.03 (FM) / 0.02 (FASTA) when `--F1` isn't given, regardless of
+  `--max`. Fixed (resolve F1 after the target DB is read, keyed on
+  `command_line_has_option(--F1)` and FM-vs-FASTA). `nhmmer --max MADE1
+  dna_target.fa` now reports C's 9 hits (was 10). Two earlier tests that encoded
+  the buggy `expected (0.3)` were corrected to C's `expected (0.02)`.
+- **hmmpgmd `--seqdb`/`--hmmdb` falsely mutually exclusive** — C lets the master
+  cache both. Removed the bogus conflict (the real `--worker` exclusivity is
+  intentionally not enforced because this port's worker preloads its DB from the
+  CLI, unlike C's over-wire scheme — documented in-code).
+- **nhmmer/nhmmscan `--tblout` dash header line** used fill-char dashes vs C's
+  fixed-length dash literals; misaligned once any accession/coord column widened
+  (e.g. 11-char accession). Fixed to match C byte-for-byte.
+- **phmmer/hmmsearch `-A`** dumped raw `aseq` instead of a real
+  `p7_tophits_Alignment` MSA (wrong names/annotation, no `# Alignment ... saved`
+  line). Routed through the shared aligned-MSA Stockholm writer (also fixed that
+  writer's column widths → improved jackhmmer parity too). Residuals: `#=GS AC`
+  and a one-bucket `#=GC PP_cons` rounding need shared `Msa`/tophits changes.
+
+New FM-index parity tests (Rust vs bundled C nhmmer on makehmmerdb DBs) added in
+`tests/real_world_regression_tests.rs`.
+
+**Not yet fixed (see reports):** the ~24 Med (CLI toggle-groups & range
+validation across hmmemit/hmmsim/hmmbuild/hmmconvert; run-time footer policy;
+nhmmer FM filter-residue counter pre-merge; multi-segment complement extension
+flip) and Low items.
 
 ## Ground Rules
 

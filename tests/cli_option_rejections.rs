@@ -1044,10 +1044,17 @@ fn jackhmmer_rejects_target_stdin() {
 }
 
 #[test]
-fn hmmpgmd_rejects_conflicting_served_databases() {
+fn hmmpgmd_master_accepts_both_served_databases_at_parse_time() {
+    // C `hmmpgmd.c`: `--seqdb` and `--hmmdb` are NOT mutually exclusive (each
+    // has `incomp = "--worker"` only); the canonical master invocation
+    // `--master --seqdb X --hmmdb Y` is explicitly supported. So clap must NOT
+    // reject this combination with a conflict error. (This Rust master serves
+    // one DB at a time at runtime, but the rejection must come from the runtime
+    // path, not a parse-time `cannot be used with` conflict.)
     let output = Command::new(hmmer())
         .args([
             "pgmd",
+            "--master",
             "--hmmdb",
             "missing.hmm",
             "--seqdb",
@@ -1058,9 +1065,12 @@ fn hmmpgmd_rejects_conflicting_served_databases() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    // Must not be rejected by clap's conflict machinery.
+    assert!(
+        !stderr.contains("cannot be used with"),
+        "--seqdb/--hmmdb must not be mutually exclusive: {stderr}"
+    );
 }
 
 #[test]
@@ -1091,7 +1101,11 @@ fn hmmpgmd_rejects_master_worker_conflict() {
 }
 
 #[test]
-fn hmmpgmd_worker_rejects_conflicting_served_database_options() {
+fn hmmpgmd_worker_does_not_treat_served_databases_as_a_conflict() {
+    // Audit H1: `--seqdb` and `--hmmdb` are not mutually exclusive. This port's
+    // worker may preload a DB from the CLI, so a worker given both DB flags
+    // must not be rejected by clap's `cannot be used with` conflict machinery
+    // (it later fails on the missing files / unreachable master, not on parse).
     let output = Command::new(hmmer())
         .args([
             "pgmd",
@@ -1105,9 +1119,11 @@ fn hmmpgmd_worker_rejects_conflicting_served_database_options() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(
+        !stderr.contains("cannot be used with"),
+        "--seqdb/--hmmdb must not be mutually exclusive: {stderr}"
+    );
 }
 
 #[test]

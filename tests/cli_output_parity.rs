@@ -1185,12 +1185,68 @@ fn phmmer_writes_alignment_output_file() {
         "# MSA of hits saved to file:       {}",
         ali.display()
     )));
+    // C phmmer echoes a per-query confirmation line carrying the MSA's
+    // sequence count (phmmer.c:633).
+    assert!(
+        stdout.contains(&format!(
+            "# Alignment of 4 hits satisfying inclusion thresholds saved to: {}",
+            ali.display()
+        )),
+        "{stdout}"
+    );
     let msa = std::fs::read_to_string(ali).unwrap();
+    // Faithful to C `p7_tophits_Alignment` + `esl_msafile_Write`: single-space
+    // GF ID, a phmmer AU author line, `name/from-to` names, `#=GS DE [subseq
+    // from]` lines, and an RF row.
     assert!(msa.starts_with("# STOCKHOLM 1.0\n"));
-    assert!(msa.contains("#=GF ID   test1\n"));
-    assert!(msa.contains("test1"));
-    assert!(msa.lines().count() > 5, "{msa}");
+    assert!(msa.contains("#=GF ID test1\n"), "{msa}");
+    assert!(msa.contains("#=GF AU phmmer (HMMER 3.4)\n"), "{msa}");
+    assert!(msa.contains("#=GS test1/1-20 DE [subseq from] test1"), "{msa}");
+    assert!(msa.lines().any(|l| l.starts_with("#=GC RF")), "{msa}");
     assert!(msa.trim_end().ends_with("//"));
+}
+
+/// Regression for audit finding F1: phmmer `-A` must produce the real
+/// `p7_tophits_Alignment` MSA, byte-identical to the bundled C phmmer (modulo
+/// the `#=GC PP_cons` rounding row).
+#[test]
+fn phmmer_alignment_output_matches_c_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let c_ali = dir.path().join("c.sto");
+    let r_ali = dir.path().join("r.sto");
+
+    let c = Command::new(c_phmmer())
+        .args([
+            "-A",
+            c_ali.to_str().unwrap(),
+            "hmmer/tutorial/HBB_HUMAN",
+            "hmmer/tutorial/globins45.fa",
+        ])
+        .current_dir(project_root())
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+
+    let r = Command::new(hmmer())
+        .args([
+            "phmmer",
+            "-A",
+            r_ali.to_str().unwrap(),
+            "hmmer/tutorial/HBB_HUMAN",
+            "hmmer/tutorial/globins45.fa",
+        ])
+        .current_dir(project_root())
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+
+    let c_sto = std::fs::read_to_string(&c_ali).unwrap();
+    let r_sto = std::fs::read_to_string(&r_ali).unwrap();
+    assert_eq!(
+        stockholm_structure_lines(&c_sto),
+        stockholm_structure_lines(&r_sto),
+        "phmmer -A diverged from C\n--- C ---\n{c_sto}\n--- R ---\n{r_sto}"
+    );
 }
 
 #[test]
@@ -1390,6 +1446,25 @@ fn hmmsearch_multi_query_separates_stdout_and_single_tblout_header() {
     assert_eq!(tbl.matches("# target name").count(), 1);
 }
 
+fn c_hmmsearch() -> String {
+    format!("{}/hmmer/src/hmmsearch", project_root())
+}
+
+fn c_phmmer() -> String {
+    format!("{}/hmmer/src/phmmer", project_root())
+}
+
+/// Lines of a Stockholm `-A` file that should be byte-for-byte identical to C:
+/// everything except the per-column `#=GC PP_cons` row, whose averaged
+/// posterior-probability quantization can differ from C by one bucket in the
+/// last position (a pre-existing DP-rounding difference, unrelated to MSA
+/// formatting / `p7_tophits_Alignment`).
+fn stockholm_structure_lines(sto: &str) -> Vec<&str> {
+    sto.lines()
+        .filter(|l| !l.starts_with("#=GC PP_cons"))
+        .collect()
+}
+
 #[test]
 fn hmmsearch_writes_alignment_output_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1416,12 +1491,74 @@ fn hmmsearch_writes_alignment_output_file() {
         "# MSA of all hits saved to file:   {}",
         ali.display()
     )));
+    // C hmmsearch echoes a per-search confirmation line carrying the MSA's
+    // sequence count (hmmsearch.c:569).
+    assert!(
+        stdout.contains(&format!(
+            "# Alignment of 7 hits satisfying inclusion thresholds saved to: {}",
+            ali.display()
+        )),
+        "{stdout}"
+    );
     let msa = std::fs::read_to_string(ali).unwrap();
+    // Faithful to C `p7_tophits_Alignment` + `esl_msafile_Write`: single-space
+    // GF ID, an AU author line, `name/from-to` sequence names, `#=GS DE
+    // [subseq from]` lines, and a consensus RF row.
     assert!(msa.starts_with("# STOCKHOLM 1.0\n"));
-    assert!(msa.contains("#=GF ID   fn3\n"));
-    assert!(msa.contains("7LESS_DROME"));
-    assert!(msa.lines().count() > 5, "{msa}");
+    assert!(msa.contains("#=GF ID fn3\n"), "{msa}");
+    assert!(msa.contains("#=GF AU hmmsearch (HMMER 3.4)\n"), "{msa}");
+    assert!(msa.contains("7LESS_DROME/439-520"), "{msa}");
+    assert!(
+        msa.contains("DE [subseq from] RecName: Full=Protein sevenless;"),
+        "{msa}"
+    );
+    assert!(msa.lines().any(|l| l.starts_with("#=GC RF")), "{msa}");
     assert!(msa.trim_end().ends_with("//"));
+}
+
+/// Regression for audit finding F1: hmmsearch `-A` must produce the real
+/// `p7_tophits_Alignment` MSA, byte-identical to the bundled C hmmsearch
+/// (modulo the `#=GC PP_cons` rounding row). Uses globins4/globins45, which
+/// have no per-sequence accessions or multi-space descriptions, so the only
+/// divergence is PP_cons.
+#[test]
+fn hmmsearch_alignment_output_matches_c_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let c_ali = dir.path().join("c.sto");
+    let r_ali = dir.path().join("r.sto");
+
+    let c = Command::new(c_hmmsearch())
+        .args([
+            "-A",
+            c_ali.to_str().unwrap(),
+            "hmmer/tutorial/globins4.hmm",
+            "hmmer/tutorial/globins45.fa",
+        ])
+        .current_dir(project_root())
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+
+    let r = Command::new(hmmer())
+        .args([
+            "hmmsearch",
+            "-A",
+            r_ali.to_str().unwrap(),
+            "hmmer/tutorial/globins4.hmm",
+            "hmmer/tutorial/globins45.fa",
+        ])
+        .current_dir(project_root())
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+
+    let c_sto = std::fs::read_to_string(&c_ali).unwrap();
+    let r_sto = std::fs::read_to_string(&r_ali).unwrap();
+    assert_eq!(
+        stockholm_structure_lines(&c_sto),
+        stockholm_structure_lines(&r_sto),
+        "hmmsearch -A diverged from C\n--- C ---\n{c_sto}\n--- R ---\n{r_sto}"
+    );
 }
 
 #[test]

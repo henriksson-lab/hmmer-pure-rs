@@ -50,7 +50,7 @@ struct Args {
     e_value: f64,
 
     /// Report sequences >= this score threshold
-    #[arg(short = 'T', conflicts_with = "e_value")]
+    #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
     score_threshold: Option<f32>,
 
     /// Report domains <= this E-value threshold
@@ -63,7 +63,7 @@ struct Args {
     dom_e: f64,
 
     /// Report domains >= this score threshold
-    #[arg(long = "domT", conflicts_with = "dom_e")]
+    #[arg(long = "domT", conflicts_with = "dom_e", allow_hyphen_values = true)]
     dom_t: Option<f32>,
 
     /// Include sequences <= this E-value threshold
@@ -76,7 +76,7 @@ struct Args {
     inc_e: f64,
 
     /// Include sequences >= this score threshold
-    #[arg(long = "incT", conflicts_with = "inc_e")]
+    #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
     inc_t: Option<f32>,
 
     /// Include domains <= this E-value threshold
@@ -89,7 +89,7 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome")]
+    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
     inc_dom_t: Option<f32>,
 
     /// Hidden C-compatible model gathering cutoff flag
@@ -886,7 +886,34 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             );
         }
         if let Some(ref mut f) = ali_file {
-            crate::subcmd::hmmsearch::write_ali_output(f, &hmm, &th, domz, textw);
+            // C phmmer.c:620-638: build the included-domain MSA (named after the
+            // model/query, with the query's acc/desc when present), write it,
+            // then echo the confirmation line carrying the MSA's nseq.
+            let nseq = crate::subcmd::hmmsearch::write_ali_output(
+                f,
+                &abc,
+                hmm.m,
+                &hmm.name,
+                Some(query_sq.acc.as_str()),
+                Some(query_sq.desc.as_str()),
+                "phmmer (HMMER 3.4)",
+                &th,
+                textw,
+            );
+            match nseq {
+                Some(nseq) => writeln!(
+                    out,
+                    "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
+                    nseq,
+                    args.ali_outfile.as_ref().unwrap().display()
+                )
+                .unwrap(),
+                None => writeln!(
+                    out,
+                    "# No hits satisfy inclusion thresholds; no alignment saved"
+                )
+                .unwrap(),
+            }
         }
 
         query_sq.reuse();

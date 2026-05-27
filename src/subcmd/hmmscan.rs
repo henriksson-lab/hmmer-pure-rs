@@ -48,7 +48,7 @@ struct Args {
     e_value: f64,
 
     /// Report profiles >= this score threshold
-    #[arg(short = 'T', conflicts_with = "e_value")]
+    #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
     score_threshold: Option<f32>,
 
     /// Report domains <= this E-value threshold
@@ -61,7 +61,7 @@ struct Args {
     dom_e: f64,
 
     /// Report domains >= this score threshold
-    #[arg(long = "domT", conflicts_with = "dom_e")]
+    #[arg(long = "domT", conflicts_with = "dom_e", allow_hyphen_values = true)]
     dom_t: Option<f32>,
 
     /// Include profiles <= this E-value threshold
@@ -74,7 +74,7 @@ struct Args {
     inc_e: f64,
 
     /// Include profiles >= this score threshold
-    #[arg(long = "incT", conflicts_with = "inc_e")]
+    #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
     inc_t: Option<f32>,
 
     /// Include domains <= this E-value threshold
@@ -87,7 +87,7 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome")]
+    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
     inc_dom_t: Option<f32>,
 
     /// Use model's GA gathering cutoffs to set all thresholding

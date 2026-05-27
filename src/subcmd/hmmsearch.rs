@@ -59,7 +59,7 @@ struct Args {
     e_value: f64,
 
     /// Report sequences >= this score threshold
-    #[arg(short = 'T', conflicts_with = "e_value")]
+    #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
     score_threshold: Option<f32>,
 
     /// Report domains <= this E-value threshold
@@ -72,7 +72,7 @@ struct Args {
     dom_e: f64,
 
     /// Report domains >= this score threshold
-    #[arg(long = "domT", conflicts_with = "dom_e")]
+    #[arg(long = "domT", conflicts_with = "dom_e", allow_hyphen_values = true)]
     dom_t: Option<f32>,
 
     // --- Inclusion thresholds ---
@@ -86,7 +86,7 @@ struct Args {
     inc_e: f64,
 
     /// Include sequences >= this score threshold
-    #[arg(long = "incT", conflicts_with = "inc_e")]
+    #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
     inc_t: Option<f32>,
 
     /// Include domains <= this E-value threshold
@@ -99,7 +99,7 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome")]
+    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
     inc_dom_t: Option<f32>,
 
     // --- Model-specific cutoffs ---
@@ -1214,10 +1214,37 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 domz,
             );
         }
-        if let Some(ref mut f) = ali_outfile {
-            write_ali_output(f, hmm, &th, domz, textw);
-        }
         writeln!(out, "//").unwrap();
+        if let Some(ref mut f) = ali_outfile {
+            // C hmmsearch.c:554-572: after the "//" line, build the
+            // included-domain MSA, write it, then echo the confirmation line
+            // (carrying the MSA's nseq) to stdout.
+            let nseq = write_ali_output(
+                f,
+                &abc,
+                hmm.m,
+                &hmm.name,
+                hmm.acc.as_deref(),
+                hmm.desc.as_deref(),
+                "hmmsearch (HMMER 3.4)",
+                &th,
+                textw,
+            );
+            match nseq {
+                Some(nseq) => writeln!(
+                    out,
+                    "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
+                    nseq,
+                    args.ali_outfile.as_ref().unwrap().display()
+                )
+                .unwrap(),
+                None => writeln!(
+                    out,
+                    "# No hits satisfy inclusion thresholds; no alignment saved"
+                )
+                .unwrap(),
+            }
+        }
     }
 
     if let Some(ref mut f) = tblout_file {
@@ -2267,44 +2294,48 @@ pub fn write_table_footer<W: Write>(
     writeln!(f, "# [ok]").unwrap();
 }
 
-/// Write a minimal Stockholm MSA of all included domain hits (`-A`).
+/// Build and write the `-A` multiple alignment of all included domains.
 ///
-/// Emits `#=GF ID / AC / DE` annotation lines from the query HMM followed by
-/// each included domain's aligned sequence (`AliDisplay::aseq`). The C
-/// equivalent is `p7_tophits_Alignment` → `esl_msafile_Write` in
-/// `hmmer/src/p7_tophits.c`; this is a lightweight stand-in.
+/// Faithful port of the `-A` block in `hmmer/src/hmmsearch.c:554-572` and
+/// `hmmer/src/phmmer.c:620-638`: it calls `p7_tophits_Alignment(th, abc,
+/// NULL,NULL, 0, p7_ALL_CONSENSUS_COLS, &msa)` to assemble a real
+/// column-aligned MSA of every included domain (sequence names `name/from-to`,
+/// `#=GS DE [subseq from]` lines, `#=GC RF`, `#=GR PP`, all aligned to the model
+/// consensus columns), sets `#=GF ID/AC/DE/AU`, then writes Stockholm
+/// (`textw > 0`) or Pfam (`textw == 0`). Returns the number of sequences in the
+/// MSA when one was produced (so the caller can print the matching
+/// `# Alignment of N hits ... saved to:` line), or `None` if no hits satisfy
+/// the inclusion thresholds.
+///
+/// `name`/`acc`/`desc` are the per-tool GF annotation (hmmsearch: model
+/// name/acc/desc; phmmer: the model/query name plus optional query acc/desc),
+/// and `author` is e.g. `"hmmsearch (HMMER 3.4)"` / `"phmmer (HMMER 3.4)"`.
+///
+/// Reuses the same `tophits::included_alignment` + Stockholm writer that
+/// `jackhmmer` uses; jackhmmer's writer emits a single, unwrapped block
+/// (equivalent to C's Pfam `cpl == alen`). C wraps default Stockholm at 200
+/// aligned residues per block, so for alignments wider than 200 columns the
+/// Stockholm (`textw > 0`) blocking would differ; for the tool fixtures here
+/// (alen <= ~175) it is byte-identical to C.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_ali_output<W: Write>(
     f: &mut W,
-    hmm: &hmmer_pure_rs::hmm::Hmm,
+    abc: &Alphabet,
+    model_len: usize,
+    name: &str,
+    acc: Option<&str>,
+    desc: Option<&str>,
+    author: &str,
     th: &TopHits,
-    _domz: f64,
     _textw: usize,
-) {
-    // Write a minimal Stockholm-format MSA of included hits
-    writeln!(f, "# STOCKHOLM 1.0").unwrap();
-    writeln!(f, "#=GF ID   {}", hmm.name).unwrap();
-    if let Some(ref acc) = hmm.acc {
-        writeln!(f, "#=GF AC   {}", acc).unwrap();
-    }
-    if let Some(ref desc) = hmm.desc {
-        writeln!(f, "#=GF DE   {}", desc).unwrap();
-    }
-
-    // Collect included domains and output their aligned sequences
-    for hit in &th.hits {
-        if hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED == 0 {
-            continue;
-        }
-        for dom in &hit.dcl {
-            if !dom.is_included {
-                continue;
-            }
-            if let Some(ref ad) = dom.ad {
-                writeln!(f, "{:<30} {}", hit.name, ad.aseq).unwrap();
-            }
-        }
-    }
-    writeln!(f, "//").unwrap();
+) -> Option<usize> {
+    let mut msa = hmmer_pure_rs::tophits::included_alignment(th, abc, model_len, None, name)?;
+    msa.acc = acc.filter(|s| !s.is_empty()).map(|s| s.to_string());
+    msa.desc = desc.filter(|s| !s.is_empty()).map(|s| s.to_string());
+    msa.author = Some(author.to_string());
+    let nseq = msa.nseq;
+    crate::subcmd::jackhmmer::write_tophits_alignment_msa(f, &msa);
+    Some(nseq)
 }
 
 fn open_target_seq_file(

@@ -1279,8 +1279,8 @@ fn test_nhmmer_ecori_max_matches_c_no_hit_behavior() {
         "nhmmer --max ecori fixture should report no hits"
     );
     for expected in [
-        "Residues passing SSV filter:              12  (1); expected (0.3)",
-        "Residues passing bias filter:             12  (1); expected (0.3)",
+        "Residues passing SSV filter:              12  (1); expected (0.02)",
+        "Residues passing bias filter:             12  (1); expected (0.02)",
         "Residues passing Vit filter:              12  (1); expected (1)",
         "Residues passing Fwd filter:              12  (1); expected (1)",
         "Total number of hits:                      0  (0)",
@@ -1302,8 +1302,8 @@ fn test_nhmmer_max_uses_longtarget_max_filter_thresholds() {
 
     for expected in [
         "# Max sensitivity mode:            on [all heuristic filters off]",
-        "Residues passing SSV filter:              12  (1); expected (0.3)",
-        "Residues passing bias filter:             12  (1); expected (0.3)",
+        "Residues passing SSV filter:              12  (1); expected (0.02)",
+        "Residues passing bias filter:             12  (1); expected (0.02)",
         "Residues passing Vit filter:              12  (1); expected (1)",
         "Residues passing Fwd filter:              12  (1); expected (1)",
     ] {
@@ -1814,6 +1814,178 @@ fn test_pfam_per_query_hit_counts_match_golden_for_all_families() {
             query_hit_counts(&parse_hmmsearch_rows(&golden)),
             "{} per-query hit counts diverged from golden output",
             family
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FM-index (makehmmerdb) target-search parity vs bundled C nhmmer.
+//
+// These exercise the exact two-sweep SSV-over-FM kernel (src/simd/fm_ssv.rs)
+// wired into the FM path. They build a makehmmerdb database from a DNA FASTA
+// (byte-identical to C), then compare Rust vs C nhmmer hit sets. Low-threshold
+// variants stress the weak diagonals the FM seeding/extension must reproduce.
+// ---------------------------------------------------------------------------
+
+fn build_fmdb(dir: &std::path::Path, fasta_rel: &str) -> String {
+    let db = dir.join("target.hmmerdb");
+    let out = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--dna",
+            &test_path(fasta_rel),
+            db.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run makehmmerdb");
+    assert!(
+        out.status.success(),
+        "makehmmerdb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    db.to_str().unwrap().to_string()
+}
+
+// Coordinate/strand key for hit-set comparison (robust to last-digit float
+// formatting differences in the score/E-value columns).
+fn fm_hit_keys(rows: &[NhmmerRow]) -> Vec<(String, usize, usize, String)> {
+    let mut v: Vec<_> = rows
+        .iter()
+        .map(|r| (r.target.clone(), r.ali_from, r.ali_to, r.strand.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
+fn assert_fm_parity(hmm_rel: &str, fasta_rel: &str, extra: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_fmdb(dir.path(), fasta_rel);
+    let hmm = test_path(hmm_rel);
+    let mut args = vec!["--cpu", "1", "--noali"];
+    args.extend_from_slice(extra);
+    let (_stdout, rust_tbl) = run_nhmmer(&hmm, &db, &args);
+    let c_tbl = run_c_nhmmer_tblout_with_args(&hmm, &db, &args);
+    let rust_keys = fm_hit_keys(&parse_nhmmer_rows(&rust_tbl));
+    let c_keys = fm_hit_keys(&parse_nhmmer_rows(&c_tbl));
+    assert_eq!(
+        rust_keys, c_keys,
+        "FM-index nhmmer hit set diverged from C for {hmm_rel} vs {fasta_rel} {extra:?}\n\
+         Rust ({} hits): {rust_keys:?}\nC ({} hits): {c_keys:?}",
+        rust_keys.len(),
+        c_keys.len()
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_made1_matches_c_hit_set() {
+    assert_fm_parity("hmmer/tutorial/MADE1.hmm", "hmmer/tutorial/dna_target.fa", &[]);
+}
+
+#[test]
+fn test_nhmmer_fmindex_made1_low_threshold_matches_c() {
+    // Lower reporting threshold pulls in weak diagonals on both strands, where
+    // the FM seed-then-rescore vs exact-SSV difference would show up.
+    assert_fm_parity(
+        "hmmer/tutorial/MADE1.hmm",
+        "hmmer/tutorial/dna_target.fa",
+        &["-T", "0"],
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_3box_matches_c_hit_set() {
+    assert_fm_parity("hmmer/testsuite/3box.hmm", "hmmer/testsuite/3box-alitest.fa", &[]);
+}
+
+#[test]
+fn test_nhmmer_fmindex_3box_low_threshold_matches_c() {
+    // Negative threshold in C/Easel's space-separated form; Rust now accepts it
+    // too (`allow_hyphen_values` on the threshold args).
+    assert_fm_parity(
+        "hmmer/testsuite/3box.hmm",
+        "hmmer/testsuite/3box-alitest.fa",
+        &["-T", "-20"],
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_ecori_matches_c_hit_set() {
+    assert_fm_parity("hmmer/testsuite/ecori.hmm", "hmmer/testsuite/3box-alitest.fa", &[]);
+}
+
+#[test]
+fn test_nhmmer_accepts_space_separated_negative_threshold() {
+    // C/Easel accepts `-T -20` (space-separated negative bit score); Rust's clap
+    // parser must too (regression for allow_hyphen_values on the threshold args).
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("t.tbl");
+    let output = Command::new(binary_path("hmmer"))
+        .args([
+            "nhmmer",
+            "--noali",
+            "-T",
+            "-20",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            &test_path("hmmer/testsuite/3box.hmm"),
+            &test_path("hmmer/testsuite/3box-alitest.fa"),
+        ])
+        .output()
+        .expect("failed to run hmmer nhmmer");
+    assert!(
+        output.status.success(),
+        "nhmmer -T -20 should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Regression test for audit-20260527 finding #1: the nhmmer/nhmmscan `--tblout`
+/// dash separator line must right-justify FIXED-LENGTH dash literals padded with
+/// spaces (matching C p7_tophits.c:1626-1627 `%*s`), NOT fill the whole column
+/// with dashes. They only agree when every column is at minimum width; the MADE1
+/// fixture has query accession `DF0000629.2` (11 chars > 10), widening qaccw, so a
+/// fill-char dash line would be longer than the header line and misalign the
+/// columns. Assert the dash line aligns exactly with the header line.
+#[test]
+fn test_nhmmer_tblout_dash_line_aligns_with_header_wide_accession() {
+    let out = run_nhmmer_tblout(
+        &test_path("hmmer/tutorial/MADE1.hmm"),
+        &test_path("hmmer/tutorial/dna_target.fa"),
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    let header = lines
+        .iter()
+        .find(|l| l.contains("target name") && l.contains("description of target"))
+        .expect("tblout should have a column header line");
+    let dash = lines
+        .iter()
+        .find(|l| l.starts_with("#---"))
+        .expect("tblout should have a dash separator line");
+
+    // The dash underline must be exactly as wide as the header it underlines.
+    assert_eq!(
+        header.len(),
+        dash.len(),
+        "dash line width must equal header width\nheader: {:?}\ndash:   {:?}",
+        header,
+        dash
+    );
+
+    // Each whitespace-separated dash token must be a run of dashes only and must
+    // never exceed its C fixed-literal length (i.e. it is space-padded, not
+    // dash-filled). qaccw widened to 11 must show a 10-dash token + leading space,
+    // not an 11-dash token.
+    let tokens: Vec<&str> = dash.trim_start_matches('#').split(' ').filter(|t| !t.is_empty()).collect();
+    let max_literal = [19usize, 10, 20, 10, 7, 7, 7, 7, 7, 7, 7, 6, 9, 6, 5, 21];
+    assert_eq!(tokens.len(), max_literal.len(), "unexpected dash token count: {:?}", tokens);
+    for (tok, &maxlen) in tokens.iter().zip(max_literal.iter()) {
+        assert!(tok.bytes().all(|b| b == b'-'), "dash token has non-dash char: {:?}", tok);
+        assert!(
+            tok.len() <= maxlen,
+            "dash token {:?} (len {}) exceeds C fixed literal length {} (column was dash-filled instead of space-padded)",
+            tok,
+            tok.len(),
+            maxlen
         );
     }
 }

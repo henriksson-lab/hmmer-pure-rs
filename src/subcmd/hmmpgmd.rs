@@ -38,11 +38,22 @@ struct Args {
     worker: Option<String>,
 
     /// HMM database file to serve
-    #[arg(long = "hmmdb", conflicts_with = "seqdb")]
+    ///
+    /// C `hmmpgmd.c` declares `--hmmdb` with `incomp = "--worker"` only; it is
+    /// NOT mutually exclusive with `--seqdb` (the master may cache both DBs at
+    /// once — the canonical `--master --seqdb X --hmmdb Y` invocation). This
+    /// port additionally lets a worker preload a DB from the CLI (the C worker
+    /// instead receives its DB over the wire), so the C `incomp "--worker"`
+    /// constraint is intentionally not applied here.
+    #[arg(long = "hmmdb")]
     hmmdb: Option<PathBuf>,
 
     /// Protein sequence database file to serve
-    #[arg(long = "seqdb", conflicts_with = "hmmdb")]
+    ///
+    /// C `hmmpgmd.c` declares `--seqdb` with `incomp = "--worker"` only; it is
+    /// NOT mutually exclusive with `--hmmdb`. See `--hmmdb` for why the
+    /// `incomp "--worker"` constraint is not applied in this port.
+    #[arg(long = "seqdb")]
     seqdb: Option<PathBuf>,
 
     /// Legacy alias for --cport
@@ -3434,6 +3445,52 @@ fn write_header(stream: &mut TcpStream, header: HmmdHeader) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn master_with_both_databases_parses() {
+        // Regression for audit H1: C `hmmpgmd.c` declares `--seqdb`/`--hmmdb`
+        // with `incomp = "--worker"` only (NOT each other). The canonical
+        // master invocation `--master --seqdb X --hmmdb Y` must parse without a
+        // clap conflict error.
+        let args = Args::try_parse_from([
+            "hmmpgmd",
+            "--master",
+            "--seqdb",
+            "x.fa",
+            "--hmmdb",
+            "y.hmm",
+        ])
+        .expect("master may cache both --seqdb and --hmmdb");
+        assert!(args.master);
+        assert_eq!(args.seqdb.as_deref(), Some(std::path::Path::new("x.fa")));
+        assert_eq!(args.hmmdb.as_deref(), Some(std::path::Path::new("y.hmm")));
+        assert!(args.worker.is_none());
+    }
+
+    #[test]
+    fn served_databases_are_not_mutually_exclusive() {
+        // Audit H1: the only forbidden DB combination C enforces via the option
+        // table is master-vs-worker, NOT seqdb-vs-hmmdb. Confirm `--seqdb`
+        // alone, `--hmmdb` alone, and both together all parse.
+        for argv in [
+            vec!["hmmpgmd", "--master", "--seqdb", "x.fa"],
+            vec!["hmmpgmd", "--master", "--hmmdb", "y.hmm"],
+            vec!["hmmpgmd", "--master", "--seqdb", "x.fa", "--hmmdb", "y.hmm"],
+        ] {
+            assert!(
+                Args::try_parse_from(&argv).is_ok(),
+                "should parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn master_conflicts_with_worker() {
+        // C `hmmpgmd.c`: `--master` is `incomp "--worker"` and vice-versa.
+        let res = Args::try_parse_from(["hmmpgmd", "--master", "--worker", "127.0.0.1"]);
+        assert!(res.is_err(), "--master and --worker are mutually exclusive");
+    }
 
     #[test]
     fn zero_hit_worker_payload_rejects_trailing_bytes() {

@@ -265,17 +265,24 @@ fn get_passing_diags(
     // positions in one call (`locate_interval`), which is equivalent to C's
     // per-entry FM_backtrackSeed over the same SA range.
     let positions = fm.locate_interval(interval);
-    let fm_n = fm.n as i64;
+    // C uses `fmf->N` = the BWT length including the sentinel = text_len + 1.
+    let fm_n = fm.n as i64 + 1;
     for backtrack in positions {
         let backtrack = backtrack as i64;
         let mut seed = FmDiag {
             k,
             length: depth,
-            // C: n = (NOCOMPLEMENT) ? N - backtrack - depth - 1 : backtrack
+            // C `FM_getPassingDiags`:
+            //   NOCOMPLEMENT: n = N - backtrack - depth - 1
+            //   COMPLEMENT:   n = backtrack
+            // The Rust `locate_interval` position sits one before C's
+            // `FM_backtrackSeed` value in the complement (revcomp) frame, so
+            // subtract 1 there to reproduce C's `diag->n` exactly (validated
+            // seed-for-seed against bundled C).
             n: if complementarity == Complementarity::NoComplement {
                 fm_n - backtrack - depth as i64 - 1
             } else {
-                backtrack
+                backtrack - 1
             },
             score: 0.0,
             complementarity,

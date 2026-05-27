@@ -140,7 +140,10 @@ struct Args {
     e_value: f64,
 
     /// Report sequences >= this score threshold
-    #[arg(short = 'T', conflicts_with = "e_value")]
+    // `allow_hyphen_values` so negative bit-score thresholds parse in the
+    // space-separated form C/Easel uses (e.g. `-T -20`); clap otherwise treats
+    // `-20` as flags. The `-T=-20` form also still works.
+    #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
     score_threshold: Option<f32>,
 
     /// Include sequences <= this E-value threshold
@@ -153,7 +156,7 @@ struct Args {
     inc_e: f64,
 
     /// Include sequences >= this score threshold
-    #[arg(long = "incT", conflicts_with = "inc_e")]
+    #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
     inc_t: Option<f32>,
 
     // --- Model-specific cutoffs ---
@@ -251,7 +254,7 @@ struct Args {
     dom_e: f64,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
-    #[arg(long = "domT", conflicts_with = "dom_e", hide = true)]
+    #[arg(long = "domT", conflicts_with = "dom_e", hide = true, allow_hyphen_values = true)]
     dom_t: Option<f32>,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
@@ -259,7 +262,7 @@ struct Args {
     inc_dome: f64,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true)]
+    #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true, allow_hyphen_values = true)]
     inc_dom_t: Option<f32>,
 
     /// Set RNG seed (0: one-time arbitrary seed)
@@ -550,25 +553,32 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             posw = posw,
         )
         .unwrap();
+        // C p7_tophits.c:1626 long_targets dash line:
+        //   "#%*s %*s %*s %*s %s %s %*s %*s %*s %*s %*s %6s %9s %6s %5s %s\n"
+        // Right-justified (%*s) FIXED-LENGTH dash literals padded with spaces to
+        // the column width; NOT fill-character dashes. The literals are:
+        //   tnamew-1 -> 19 dashes, taccw -> 10, qnamew -> 20, qaccw -> 10,
+        //   hmmfrom/hmm to (%s) -> 7 each (plain), posw x5 -> 7 each,
+        //   %6s -> 6, %9s -> 9, %6s -> 6, %5s -> 5, %s -> 21.
         writeln!(
             f,
-            "#{tname:-<tnw$} {tacc:-<taccw$} {qn:-<qnw$} {qacc:-<qaccw$} {hf} {ht} {af:->posw$} {at:->posw$} {ef:->posw$} {et:->posw$} {sl:->posw$} {strand:->6} {ev:->9} {sc:->6} {bi:->5} {desc:-<21}",
-            tname = "",
-            tacc = "",
-            qn = "",
-            qacc = "",
+            "#{tname:>tnw$} {tacc:>taccw$} {qn:>qnw$} {qacc:>qaccw$} {hf} {ht} {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5} {desc}",
+            tname = "-------------------",
+            tacc = "----------",
+            qn = "--------------------",
+            qacc = "----------",
             hf = "-------",
             ht = "-------",
-            af = "",
-            at = "",
-            ef = "",
-            et = "",
-            sl = "",
-            strand = "",
-            ev = "",
-            sc = "",
-            bi = "",
-            desc = "",
+            af = "-------",
+            at = "-------",
+            ef = "-------",
+            et = "-------",
+            sl = "-------",
+            strand = "------",
+            ev = "---------",
+            sc = "------",
+            bi = "-----",
+            desc = "---------------------",
             tnw = namew - 1,
             qnw = qw,
             taccw = taccw,
@@ -1433,12 +1443,15 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         let mut pli = Pipeline::new();
         pli.new_model(&gm);
-        let effective_f1 = if args.max { 0.3 } else { args.f1 };
+        // F1 is resolved below, after the target DB is read (it depends on
+        // FM-index vs FASTA and on whether --F1 was given). Per C
+        // `nhmmer.c:1020-1029`, when --F1 is not on the command line F1 = 0.03
+        // (FM-index) / 0.02 (FASTA); and `--max` is mutually exclusive with
+        // `--F1`, so `--max` never raises F1 to 0.3 — it only forces F2=F3=1.0.
         let effective_f2 = if args.max { 1.0 } else { args.f2 };
         let effective_f3 = if args.max { 1.0 } else { args.f3 };
         let effective_nobias = args.max || args.nobias;
 
-        pli.f1 = effective_f1;
         pli.f2 = effective_f2;
         pli.f3 = effective_f3;
         pli.e_value_threshold = args.e_value;
@@ -1517,7 +1530,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 std::process::exit(1);
             });
         }
-        let f1 = effective_f1;
+        // C `nhmmer.c:1020-1029`: when --F1 isn't on the command line, F1 is the
+        // method default (0.03 for FM-index targets, 0.02 for FASTA), regardless
+        // of --max.
+        let f1 = if command_line_has_option(&cmdline, "--F1") {
+            args.f1
+        } else if !target_db.fm_index_records.is_empty() {
+            0.03
+        } else {
+            0.02
+        };
+        pli.f1 = f1;
         let f2 = effective_f2;
         let f3 = effective_f3;
         let do_max = args.max;
@@ -3973,20 +3996,16 @@ fn fm_ssv_augment_windows(
         if diag.k < 1 || model_end == 0 || model_end > hmm.m {
             continue;
         }
-        // Recover the `fm_pos` that `fm_push_seed_window` expects so its strand
-        // branch reproduces C's coordinate mapping:
-        //  - Watson (NoComplement): `get_passing_diags` set n = text_len -
-        //    backtrack - length - 1, and the Watson branch computes
-        //    block_seed_start = text_len - fm_pos - length, so fm_pos = backtrack.
-        //  - Crick (Complement): C `fm_getOriginalPosition` gives 0-based reverse
-        //    start = n - 1 (single segment), and the Crick branch yields
-        //    seq_seed_start = seq.n - (fm_pos - fm_start) - length; matching that
-        //    needs fm_pos = text_len - n - length + 1.
-        let fm_pos = if is_complement {
-            text_len - diag.n - diag.length as i64 + 1
-        } else {
-            text_len - diag.n - diag.length as i64 - 1
-        };
+        // `diag.n` now equals C's `diag->n` (forward target start for Watson;
+        // revcomp-frame start for Crick). Recover the `fm_pos` that
+        // `fm_push_seed_window` expects so its strand branch reproduces C's
+        // coordinate mapping — symmetric for both strands:
+        //  - Watson: block_seed_start = text_len - fm_pos - length must equal the
+        //    forward start `diag.n`, so fm_pos = text_len - diag.n - length.
+        //  - Crick: seq_seed_start = seq.n - (fm_pos - fm_start) - length must
+        //    equal C's 0-based reverse start (`diag.n - 1`), which also gives
+        //    fm_pos = text_len - diag.n - length.
+        let fm_pos = text_len - diag.n - diag.length as i64;
         if fm_pos < 0 {
             continue;
         }
