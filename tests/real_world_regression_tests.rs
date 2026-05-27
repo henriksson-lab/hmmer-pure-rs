@@ -1955,6 +1955,81 @@ fn test_nhmmer_fmindex_ecori_matches_c_hit_set() {
     assert_fm_parity("hmmer/testsuite/ecori.hmm", "hmmer/testsuite/3box-alitest.fa", &[]);
 }
 
+// Parse the four "Residues passing ... filter" counters (SSV, bias, Vit, Fwd)
+// from an nhmmer stdout footer. Returns them in (ssv, bias, vit, fwd) order.
+fn parse_filter_residue_counters(stdout: &str) -> (u64, u64, u64, u64) {
+    let grab = |needle: &str| -> u64 {
+        let line = stdout
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("missing counter line {needle:?} in:\n{stdout}"));
+        // "Residues passing SSV filter:           41383  (0.0627); expected (0.03)"
+        line.split(':')
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|tok| tok.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("could not parse counter from {line:?}"))
+    };
+    (
+        grab("Residues passing SSV filter"),
+        grab("Residues passing bias filter"),
+        grab("Residues passing Vit filter"),
+        grab("Residues passing Fwd filter"),
+    )
+}
+
+// MED-1 regression: the FM-index path's "Residues passing ... filter" counters
+// must match the bundled C nhmmer. Before the fix, the Rust seed-then-rescore
+// FM window construction credited far fewer residues than C (e.g. SSV 23924 vs
+// 41383 for MADE1). The fix extends FM seed diagonals with the C-faithful
+// `FM_extendSeed` port and feeds the un-pre-merged extended-diagonal list to
+// the same `extend_and_merge_windows_with_scoredata(.., 0)` pass C uses.
+//
+// SSV and bias counters must match C exactly; Vit/Fwd are allowed a 1-residue
+// slack for a single boundary tie in the post-Vit 0.5-overlap merge that does
+// not affect the hit set (verified bit-identical to C).
+fn assert_fm_counters_match_c(hmm_rel: &str, fasta_rel: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_fmdb(dir.path(), fasta_rel);
+    let hmm = test_path(hmm_rel);
+    let args = ["--cpu", "1", "--noali"];
+
+    let (rust_stdout, _) = run_nhmmer(&hmm, &db, &args);
+    let (c_stdout, _) = run_c_nhmmer_with_args(&hmm, &db, &args);
+
+    let (r_ssv, r_bias, r_vit, r_fwd) = parse_filter_residue_counters(&rust_stdout);
+    let (c_ssv, c_bias, c_vit, c_fwd) = parse_filter_residue_counters(&c_stdout);
+
+    assert_eq!(
+        r_ssv, c_ssv,
+        "FM SSV residue counter diverged from C for {hmm_rel}: Rust {r_ssv} vs C {c_ssv}"
+    );
+    assert_eq!(
+        r_bias, c_bias,
+        "FM bias residue counter diverged from C for {hmm_rel}: Rust {r_bias} vs C {c_bias}"
+    );
+    assert!(
+        (r_vit as i64 - c_vit as i64).abs() <= 1,
+        "FM Vit residue counter diverged from C for {hmm_rel}: Rust {r_vit} vs C {c_vit}"
+    );
+    assert!(
+        (r_fwd as i64 - c_fwd as i64).abs() <= 1,
+        "FM Fwd residue counter diverged from C for {hmm_rel}: Rust {r_fwd} vs C {c_fwd}"
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_made1_filter_residue_counters_match_c() {
+    // C (verified): SSV/bias/Vit/Fwd = 41383/34723/3552/1942.
+    assert_fm_counters_match_c("hmmer/tutorial/MADE1.hmm", "hmmer/tutorial/dna_target.fa");
+}
+
+#[test]
+fn test_nhmmer_fmindex_3box_filter_residue_counters_match_c() {
+    // C (verified): SSV/bias/Vit/Fwd = 677/677/166/94 (exact on all four).
+    assert_fm_counters_match_c("hmmer/testsuite/3box.hmm", "hmmer/testsuite/3box-alitest.fa");
+}
+
 #[test]
 fn test_nhmmer_accepts_space_separated_negative_threshold() {
     // C/Easel accepts `-T -20` (space-separated negative bit score); Rust's clap
@@ -1979,6 +2054,42 @@ fn test_nhmmer_accepts_space_separated_negative_threshold() {
         "nhmmer -T -20 should be accepted: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn test_nhmmer_f1_f2_f3_accept_hyphen_values() {
+    // L1 (audit-20260527/02): the SSV/Vit/Fwd P-value threshold flags must carry
+    // `allow_hyphen_values = true` so a value that begins with a hyphen reaches
+    // the value parser instead of being rejected by clap as an unknown option
+    // (same class as the `-T -20` fix). We assert the parser accepts the hyphen
+    // token — i.e. the failure mode is NOT clap's "unexpected argument" usage
+    // error. (A hyphen-leading scientific-notation value like `-1e-3` is a valid
+    // f64 here; the point is purely that clap does not reject the token.)
+    for flag in ["--F1", "--F2", "--F3"] {
+        let dir = tempfile::tempdir().unwrap();
+        let tblout = dir.path().join("t.tbl");
+        let output = Command::new(binary_path("hmmer"))
+            .args([
+                "nhmmer",
+                "--noali",
+                flag,
+                "-1e-3",
+                "--tblout",
+                tblout.to_str().unwrap(),
+                &test_path("hmmer/testsuite/3box.hmm"),
+                &test_path("hmmer/testsuite/3box-alitest.fa"),
+            ])
+            .output()
+            .expect("failed to run hmmer nhmmer");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("unexpected argument")
+                && !stderr.contains("error: a value is required")
+                && !stderr.contains("found argument"),
+            "nhmmer {flag} -1e-3 must parse the hyphen value (allow_hyphen_values); \
+             clap rejected it:\n{stderr}"
+        );
+    }
 }
 
 /// Regression test for audit-20260527 finding #1: the nhmmer/nhmmscan `--tblout`

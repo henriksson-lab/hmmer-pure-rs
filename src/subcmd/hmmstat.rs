@@ -120,7 +120,7 @@ fn write_stat_row<W: Write>(
 ) {
     writeln!(
         out,
-        "{:<4}   {:<20} {:<12} {:>8} {} {:>6} {} {} {} {}",
+        "{:<6} {:<20} {:<12} {:>8} {} {:>6} {} {} {} {}",
         idx,
         name,
         acc,
@@ -342,6 +342,35 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "1      fn3                  PF00041.13        106    11.42     86   0.66   0.63   0.57   0.04\n"
+        );
+    }
+
+    #[test]
+    fn stat_row_idx_uses_c_minus_6d_field_width_for_large_indices() {
+        // C body format is "%-6d %-20s ...": the idx is left-justified in a
+        // fixed width-6 field followed by a single space. For idx >= 10000 the
+        // 5-digit value still occupies the 6-wide field, so it is "10000 "
+        // (5 digits + 1 pad + the separating space => "10000  "), not the
+        // old Rust "{:<4}   " which produced "10000   " (5 + 3 spaces).
+        let mut out = Vec::new();
+        write_stat_row(
+            &mut out, 10000, "fn3", "-", 1, 1.0, 1, 0.0, 0.0, 0.0, 0.0,
+        );
+        let s = String::from_utf8(out).unwrap();
+        // idx field + name field start: "10000 " (6-wide left-just) + " " sep.
+        assert!(
+            s.starts_with("10000  fn3"),
+            "idx field must match C %-6d (width 6, left-justified): got {s:?}"
+        );
+        // And a 7-digit index simply overflows the field, same as C %-6d.
+        let mut out2 = Vec::new();
+        write_stat_row(
+            &mut out2, 1234567, "fn3", "-", 1, 1.0, 1, 0.0, 0.0, 0.0, 0.0,
+        );
+        let s2 = String::from_utf8(out2).unwrap();
+        assert!(
+            s2.starts_with("1234567 fn3"),
+            "over-wide idx must overflow like C %-6d: got {s2:?}"
         );
     }
 }

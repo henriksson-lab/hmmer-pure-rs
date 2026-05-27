@@ -489,6 +489,7 @@ impl TopHits {
                     self.nincluded += 1;
                 }
             }
+            self.workaround_bug_h74();
             if pli.score_sort_active() {
                 self.sort_by_sortkey();
             }
@@ -589,8 +590,51 @@ impl TopHits {
             }
         }
 
+        self.workaround_bug_h74();
+
         if pli.score_sort_active() {
             self.sort_by_sortkey();
+        }
+    }
+
+    /// Workaround for HMMER bug #h74: two distinct envelopes can produce
+    /// identical optimal-accuracy alignments (same `iali`/`jali`) because H3's
+    /// Forward/Backward cannot be limited to a profile-coordinate range. When
+    /// this happens we un-report / un-include the lower-scoring duplicate domain
+    /// so only one copy is shown. Faithful port of `workaround_bug_h74()` in
+    /// `hmmer/src/p7_tophits.c:756`, called at the end of `p7_tophits_Threshold`.
+    ///
+    /// Only hits flagged with overlapping envelopes (`noverlaps != 0`) are
+    /// examined; this adjusts per-domain `is_reported`/`is_included` flags and
+    /// the per-hit `nreported`/`nincluded` domain counts (not the target-level
+    /// counts), matching C exactly.
+    fn workaround_bug_h74(&mut self) {
+        for hit in &mut self.hits {
+            if hit.noverlaps == 0 {
+                continue;
+            }
+            let ndom = hit.dcl.len();
+            for d1 in 0..ndom {
+                for d2 in (d1 + 1)..ndom {
+                    if hit.dcl[d1].iali == hit.dcl[d2].iali
+                        && hit.dcl[d1].jali == hit.dcl[d2].jali
+                    {
+                        let dremoved = if hit.dcl[d1].bitscore >= hit.dcl[d2].bitscore {
+                            d2
+                        } else {
+                            d1
+                        };
+                        if hit.dcl[dremoved].is_reported {
+                            hit.dcl[dremoved].is_reported = false;
+                            hit.nreported = hit.nreported.saturating_sub(1);
+                        }
+                        if hit.dcl[dremoved].is_included {
+                            hit.dcl[dremoved].is_included = false;
+                            hit.nincluded = hit.nincluded.saturating_sub(1);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -745,6 +789,74 @@ mod tests {
         assert_eq!(th.hits[0].nincluded, 1);
         assert!(!th.hits[0].dcl[0].is_reported);
         assert!(th.hits[0].dcl[0].is_included);
+    }
+
+    #[test]
+    fn workaround_bug_h74_suppresses_lower_scoring_duplicate_domain() {
+        let mut pli = Pipeline::new();
+        pli.e_value_threshold = 1.0;
+        pli.inc_e = 1.0;
+        pli.dom_e_value_threshold = 1.0;
+        pli.inc_dome = 1.0;
+
+        // Two domains with identical iali/jali (the h74 collision); the hit is
+        // flagged with overlapping envelopes (noverlaps != 0).
+        let mut dom_hi = test_domain(20.0, 0.001_f64.ln());
+        dom_hi.iali = 5;
+        dom_hi.jali = 50;
+        let mut dom_lo = test_domain(8.0, 0.01_f64.ln());
+        dom_lo.iali = 5;
+        dom_lo.jali = 50;
+
+        let mut hit = test_hit("dup", 25.0, 0.001_f64.ln(), vec![dom_hi, dom_lo]);
+        hit.noverlaps = 1;
+
+        let mut th = TopHits::new();
+        th.hits.push(hit);
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        // Both domains pass the thresholds, but h74 suppresses the lower-scoring
+        // duplicate (dcl[1], bitscore 8.0). Only the higher-scoring one remains.
+        assert!(th.hits[0].dcl[0].is_reported);
+        assert!(th.hits[0].dcl[0].is_included);
+        assert!(!th.hits[0].dcl[1].is_reported);
+        assert!(!th.hits[0].dcl[1].is_included);
+        assert_eq!(th.hits[0].nreported, 1);
+        assert_eq!(th.hits[0].nincluded, 1);
+        // Target-level counts are unchanged by the workaround.
+        assert_eq!(th.nreported, 1);
+        assert_eq!(th.nincluded, 1);
+    }
+
+    #[test]
+    fn workaround_bug_h74_ignored_without_overlap_flag() {
+        let mut pli = Pipeline::new();
+        pli.e_value_threshold = 1.0;
+        pli.inc_e = 1.0;
+        pli.dom_e_value_threshold = 1.0;
+        pli.inc_dome = 1.0;
+
+        // Identical iali/jali but noverlaps == 0: workaround must NOT fire.
+        let mut dom_a = test_domain(20.0, 0.001_f64.ln());
+        dom_a.iali = 5;
+        dom_a.jali = 50;
+        let mut dom_b = test_domain(8.0, 0.01_f64.ln());
+        dom_b.iali = 5;
+        dom_b.jali = 50;
+
+        let mut hit = test_hit("nodup", 25.0, 0.001_f64.ln(), vec![dom_a, dom_b]);
+        hit.noverlaps = 0;
+
+        let mut th = TopHits::new();
+        th.hits.push(hit);
+
+        th.threshold(&pli, 1.0, 1.0);
+
+        assert!(th.hits[0].dcl[0].is_reported);
+        assert!(th.hits[0].dcl[1].is_reported);
+        assert_eq!(th.hits[0].nreported, 2);
+        assert_eq!(th.hits[0].nincluded, 2);
     }
 
     #[test]

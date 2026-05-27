@@ -216,9 +216,36 @@ New FM-index parity tests (Rust vs bundled C nhmmer on makehmmerdb DBs) added in
   4 `cli_option_rejections` assertions updated from the removed custom conflict-message
   text to clap's parse-time messages. Full suite green (17 binaries, 0 failures).
 
-**Not yet fixed (see reports):** nhmmer FM filter-residue counter pre-merge (MED-1) and
-multi-segment complement extension flip (MED-2) — both latent (not triggered on tested
-data); the ~18 Low items.
+**Low findings + MED-1 fixed (2026-05-27 third pass):**
+- MED-1 (FM filter-residue counters): root cause was NOT the pre-merge (report hypothesis
+  was wrong) but a lossy sequence-space re-extension. Wired up the faithful `fm_ssv::fm_extend_seed`
+  port (fixed its target-indexing to use the absolute FM-position frame) and emit windows from
+  pre-extended diagonals. FM-path counters now match C: SSV/bias exact on MADE1+3box; MADE1
+  Vit/Fwd within 1 residue (a single post-Vit 0.5-overlap boundary tie); 3box exact. **Hit set
+  unchanged** — all FM tblout rows remain bit-identical to C (parity tests green).
+- L1: `--F1/--F2/--F3` now accept the space-separated negative form (`allow_hyphen_values`) in
+  all six search/scan tools (same class as the `-T -20` fix).
+- F5 (hmmstat): idx column now uses C's `%-6d` (diverged only for idx >= 10000).
+- makehmmerdb `--bin_length`/`--sa_freq` power-of-2 + range validation refactored into
+  tested helpers (behavior already matched C).
+- workaround_bug_h74 (duplicate-alignment domain suppression): ported faithfully into
+  `tophits.rs` (per-hit nreported/nincluded decrement, target counts untouched); gated on the
+  `noverlaps` flag. Extremely rare (F/B envelope-collision corner case), verified against C
+  source + direct unit tests since it can't be forced from ordinary inputs.
+
+**Report items that were WRONG (verified against C, no fix needed):**
+- pfamtblout "SEARCH" vs "SCAN": C hmmscan deliberately uses `p7_SEARCH_SEQS`->"SEARCH" for the
+  pfam-style table (tblout/domtblout use "SCAN"); Rust already matched. Left as-is + comment.
+- F4 (binary HMM annotation index-0 sentinel): C writes a space (0x20), same as Rust — no NUL
+  divergence in the current 3.4 build. Locked in with a regression test.
+
+**Not yet fixed:** MED-2 (multi-segment complement extension flip + `id`/`fm_n` merge guard) and
+LOW-1/2/3 (>80kb window split do/while, complement coord single-expression transform, block_length
+windowed reading) — all latent, only on multi-segment FM DBs / >80kb windows / multi-block reads,
+none triggered by available test data; require `HmmWindow` struct changes (`id`/`fm_n`). Plus a
+separate pre-existing 1-byte divergence in the binary HMM nseq/ctime region (`hmmfile_binary.rs`),
+and Low items judged not worth changing (harmless alias supersets L2-L6, f32 threshold precision
+L8, footer program-path token F6, shared bias-clamp `pipeline.rs:864` — needs C verification).
 
 ## Ground Rules
 

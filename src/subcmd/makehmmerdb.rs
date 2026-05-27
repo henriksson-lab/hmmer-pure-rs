@@ -143,12 +143,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
-    if !(32..=4096).contains(&args.bin_length) || !args.bin_length.is_power_of_two() {
-        eprintln!("Invalid bin length: --bin_length must be a power of 2 between 32 and 4096");
+    if let Err(msg) = validate_bin_length(args.bin_length) {
+        eprintln!("{msg}");
         return std::process::ExitCode::FAILURE;
     }
-    if args.sa_freq == 0 || !args.sa_freq.is_power_of_two() {
-        eprintln!("Invalid suffix array sample rate: --sa_freq must be a power of 2");
+    if let Err(msg) = validate_sa_freq(args.sa_freq) {
+        eprintln!("{msg}");
         return std::process::ExitCode::FAILURE;
     }
     if args.block_size == 0 {
@@ -1715,6 +1715,30 @@ fn invalid_data(message: String) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
+/// Validate `--bin_length` exactly as C makehmmerdb does in code
+/// (makehmmerdb.c:458): reject unless it is a power of two with
+/// `32 <= b <= 4096`. The C getopts table range is NULL, so this is the only
+/// gate; without it out-of-range / non-power-of-2 values are silently accepted.
+fn validate_bin_length(bin_length: usize) -> Result<(), String> {
+    if !(32..=4096).contains(&bin_length) || !bin_length.is_power_of_two() {
+        Err("Invalid bin length: --bin_length must be a power of 2 between 32 and 4096".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate `--sa_freq` as C makehmmerdb does in code (makehmmerdb.c:462):
+/// it must be a power of two. (C tests only `freq_SA & (freq_SA - 1)`, which
+/// also passes 0 and then crashes downstream; we additionally reject 0 with a
+/// clean error rather than reproducing that segfault.)
+fn validate_sa_freq(sa_freq: usize) -> Result<(), String> {
+    if sa_freq == 0 || !sa_freq.is_power_of_two() {
+        Err("Invalid suffix array sample rate: --sa_freq must be a power of 2".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,6 +2050,32 @@ mod tests {
             name: format!("s{target_id}"),
             acc: String::new(),
             desc: String::new(),
+        }
+    }
+
+    #[test]
+    fn bin_length_matches_c_power_of_2_range() {
+        // C makehmmerdb.c:458 rejects unless power-of-2 AND 32<=b<=4096.
+        // Verified against the bundled C binary: 32/64/4096 accepted;
+        // 31/33/8192/0 rejected.
+        for ok in [32usize, 64, 128, 256, 512, 1024, 2048, 4096] {
+            assert!(validate_bin_length(ok).is_ok(), "bin_length {ok} should be accepted");
+        }
+        for bad in [0usize, 16, 31, 33, 48, 100, 4097, 8192] {
+            assert!(validate_bin_length(bad).is_err(), "bin_length {bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn sa_freq_matches_c_power_of_2() {
+        // C makehmmerdb.c:462 rejects unless a power of 2 (no range). 1/2/8/16
+        // accepted; 6/7 rejected. We additionally reject 0 (C accepts it then
+        // segfaults).
+        for ok in [1usize, 2, 4, 8, 16, 32, 256] {
+            assert!(validate_sa_freq(ok).is_ok(), "sa_freq {ok} should be accepted");
+        }
+        for bad in [0usize, 3, 6, 7, 9, 100] {
+            assert!(validate_sa_freq(bad).is_err(), "sa_freq {bad} should be rejected");
         }
     }
 }

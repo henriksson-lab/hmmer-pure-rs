@@ -187,15 +187,15 @@ struct Args {
     max: bool,
 
     /// Stage 1 (SSV) threshold
-    #[arg(long = "F1", default_value = "0.02")]
+    #[arg(long = "F1", default_value = "0.02", allow_hyphen_values = true)]
     f1: f64,
 
     /// Stage 2 (Vit) threshold
-    #[arg(long = "F2", default_value = "3e-3")]
+    #[arg(long = "F2", default_value = "3e-3", allow_hyphen_values = true)]
     f2: f64,
 
     /// Stage 3 (Fwd) threshold
-    #[arg(long = "F3", default_value = "3e-5")]
+    #[arg(long = "F3", default_value = "3e-5", allow_hyphen_values = true)]
     f3: f64,
 
     /// Turn off composition bias filter
@@ -3500,6 +3500,11 @@ fn fm_seed_candidate_windows_with_config(
     }
 
     let mut windows = Vec::new();
+    // When the FM-augment runs in its C-faithful `FM_extendSeed` mode, its
+    // windows alone reproduce C `p7_SSVFM_longlarget`'s list; the Rust-only seed
+    // sources below are then dropped (and the seed pre-merge / window gate
+    // skipped) so the FM residue counters match C. See `fm_ssv_augment_windows`.
+    let mut augment_c_faithful = false;
     for record in &target_db.fm_index_records {
         let expected_kind = if is_complement { 1 } else { 0 };
         if record.kind != expected_kind
@@ -3610,7 +3615,8 @@ fn fm_seed_candidate_windows_with_config(
             } else {
                 (&record.fm, &sibling.fm)
             };
-            fm_ssv_augment_windows(
+            let mut augment_windows = Vec::new();
+            let c_faithful = fm_ssv_augment_windows(
                 fmf,
                 fmb,
                 record,
@@ -3624,28 +3630,59 @@ fn fm_seed_candidate_windows_with_config(
                 max_length,
                 f1,
                 desired_len,
-                &mut windows,
+                &mut augment_windows,
             );
+            if c_faithful && !augment_windows.is_empty() {
+                // The C-faithful augment alone reproduces C `p7_SSVFM_longlarget`'s
+                // window list, so discard the Rust-only seed sources for this
+                // block. (When the augment legitimately finds nothing — e.g. a
+                // model too short for the FM seeding constraints — we keep the
+                // Rust-only seeds rather than forcing an empty list, preserving
+                // pre-existing behavior for those degenerate cases.)
+                augment_c_faithful = true;
+                windows = augment_windows;
+            } else {
+                windows.extend(augment_windows);
+            }
         }
     }
 
     if windows.is_empty() {
         return None;
     }
-    fm_finalize_seed_windows(windows, desired_len, seq, hmm, bg)
+    fm_finalize_seed_windows(windows, desired_len, seq, hmm, bg, augment_c_faithful)
 }
 
+/// Reduce the raw FM seed windows to the candidate-window list handed to the
+/// long-target pipeline.
+///
+/// `c_faithful` is `true` when the windows came from the C-faithful FM-augment
+/// (`FM_getSeeds` + `FM_extendSeed`); in that case the windows already match C
+/// `p7_SSVFM_longlarget`'s extended-diagonal list, so the Rust-specific seed
+/// pre-merge (`fm_merge_seed_windows`) and the lenient window gate
+/// (`fm_extended_diagonal_passes_window_gate`) are skipped — the downstream
+/// `extend_and_merge_windows_with_scoredata(.., 0.0)` does C's
+/// `p7_pli_ExtendAndMergeWindows(.., 0)` merge, which makes the FM residue
+/// counters match C. For the fallback seed-then-rescore path (`c_faithful ==
+/// false`) those Rust-only guards stay in place to keep the hit set correct.
 fn fm_finalize_seed_windows(
     windows: Vec<NhmmerScoredCandidateWindow>,
     desired_len: usize,
     seq: &Sequence,
     hmm: &Hmm,
     bg: &Bg,
+    c_faithful: bool,
 ) -> Option<Vec<NhmmerCandidateWindow>> {
-    let mut windows = fm_merge_seed_windows(windows, desired_len, seq, hmm, bg);
-    windows.retain(|scored| {
-        fm_extended_diagonal_passes_window_gate(seq, hmm, bg, &scored.window, scored.score_bits)
-    });
+    let mut windows = if c_faithful {
+        windows
+    } else {
+        fm_merge_seed_windows(windows, desired_len, seq, hmm, bg)
+    };
+    if !c_faithful {
+        windows.retain(|scored| {
+            fm_extended_diagonal_passes_window_gate(seq, hmm, bg, &scored.window, scored.score_bits)
+        });
+    }
     if windows.is_empty() {
         return None;
     }
@@ -3826,6 +3863,71 @@ fn fm_push_seed_window(
     windows.push(NhmmerScoredCandidateWindow { window, score_bits });
 }
 
+/// Emit a candidate window for a diagonal that has ALREADY been extended by the
+/// faithful `fm_ssv::fm_extend_seed` (C `FM_extendSeed`), rather than re-running
+/// the local sequence-space extension. This is the FM-augment path: the kernel
+/// already produced an extended diagonal `(diag.n, diag.k, diag.length,
+/// diag.score)` in C's coordinate/score frame, so we only do the FM→sequence
+/// coordinate mapping (mirroring `fm_push_seed_window`'s leading-overlap and
+/// ambiguity guards) and credit the kernel's own bit score. `seed_len` is the
+/// extended diagonal length, `fm_pos` is `text_len - diag.n - diag.length`,
+/// `model_end` is `diag.k + diag.length - 1`, and `score_bits` is `diag.score`.
+#[allow(clippy::too_many_arguments)]
+fn fm_push_extended_diag_window(
+    windows: &mut Vec<NhmmerScoredCandidateWindow>,
+    ambiguities: &[(usize, usize)],
+    seq_meta: &NhmmerFmSequenceMeta,
+    seq: &Sequence,
+    record: &NhmmerFmIndexRecord,
+    is_complement: bool,
+    seed_len: usize,
+    model_end: usize,
+    fm_pos: usize,
+    score_bits: f32,
+) {
+    if seed_len == 0 || fm_pos + seed_len > record.text_len {
+        return;
+    }
+    let block_seed_start = if is_complement {
+        fm_pos
+    } else {
+        record.text_len - fm_pos - seed_len
+    };
+    let Some(block_seed_end) = block_seed_start.checked_add(seed_len) else {
+        return;
+    };
+    if fm_seed_is_wholly_in_leading_overlap(record, block_seed_end) {
+        return;
+    }
+    if fm_seed_overlaps_ambiguity(
+        ambiguities,
+        record.ambig_offset,
+        record.ambig_count,
+        block_seed_start,
+        block_seed_end,
+    ) {
+        return;
+    }
+    let forward_seq_seed_start = match block_seed_start.checked_sub(seq_meta.fm_start) {
+        Some(pos) if pos + seed_len <= seq_meta.length => pos,
+        _ => return,
+    };
+    let seq_seed_start = if is_complement {
+        seq.n - forward_seq_seed_start - seed_len
+    } else {
+        forward_seq_seed_start
+    };
+    if !score_bits.is_finite() {
+        return;
+    }
+    let window = NhmmerCandidateWindow {
+        n: seq_seed_start + 1,
+        length: seed_len,
+        k: model_end,
+    };
+    windows.push(NhmmerScoredCandidateWindow { window, score_bits });
+}
+
 /// Augment the FM candidate windows with the exact two-sweep SSV-over-FM kernel
 /// (`src/simd/fm_ssv.rs`), a faithful port of C `p7_SSVFM_longlarget` /
 /// `FM_Recurse`. The seed-then-rescore loops above only find *exact* model
@@ -3852,6 +3954,14 @@ fn fm_push_seed_window(
 /// MSV evalue parameters) before becoming windows — without it, the exhaustive
 /// kernel's extra raw seeds would survive the lenient seed-then-rescore `>0`
 /// window gate and produce hits C never reports.
+///
+/// Returns `true` when the C-faithful `FM_extendSeed` extension path was taken
+/// (single-segment block whose FM text frame we can reconstruct). In that mode
+/// the augment alone reproduces C `p7_SSVFM_longlarget`'s window list, so the
+/// caller drops the Rust-only seed sources and skips the seed pre-merge / window
+/// gate (`fm_finalize_seed_windows`), matching C's residue counters. Returns
+/// `false` for the fallback (seed-then-rescore) path, where those Rust-specific
+/// guards stay in place.
 #[allow(clippy::too_many_arguments)]
 fn fm_ssv_augment_windows(
     fmf: &FmIndex,
@@ -3868,11 +3978,11 @@ fn fm_ssv_augment_windows(
     f1: f64,
     desired_len: usize,
     windows: &mut Vec<NhmmerScoredCandidateWindow>,
-) {
+) -> bool {
     use crate::simd::fm_ssv;
     let m = hmm.m;
     if m == 0 {
-        return;
+        return false;
     }
     let kp = 4usize; // ACGT
     let ln2 = std::f32::consts::LN_2;
@@ -3969,45 +4079,117 @@ fn fm_ssv_augment_windows(
         /* bottom_only (Crick / Complement) */ is_complement,
     );
 
+    // Build the strand-resolved FM-text codes that C `FM_extendSeed` extends
+    // against via `fm_convertRange2DSQ(fm, ..., complementarity, ...)`. The kernel
+    // diagonals' `diag.n` are in the FM coordinate frame (full-text 0-based);
+    // `fm_extend_seed` reads `target[abs]` where `abs = target_start + offset`
+    // (1-indexed, target[1] = FM position 0). For the single-segment DBs we
+    // support, the record text covers `seq` exactly (fm_start == 0); for the
+    // Watson (kind=0) frame the FM text is the forward sequence, and for the
+    // Crick (kind=1) frame `fm_convertRange2DSQ` yields the reverse-complement,
+    // which equals the revcomp of the forward sequence.
+    let fm_text_codes: Option<Vec<usize>> = if seq_meta.fm_start == 0
+        && seq_meta.length == seq.n
+        && record.text_len >= seq.n
+        && record.fm.n as usize == record.text_len
+    {
+        let mut codes = vec![0usize; record.text_len + 2];
+        if is_complement {
+            // Crick: complement base at reversed position.
+            for i in 0..seq.n {
+                let fwd = seq.dsq[seq.n - i] as usize;
+                codes[i + 1] = match fwd {
+                    0 => 3,
+                    1 => 2,
+                    2 => 1,
+                    3 => 0,
+                    _ => 0,
+                };
+            }
+        } else {
+            for i in 0..seq.n {
+                codes[i + 1] = seq.dsq[i + 1] as usize;
+            }
+        }
+        Some(codes)
+    } else {
+        None
+    };
+
+    let c_faithful = fm_text_codes.is_some();
     let text_len = record.text_len as i64;
-    for diag in diags {
+    let fm_n = record.fm.n as i64;
+    for mut diag in diags {
         if diag.complementarity != want || diag.length <= 0 {
             continue;
         }
-        let model_end = (diag.k + diag.length - 1) as usize;
-        if diag.k < 1 || model_end == 0 || model_end > hmm.m {
+        if diag.k < 1 {
             continue;
         }
-        // `diag.n` now equals C's `diag->n` (forward target start for Watson;
-        // revcomp-frame start for Crick). Recover the `fm_pos` that
-        // `fm_push_seed_window` expects so its strand branch reproduces C's
-        // coordinate mapping — symmetric for both strands:
-        //  - Watson: block_seed_start = text_len - fm_pos - length must equal the
-        //    forward start `diag.n`, so fm_pos = text_len - diag.n - length.
-        //  - Crick: seq_seed_start = seq.n - (fm_pos - fm_start) - length must
-        //    equal C's 0-based reverse start (`diag.n - 1`), which also gives
-        //    fm_pos = text_len - diag.n - length.
-        let fm_pos = text_len - diag.n - diag.length as i64;
-        if fm_pos < 0 {
-            continue;
+
+        if let Some(target) = fm_text_codes.as_ref() {
+            // Faithful C `FM_extendSeed`: extend the raw kernel diagonal against
+            // the FM text using the SSV (bit) score table, then window from the
+            // extended coordinates. This reproduces C's window count/length —
+            // the seed-then-rescore re-extension (`fm_extend_seed_diagonal`)
+            // systematically produced fewer/shorter windows.
+            fm_ssv::fm_extend_seed(&mut diag, target, &scores, &fm_config, fm_n);
+            // `scores`/`diag.score` are in NATS; `sc_thresh_bits` is in BITS.
+            // C compares the extended diagonal's score against `sc_thresh`
+            // (nats), so convert the threshold to nats here. Store the window's
+            // score in bits to match the seed-then-rescore path.
+            if diag.length <= 0 || diag.score < sc_thresh_bits * ln2 {
+                continue;
+            }
+            let model_end = (diag.k + diag.length - 1) as usize;
+            if model_end == 0 || model_end > hmm.m {
+                continue;
+            }
+            let fm_pos = text_len - diag.n - diag.length as i64;
+            if fm_pos < 0 {
+                continue;
+            }
+            fm_push_extended_diag_window(
+                &mut ssv_windows,
+                ambiguities,
+                seq_meta,
+                seq,
+                record,
+                is_complement,
+                diag.length as usize,
+                model_end,
+                fm_pos as usize,
+                diag.score / ln2,
+            );
+        } else {
+            // Fallback (multi-segment / coordinate frame we don't reconstruct
+            // here): the original seed-then-rescore window construction.
+            let model_end = (diag.k + diag.length - 1) as usize;
+            if model_end == 0 || model_end > hmm.m {
+                continue;
+            }
+            let fm_pos = text_len - diag.n - diag.length as i64;
+            if fm_pos < 0 {
+                continue;
+            }
+            let synthetic = NhmmerConsensusSeed {
+                bases: vec![0u8; diag.length as usize],
+                model_end,
+            };
+            fm_push_seed_window(
+                &mut ssv_windows,
+                ambiguities,
+                seq_meta,
+                seq,
+                record,
+                hmm,
+                bg,
+                is_complement,
+                &synthetic,
+                fm_pos as usize,
+                desired_len,
+            );
         }
-        let synthetic = NhmmerConsensusSeed {
-            bases: vec![0u8; diag.length as usize],
-            model_end,
-        };
-        fm_push_seed_window(
-            &mut ssv_windows,
-            ambiguities,
-            seq_meta,
-            seq,
-            record,
-            hmm,
-            bg,
-            is_complement,
-            &synthetic,
-            fm_pos as usize,
-            desired_len,
-        );
     }
 
     // C filters extended diagonals by `sc_thresh` before windowing. The
@@ -4016,6 +4198,7 @@ fn fm_ssv_augment_windows(
     // seeds, so apply the Gumbel-derived bit threshold here.
     ssv_windows.retain(|w| w.score_bits >= sc_thresh_bits);
     windows.extend(ssv_windows);
+    c_faithful
 }
 
 struct NhmmerFmSeedQuery<'a> {
@@ -6739,7 +6922,7 @@ mod tests {
             })
             .collect();
 
-        let windows = fm_finalize_seed_windows(scored_windows, 1, &seq, &hmm, &bg).unwrap();
+        let windows = fm_finalize_seed_windows(scored_windows, 1, &seq, &hmm, &bg, false).unwrap();
         assert_eq!(windows.len(), window_count);
         assert_eq!(windows.first().unwrap().n, 1);
         assert_eq!(windows.last().unwrap().n, window_count);

@@ -149,15 +149,15 @@ struct Args {
     max: bool,
 
     /// MSV filter threshold
-    #[arg(long = "F1", default_value = "0.02")]
+    #[arg(long = "F1", default_value = "0.02", allow_hyphen_values = true)]
     f1: f64,
 
     /// Viterbi filter threshold
-    #[arg(long = "F2", default_value = "0.001")]
+    #[arg(long = "F2", default_value = "0.001", allow_hyphen_values = true)]
     f2: f64,
 
     /// Forward filter threshold
-    #[arg(long = "F3", default_value = "1e-5")]
+    #[arg(long = "F3", default_value = "1e-5", allow_hyphen_values = true)]
     f3: f64,
 
     /// Turn off composition bias filter
@@ -581,6 +581,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         );
     }
     if let Some(ref mut f) = pfamtblout_file {
+        // C hmmscan deliberately passes p7_SEARCH_SEQS -> "SEARCH" for the
+        // pfam-style (TabularXfam) tail (hmmscan.c:519,971), unlike the
+        // tblout/domtblout tails above which use p7_SCAN_MODELS -> "SCAN".
+        // Verified byte-for-byte against the bundled C binary. Do NOT "fix"
+        // this to SCAN — that would break C parity.
         crate::subcmd::hmmsearch::write_table_footer(
             f,
             "hmmscan",
@@ -1366,6 +1371,21 @@ mod tests {
         assert_eq!(args.f2, 0.2);
         assert_eq!(args.f3, 0.3);
         assert!(args.nobias);
+    }
+
+    #[test]
+    fn hmmscan_accepts_negative_space_separated_f_values() {
+        // C --F1/--F2/--F3 are eslARG_REAL with no range, so the
+        // space-separated negative form is accepted (parses past arg handling).
+        // allow_hyphen_values lets clap match C instead of treating "-0.5" as
+        // an unknown flag.
+        let args = Args::try_parse_from([
+            "hmmscan", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "models.hmm", "queries.fa",
+        ])
+        .unwrap();
+        assert_eq!(args.f1, -0.5);
+        assert_eq!(args.f2, -1e-3);
+        assert_eq!(args.f3, -2.0);
     }
 
     #[test]

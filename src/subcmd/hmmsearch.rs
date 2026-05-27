@@ -163,15 +163,15 @@ struct Args {
     max: bool,
 
     /// MSV threshold
-    #[arg(long = "F1", default_value = "0.02")]
+    #[arg(long = "F1", default_value = "0.02", allow_hyphen_values = true)]
     f1: f64,
 
     /// Viterbi threshold
-    #[arg(long = "F2", default_value = "0.001")]
+    #[arg(long = "F2", default_value = "0.001", allow_hyphen_values = true)]
     f2: f64,
 
     /// Forward threshold
-    #[arg(long = "F3", default_value = "1e-5")]
+    #[arg(long = "F3", default_value = "1e-5", allow_hyphen_values = true)]
     f3: f64,
 
     /// Turn off composition bias filter
@@ -2671,5 +2671,19 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].split_whitespace().nth(1), Some("50.0"));
         assert_eq!(rows[2].split_whitespace().nth(1), Some("10.0"));
+    }
+
+    #[test]
+    fn hmmsearch_accepts_negative_space_separated_f_values() {
+        // C --F1/--F2/--F3 are eslARG_REAL with no range, so C accepts the
+        // space-separated negative form. allow_hyphen_values keeps clap from
+        // treating "-0.5" as an unknown flag.
+        let args = Args::try_parse_from([
+            "hmmsearch", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "model.hmm", "targets.fa",
+        ])
+        .unwrap();
+        assert_eq!(args.f1, -0.5);
+        assert_eq!(args.f2, -1e-3);
+        assert_eq!(args.f3, -2.0);
     }
 }

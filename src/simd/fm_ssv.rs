@@ -730,9 +730,10 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
 /// Faithful port of C `FM_extendSeed`: extend the seed in both directions
 /// within a bounded window and keep the best-scoring sub-diagonal.
 ///
-/// `target` is the (already strand-resolved) target sequence in alphabet
-/// codes, 1-indexed to match C's `tmp_sq->dsq` (index 0 is a sentinel).
-/// `fm_n` is the FM text length `fm->N`.
+/// `target` is the WHOLE (already strand-resolved) target text in alphabet
+/// codes, 1-indexed so `target[1]` is FM position 0 (index 0 is a sentinel),
+/// matching C's `fm_convertRange2DSQ` extraction of `[target_start, target_end]`
+/// into `tmp_sq->dsq[1..]`. `fm_n` is the FM text length `fm->N`.
 pub fn fm_extend_seed(
     diag: &mut FmDiag,
     target: &[usize],
@@ -762,9 +763,13 @@ pub fn fm_extend_seed(
         return;
     }
 
-    // Walk model_start..=model_end against target[1..]. C reads tmp_sq->dsq[n]
-    // with n starting at 1. We expect `target` to be laid out the same way
-    // (target[0] is sentinel; the extracted range begins at index 1).
+    // Walk model_start..=model_end against the extracted target range. C reads
+    // tmp_sq->dsq[n] with n starting at 1, where tmp_sq holds the range
+    // [target_start, target_end] extracted by fm_convertRange2DSQ. Here `target`
+    // is the WHOLE strand-resolved text, 1-indexed (target[1] = FM position 0),
+    // so position `target_start + (n-1)` (0-based) maps to absolute 1-index
+    // `target_start + n`. `n` is the 1-based offset within the extracted range
+    // and is what max_hit_start/end are expressed in, exactly like C.
     let mut k = model_start;
     let mut n: usize = 1;
     let mut sc = 0.0_f32;
@@ -774,7 +779,8 @@ pub fn fm_extend_seed(
     let mut max_hit_end: i64 = n as i64;
 
     while k <= model_end {
-        let cidx = (k as usize) * kp + target.get(n).copied().unwrap_or(0);
+        let abs_idx = (target_start + n as i64) as usize;
+        let cidx = (k as usize) * kp + target.get(abs_idx).copied().unwrap_or(0);
         let delta = scores.scores.get(cidx).copied().unwrap_or(0.0);
         sc += delta;
         if sc < 0.0 {

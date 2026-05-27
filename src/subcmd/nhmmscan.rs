@@ -90,15 +90,15 @@ struct Args {
     max: bool,
 
     /// Stage 1 (SSV) threshold
-    #[arg(long = "F1", default_value = "0.02")]
+    #[arg(long = "F1", default_value = "0.02", allow_hyphen_values = true)]
     f1: f64,
 
     /// Stage 2 (Vit) threshold
-    #[arg(long = "F2", default_value = "3e-3")]
+    #[arg(long = "F2", default_value = "3e-3", allow_hyphen_values = true)]
     f2: f64,
 
     /// Stage 3 (Fwd) threshold
-    #[arg(long = "F3", default_value = "3e-5")]
+    #[arg(long = "F3", default_value = "3e-5", allow_hyphen_values = true)]
     f3: f64,
 
     /// Turn off composition bias filter
@@ -1259,6 +1259,20 @@ mod tests {
         let args =
             Args::try_parse_from(["nhmmscan", "--cut_ga", "models.hmm", "queries.fa"]).unwrap();
         assert_eq!(selected_bit_cutoff(&args), Some(BitCutoff::GA));
+    }
+
+    #[test]
+    fn nhmmscan_accepts_negative_space_separated_f_values() {
+        // C --F1/--F2/--F3 are eslARG_REAL with no range; the space-separated
+        // negative form is accepted. allow_hyphen_values matches C instead of
+        // treating "-0.5" as an unknown flag.
+        let args = Args::try_parse_from([
+            "nhmmscan", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "models.hmm", "queries.fa",
+        ])
+        .unwrap();
+        assert_eq!(args.f1, -0.5);
+        assert_eq!(args.f2, -1e-3);
+        assert_eq!(args.f3, -2.0);
     }
 
     #[test]

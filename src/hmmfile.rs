@@ -1355,6 +1355,40 @@ mod tests {
     }
 
     #[test]
+    fn binary_annotation_arrays_use_space_sentinel_at_index_0_like_c() {
+        // C HMMER's binary writer (`p7_hmmfile_WriteBinary`, p7_hmmfile.c:1037-
+        // 1041) emits the raw `M+2`-byte annotation arrays verbatim. Its ASCII
+        // reader (`read_asc30hmm`) sets index 0 of rf/mm/consensus/cs to ' '
+        // (0x20). Verified empirically against the C `hmmconvert -b` output for
+        // fn3: the CONS and CS arrays are byte-identical to Rust's, with a 0x20
+        // sentinel at index 0 (NOT a NUL). The audit's F4 claim that C writes a
+        // NUL here does not reproduce against the HMMER 3.4 build; C writes a
+        // space. This test locks the confirmed C-parity sentinel in.
+        let hmm = read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+
+        // ASCII reader matches C: index 0 == ' ' (0x20).
+        let cons = hmm.consensus.as_ref().expect("fn3 has CONS yes");
+        assert_eq!(cons[0], b' ', "CONS index 0 must be space (matches C .h3m)");
+        let cs = hmm.cs.as_ref().expect("fn3 has CS yes");
+        assert_eq!(cs[0], b' ', "CS index 0 must be space (matches C .h3m)");
+
+        // The binary writer must emit those sentinels verbatim. Round-trip
+        // through the binary reader (which preserves the bytes verbatim).
+        let mut bytes = Vec::new();
+        crate::hmmfile_binary::write_binary_hmm(&mut bytes, &hmm).unwrap();
+        let rt = crate::hmmfile_binary::read_binary_hmm(&mut Cursor::new(bytes))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rt.consensus.as_ref().unwrap()[0], b' ');
+        assert_eq!(rt.cs.as_ref().unwrap()[0], b' ');
+    }
+
+    #[test]
     fn rejects_hmm_alphabet_header_that_disagrees_with_alph() {
         let mut text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
