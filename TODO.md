@@ -36,13 +36,42 @@ are kept here for context.
   extreme `--max -T -100` stress config Rust over-segments (≈32 vs C's 10
   reported windows) — a long-target windowing/merge detail under all-pass
   Vit/Fwd, not a default-path issue.
-- nhmmer FM-index seed search (default mode): **OPEN (large).** Still a
-  seed-then-rescore approximation, not C's exact SIMD SSV-over-FM diagonal
-  pipeline. A faithful `fm_recurse`/`fm_get_seeds`/`fm_merge_seeds`/`fm_extend_seed`
-  port of the forward sweep lives, unit-tested, in `src/simd/fm_ssv.rs` (NOT
-  wired in). Full integration is blocked on a dependency: `src/fm_index.rs` has
-  no bi-directional search (C's `fm_reverse` half of `FM_Recurse` needs it) and
-  there is no float `ssv_scores_f` on the oprofile.
+- nhmmer FM-index seed search (Watson strand): **resolved.** The default FM
+  path now augments its seed-then-rescore candidate windows with a faithful
+  two-sweep port of C `p7_SSVFM_longlarget` / `FM_Recurse` (`src/simd/fm_ssv.rs`,
+  wired via `fm_ssv_augment_windows` in `src/subcmd/nhmmer.rs`), which walks the
+  FM trie accumulating SSV score over the actual target characters — recovering
+  weak diagonals that have no exact model k-mer match.
+  Reproduction (`makehmmerdb --dna hmmer/tutorial/dna_target.fa` then
+  `nhmmer MADE1.hmm <db>`): Rust now reports the same **5 hits** as C, including
+  the weak `304073-304104` (E=1.4) it previously missed, in 0.12s / 11 MB.
+  Pieces:
+  - `FmIndex::update_interval_forward` (+`occ_lt`, `char_interval`): bi-directional
+    `fm_updateIntervalForward` (Simpson 2010 Alg. 4), verified against a
+    brute-force forward-search oracle (`fm_index_forward_search_matches_locate`).
+  - `fm_ssv.rs` runs both sweeps: forward-on-model → `prepend_interval` on the
+    kind=0 (reversed-text) index; backward-on-model → `update_interval_forward`
+    on the kind=1 (forward-text) index; both locate on the kind=0 index.
+  - `FmIndex` now carries C `FM_DATA`'s sampled rank tables (`occCnts_sb` u32
+    every 65536, `occCnts_b` u16 every 256), making `occ` O(`FREQ_CNT_B`) so the
+    exhaustive traversal is tractable genome-scale (closer to the original
+    `FM_DATA`, not a Rust invention).
+  - Scores are carried in NATS inside the kernel to mirror C exactly (the kernel
+    only emits coordinates, so the unit stays isolated from the bit-based
+    downstream).
+  **OPEN (follow-up):** the Crick (reverse-complement) strand still uses only the
+  seed-then-rescore path — `fm_ssv_augment_windows` runs Watson (NoComplement)
+  only. A first attempt to wire the Complement diagonals using the Watson-style
+  `text_len - n - length` coordinate fabricated a spurious reverse hit on the
+  MADE1 TIR fixture (Rust 6 vs C 5, confirmed spurious — absent from C even at
+  `-T 0`), so it was reverted. The correct mapping must port C's complement
+  conversion `fm_getOriginalPosition` (`fm_general.c`): for a complement diag,
+  `fwd_pos = N - n - 1` then a sequence-length reverse-flip (`seg_pos = L -
+  seg_pos + 1`). Validating it needs a fixture with a weak reverse-strand hit C
+  finds but the seed-then-rescore path misses (MADE1's reverse hits are already
+  found), or C-side instrumentation of the complement `diag->n` values. C's
+  `opt_ext_fwd/rev` look-ahead prune is also omitted (only makes Rust explore
+  more, never miss seeds).
 - hmmpgmd: **resolved (was a non-gap).** C hmmpgmd performs no cross-worker
   dedup; each DB index is visited by exactly one worker. The Rust master now
   coalesces overlapping user `--seqdb_ranges` into disjoint shards, reproducing

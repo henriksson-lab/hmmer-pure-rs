@@ -8,31 +8,30 @@
 //! `FM_DP_PAIR` DP state and pruning exactly as C does, followed by
 //! `FM_mergeSeeds` and `FM_extendSeed`.
 //!
-//! SCOPE / WHAT IS FAITHFUL vs WHAT IS NOT (read before wiring into production):
+//! SCOPE / FAITHFULNESS:
 //!
-//! * The Rust `FmIndex` (src/fm_index.rs) exposes only single-direction
-//!   backward search via `prepend_interval`, which is exactly the primitive
-//!   C uses for the `fm_direction == fm_forward` sweep
-//!   (`fm_updateIntervalReverse(fmf, ...)`). That forward sweep is ported here
-//!   faithfully, including the full DP-pair state and every pruning clause.
+//! * Both of C's sweeps are ported. The `fm_direction == fm_forward` sweep uses
+//!   `FmIndex::prepend_interval` (C `fm_updateIntervalReverse(fmf, ...)`) on the
+//!   reversed-text index; the `fm_direction == fm_backward` sweep uses
+//!   `FmIndex::update_interval_forward` (C `fm_updateIntervalForward(fmb, ...)`)
+//!   on the forward-text index, carrying the second (fmf-locatable) interval.
+//!   The full `FM_DP_PAIR` state and every pruning clause are reproduced (except
+//!   C's `opt_ext_fwd/rev` look-ahead prune, whose omission only makes Rust
+//!   explore *more*, never fewer — see `fm_recurse`).
 //!
-//! * C also runs a second `fm_direction == fm_reverse` sweep that requires a
-//!   *bi-directional* FM index (`fmb` plus a second interval, updated via
-//!   `fm_updateIntervalForward`). The Rust `FmIndex` has no bi-directional
-//!   support, so that half of `FM_Recurse` CANNOT be ported here without first
-//!   extending `FmIndex`. This is reported as a dependency; this module covers
-//!   the forward-on-model / forward-on-FM and the complement variants that the
-//!   forward FM sweep can express.
+//! * The kernel is unit-agnostic in its score inputs: `SsvScores`, `sc_thresh_fm`,
+//!   and the score-valued `FmSsvConfig` fields (`drop_lim`, `score_density_req`)
+//!   must all share a unit. The nhmmer caller supplies them in NATS (`ln(p/q)`;
+//!   bit thresholds * ln2) to mirror C's `ssv_scores_f`/`fm_cfg`. The kernel
+//!   only emits seed *coordinates*, so the unit stays isolated from the
+//!   bit-based downstream window construction.
 //!
-//! * The score table here is the per-position match LOD in bits, computed from
-//!   the HMM emission and background (identical convention to C's
-//!   `ssv_scores_f` for match states and to nhmmer.rs `fm_match_lod_bits`).
-//!   No optimized-profile `ssv_scores_f` field exists on the Rust oprofile, so
-//!   the table is constructed locally; the algorithm is validated against it.
-//!
-//! This module is unit-tested but is NOT (yet) wired into the production
-//! nhmmer path, which keeps its verified seed-then-rescore approximation. See
-//! the report accompanying this change.
+//! Wired into the nhmmer FM-index path via `fm_ssv_augment_windows`
+//! (`src/subcmd/nhmmer.rs`), where it augments the seed-then-rescore candidate
+//! windows to recover weak diagonals with no exact model k-mer match.
+//! `FmIndex` carries C `FM_DATA`'s `occCnts_sb`/`occCnts_b` sampled rank, so
+//! `occ` is O(`FREQ_CNT_B`) and this exhaustive trie traversal is tractable on
+//! genome-scale blocks.
 
 use crate::fm_index::{FmIndex, FmInterval};
 
@@ -49,6 +48,22 @@ pub enum ModelDirection {
 pub enum Complementarity {
     NoComplement,
     Complement,
+}
+
+/// Which FM index / interval discipline a `FM_Recurse` sweep uses. Port of C's
+/// `fm_forward` / `fm_backward` for `fm_direction` (distinct from the
+/// per-diagonal `model_direction`).
+///
+/// * `Forward`: standard backward-search step on `fmf` (the BWT of the reversed
+///   block text; Rust `kind=0`), via [`FmIndex::prepend_interval`]. The single
+///   interval is itself locatable on `fmf`.
+/// * `Backward`: bi-directional forward-search step on `fmb` (the BWT of the
+///   forward block text; Rust `kind=1`), via [`FmIndex::update_interval_forward`].
+///   It carries a second interval that is locatable on `fmf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FmDirection {
+    Forward,
+    Backward,
 }
 
 /// Tunable thresholds and pruning parameters.
@@ -232,7 +247,9 @@ fn get_passing_diags(
 #[allow(clippy::too_many_arguments)]
 fn fm_recurse(
     depth: i32,
-    fm: &FmIndex,
+    fmf: &FmIndex,
+    fmb: &FmIndex,
+    direction: FmDirection,
     alph: &FmAlphabet,
     scores: &SsvScores,
     consensus: &[usize],
@@ -241,12 +258,29 @@ fn fm_recurse(
     dp_pairs: &mut Vec<FmDpPair>,
     first: usize,
     last: usize,
+    // Forward sweep: the locatable `fmf` reverse-search interval.
+    // Backward sweep: the `fmb` mirror interval.
     interval_1: FmInterval,
+    // Backward sweep only: the `fmf`-coordinate forward interval (locatable).
+    interval_2: Option<FmInterval>,
     seeds: &mut Vec<FmDiag>,
 ) {
     let m = scores.m;
 
     for c in 0..alph.alph_size {
+        let base = fm_code_to_base(c);
+        // One interval step for this character `c` (independent of the DP rows).
+        // Returns (next interval_1, interval locatable in fmf), mirroring C's
+        // `fm_updateIntervalReverse(fmf)` (forward sweep) and
+        // `fm_updateIntervalForward(fmb)` (backward sweep).
+        let step: Option<(FmInterval, FmInterval)> = match direction {
+            FmDirection::Forward => fmf.prepend_interval(interval_1, base).map(|iv| (iv, iv)),
+            FmDirection::Backward => {
+                let iv2 = interval_2.expect("backward sweep requires interval_2");
+                fmb.update_interval_forward(interval_1, iv2, base)
+            }
+        };
+
         // dppos tracks the last index appended for this character's column.
         let mut dppos = last;
 
@@ -282,20 +316,18 @@ fn fm_recurse(
                 || (config.consensus_match_req > 0
                     && consec_consensus as usize == config.consensus_match_req)
             {
-                // A seed to extend: shrink the FM interval by prepending c and
-                // record all matching target positions.
-                if !interval_1.is_empty() {
-                    if let Some(new_iv) = fm.prepend_interval(interval_1, fm_code_to_base(c)) {
-                        get_passing_diags(
-                            fm,
-                            k,
-                            depth,
-                            pair.model_direction,
-                            pair.complementarity,
-                            new_iv,
-                            seeds,
-                        );
-                    }
+                // A seed to extend: emit all matching target positions from the
+                // fmf-locatable interval for this character.
+                if let Some((_, locatable)) = step {
+                    get_passing_diags(
+                        fmf,
+                        k,
+                        depth,
+                        pair.model_direction,
+                        pair.complementarity,
+                        locatable,
+                        seeds,
+                    );
                 }
             } else if sc <= 0.0
                 || depth == config.max_depth as i32
@@ -309,7 +341,11 @@ fn fm_recurse(
                     && config.consec_pos_req.saturating_sub(positive_run as usize)
                         == (config.max_depth as i32 - depth + 1) as usize)
             {
-                // pruned - do nothing
+                // pruned - do nothing.
+                // NOTE: C also prunes via the `opt_ext_fwd`/`opt_ext_rev`
+                // optimal-extension lookahead near the depth limit. Omitting it
+                // here only makes Rust prune *less* (explore more), so it cannot
+                // reduce sensitivity; it can be added for exact speed parity.
             } else {
                 // Extendable: append a new DP pair past `last`.
                 dppos += 1;
@@ -343,15 +379,18 @@ fn fm_recurse(
 
         if dppos > last {
             // At least one extendable diagonal: descend the trie on c.
-            if interval_1.is_empty() {
+            let Some((new_iv1, locatable)) = step else {
                 continue;
-            }
-            let Some(new_iv) = fm.prepend_interval(interval_1, fm_code_to_base(c)) else {
-                continue;
+            };
+            let next_iv2 = match direction {
+                FmDirection::Forward => None,
+                FmDirection::Backward => Some(locatable),
             };
             fm_recurse(
                 depth + 1,
-                fm,
+                fmf,
+                fmb,
+                direction,
                 alph,
                 scores,
                 consensus,
@@ -360,7 +399,8 @@ fn fm_recurse(
                 dp_pairs,
                 last + 1,
                 dppos,
-                new_iv,
+                new_iv1,
+                next_iv2,
                 seeds,
             );
         }
@@ -386,9 +426,14 @@ fn fm_code_to_base(c: usize) -> u8 {
 ///
 /// `strands`: when `top_only`/`bottom_only` are both false, both strands are
 /// considered (C `p7_STRAND_BOTH`).
+/// Faithful port of C `FM_getSeeds`: for each starting character it builds the
+/// forward-sweep and backward-sweep DP columns and runs both `FM_Recurse`
+/// sweeps, then merges. `fmf` is the BWT of the reversed block text (Rust
+/// `kind=0`); `fmb` is the BWT of the forward block text (Rust `kind=1`).
 #[allow(clippy::too_many_arguments)]
 pub fn fm_get_seeds(
-    fm: &FmIndex,
+    fmf: &FmIndex,
+    fmb: &FmIndex,
     alph: &FmAlphabet,
     scores: &SsvScores,
     consensus: &[usize],
@@ -401,25 +446,25 @@ pub fn fm_get_seeds(
     let mut seeds: Vec<FmDiag> = Vec::new();
 
     for c in 0..alph.alph_size {
-        // Root interval for character c (whole interval that ends in c after
-        // one backward step). The Rust FmIndex computes this via prepend on the
-        // root interval.
-        let Some(root_c) = fm.prepend_interval(fm.root_interval(), fm_code_to_base(c)) else {
+        let base = fm_code_to_base(c);
+        // Single-character interval. C inits all three intervals (f1, f2, bk)
+        // to `fmf->C[c]..fmf->C[c+1]-1`; the C[] arrays of fmf and fmb agree
+        // (same character multiset), so this value seeds both sweeps.
+        let Some(iv0) = fmf.char_interval(base) else {
             continue;
         };
 
-        // Build the initial DP column (compressed: positive-scoring entries
-        // only). C keeps four kinds; we keep forward-on-model and
-        // reverse-on-model entries (and complement variants) here.
-        let mut dp_pairs: Vec<FmDpPair> = Vec::new();
+        // C `dp_pairs_fwd` (forward sweep) and `dp_pairs_rev` (backward sweep).
+        let mut dp_fwd: Vec<FmDpPair> = Vec::new();
+        let mut dp_rev: Vec<FmDpPair> = Vec::new();
 
         for k in 1..=m {
             if !bottom_only {
                 let sc = scores.get(k, c);
                 if sc > 0.0 {
-                    // fwd on model
+                    // fwd-on-model -> forward sweep; rev-on-model -> backward sweep.
                     if k < m - 3 {
-                        dp_pairs.push(initial_pair(
+                        dp_fwd.push(initial_pair(
                             k,
                             sc,
                             c == consensus[k as usize],
@@ -427,9 +472,8 @@ pub fn fm_get_seeds(
                             ModelDirection::Forward,
                         ));
                     }
-                    // rev on model
                     if k > 4 {
-                        dp_pairs.push(initial_pair(
+                        dp_rev.push(initial_pair(
                             k,
                             sc,
                             c == consensus[k as usize],
@@ -443,8 +487,10 @@ pub fn fm_get_seeds(
                 let cc = alph.compl_alph[c];
                 let sc = scores.get(k, cc);
                 if sc > 0.0 {
+                    // complement rev-on-model -> forward sweep;
+                    // complement fwd-on-model -> backward sweep.
                     if k > 4 {
-                        dp_pairs.push(initial_pair(
+                        dp_fwd.push(initial_pair(
                             k,
                             sc,
                             c == consensus[k as usize],
@@ -453,7 +499,7 @@ pub fn fm_get_seeds(
                         ));
                     }
                     if k < m - 3 {
-                        dp_pairs.push(initial_pair(
+                        dp_rev.push(initial_pair(
                             k,
                             sc,
                             c == consensus[k as usize],
@@ -465,27 +511,49 @@ pub fn fm_get_seeds(
             }
         }
 
-        if dp_pairs.is_empty() {
-            continue;
+        if !dp_fwd.is_empty() {
+            let last = dp_fwd.len() - 1;
+            fm_recurse(
+                2,
+                fmf,
+                fmb,
+                FmDirection::Forward,
+                alph,
+                scores,
+                consensus,
+                sc_thresh_fm,
+                config,
+                &mut dp_fwd,
+                0,
+                last,
+                iv0,
+                None,
+                &mut seeds,
+            );
         }
-        let last = dp_pairs.len() - 1;
-        fm_recurse(
-            2,
-            fm,
-            alph,
-            scores,
-            consensus,
-            sc_thresh_fm,
-            config,
-            &mut dp_pairs,
-            0,
-            last,
-            root_c,
-            &mut seeds,
-        );
+        if !dp_rev.is_empty() {
+            let last = dp_rev.len() - 1;
+            fm_recurse(
+                2,
+                fmf,
+                fmb,
+                FmDirection::Backward,
+                alph,
+                scores,
+                consensus,
+                sc_thresh_fm,
+                config,
+                &mut dp_rev,
+                0,
+                last,
+                iv0,
+                Some(iv0),
+                &mut seeds,
+            );
+        }
     }
 
-    fm_merge_seeds(&mut seeds, fm.n as i64, m, config.ssv_length as i32);
+    fm_merge_seeds(&mut seeds, fmf.n as i64, m, config.ssv_length as i32);
     seeds
 }
 
@@ -795,7 +863,10 @@ mod tests {
         // Forward FM index in this codebase is built over the REVERSED text.
         let target_text = b"TTTTACGTACGTTTTT".to_vec();
         let reversed: Vec<u8> = target_text.iter().rev().copied().collect();
-        let fm = FmIndex::build(&reversed);
+        // fmf = BWT of reversed text (forward sweep); fmb = BWT of forward text
+        // (backward sweep), mirroring C's fmf/fmb pair.
+        let fmf = FmIndex::build(&reversed);
+        let fmb = FmIndex::build(&target_text);
 
         let config = FmSsvConfig {
             max_depth: 8,
@@ -808,7 +879,7 @@ mod tests {
         };
 
         // Threshold low enough that the consensus run is found.
-        let seeds = fm_get_seeds(&fm, &alph, &scores, &consensus, 6.0, &config, true, false);
+        let seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false);
 
         // There must be at least one forward (NoComplement) seed.
         assert!(
@@ -845,7 +916,10 @@ mod tests {
         // Target with no ACGT runs (all A then all T).
         let target_text = b"AAAAAAAATTTTTTTT".to_vec();
         let reversed: Vec<u8> = target_text.iter().rev().copied().collect();
-        let fm = FmIndex::build(&reversed);
+        // fmf = BWT of reversed text (forward sweep); fmb = BWT of forward text
+        // (backward sweep), mirroring C's fmf/fmb pair.
+        let fmf = FmIndex::build(&reversed);
+        let fmb = FmIndex::build(&target_text);
 
         let config = FmSsvConfig {
             max_depth: 8,
@@ -858,7 +932,7 @@ mod tests {
 
         // High threshold: with a -3 mismatch penalty no diagonal in this target
         // can reach +12 bits over 8 positions.
-        let seeds = fm_get_seeds(&fm, &alph, &scores, &consensus, 12.0, &config, true, false);
+        let seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 12.0, &config, true, false);
         assert!(
             seeds.is_empty(),
             "expected no seeds for absent consensus, got {seeds:?}"
@@ -875,7 +949,10 @@ mod tests {
 
         let target_text = b"GGACGTACGTACGG".to_vec();
         let reversed: Vec<u8> = target_text.iter().rev().copied().collect();
-        let fm = FmIndex::build(&reversed);
+        // fmf = BWT of reversed text (forward sweep); fmb = BWT of forward text
+        // (backward sweep), mirroring C's fmf/fmb pair.
+        let fmf = FmIndex::build(&reversed);
+        let fmb = FmIndex::build(&target_text);
 
         let config = FmSsvConfig {
             max_depth: 10,
@@ -887,7 +964,7 @@ mod tests {
             ..FmSsvConfig::default()
         };
 
-        let mut seeds = fm_get_seeds(&fm, &alph, &scores, &consensus, 6.0, &config, true, false);
+        let mut seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false);
         assert!(!seeds.is_empty());
 
         // Build a 1-indexed target in alphabet codes for forward extension.

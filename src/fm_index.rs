@@ -3,7 +3,87 @@
 
 use divsufsort::sort_in_place;
 
-/// A simple FM-index for DNA sequences.
+/// Superblock sampling interval for the cumulative occurrence counts (C
+/// `FM_METADATA.freq_cnt_sb`; makehmmerdb default 65536).
+const FREQ_CNT_SB: usize = 65536;
+/// Block sampling interval for the within-superblock occurrence counts (C
+/// `FM_METADATA.freq_cnt_b`; makehmmerdb default 256).
+const FREQ_CNT_B: usize = 256;
+
+/// Two-level sampled rank tables over the BWT, mirroring C `FM_DATA`'s
+/// `occCnts_sb` (u32 superblock cumulative) and `occCnts_b` (u16 within-superblock
+/// block cumulative). They make `Occ(c, pos)` O(`FREQ_CNT_B`) instead of O(pos).
+/// Counts are kept only for the symbols actually present in the BWT.
+#[derive(Debug)]
+struct OccRank {
+    /// Distinct BWT symbols, in byte order.
+    symbols: Vec<u8>,
+    /// byte -> index into `symbols`, or -1 if the byte never occurs.
+    sym_of: Vec<i16>,
+    /// `occ_sb[sb * n_sym + s]` = count of symbol `s` in `bwt[0 .. sb*FREQ_CNT_SB]`.
+    occ_sb: Vec<u32>,
+    /// `occ_b[b * n_sym + s]` = count of symbol `s` in `bwt[sb_start .. b*FREQ_CNT_B]`
+    /// where `sb_start` is the start of the superblock containing block `b`.
+    occ_b: Vec<u16>,
+}
+
+impl OccRank {
+    fn build(bwt: &[u8]) -> Self {
+        let mut present = [false; 256];
+        for &b in bwt {
+            present[b as usize] = true;
+        }
+        let mut sym_of = vec![-1i16; 256];
+        let mut symbols = Vec::new();
+        for (b, &p) in present.iter().enumerate() {
+            if p {
+                sym_of[b] = symbols.len() as i16;
+                symbols.push(b as u8);
+            }
+        }
+        let ns = symbols.len().max(1);
+        let nb = bwt.len() / FREQ_CNT_B + 1;
+        let nsb = bwt.len() / FREQ_CNT_SB + 1;
+        let mut occ_sb = vec![0u32; nsb * ns];
+        let mut occ_b = vec![0u16; nb * ns];
+        let mut running = vec![0u32; ns];
+        let mut sb_base = vec![0u32; ns];
+        for pos in 0..bwt.len() {
+            // Record samples for the count over bwt[0..pos] (exclusive of pos),
+            // matching the half-open Occ semantics used everywhere else.
+            if pos % FREQ_CNT_SB == 0 {
+                let sb = pos / FREQ_CNT_SB;
+                for s in 0..ns {
+                    occ_sb[sb * ns + s] = running[s];
+                    sb_base[s] = running[s];
+                }
+            }
+            if pos % FREQ_CNT_B == 0 {
+                let b = pos / FREQ_CNT_B;
+                for s in 0..ns {
+                    occ_b[b * ns + s] = (running[s] - sb_base[s]) as u16;
+                }
+            }
+            let s = sym_of[bwt[pos] as usize];
+            running[s as usize] += 1;
+        }
+        OccRank {
+            symbols,
+            sym_of,
+            occ_sb,
+            occ_b,
+        }
+    }
+
+    #[inline]
+    fn n_sym(&self) -> usize {
+        self.symbols.len().max(1)
+    }
+}
+
+/// A simple FM-index for DNA sequences. Field layout mirrors a reduced C
+/// `FM_DATA`: the BWT, sampled suffix array, cumulative `C[]` table, and the
+/// two-level sampled occurrence-count rank (`occ`, = C `occCnts_sb`/`occCnts_b`).
 #[derive(Debug)]
 pub struct FmIndex {
     /// Burrows-Wheeler transform
@@ -14,6 +94,8 @@ pub struct FmIndex {
     pub c: [usize; 256],
     /// Length of the indexed text
     pub n: usize,
+    /// Sampled rank tables (C `FM_DATA.occCnts_sb`/`occCnts_b`).
+    occ_rank: OccRank,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,11 +149,13 @@ impl FmIndex {
         }
 
         let orig_n = text.len();
+        let occ_rank = OccRank::build(&bwt);
         FmIndex {
             bwt,
             sa,
             c,
             n: orig_n,
+            occ_rank,
         }
     }
 
@@ -140,11 +224,13 @@ impl FmIndex {
             return Err("FM-index suffix-array entry is outside indexed text".to_string());
         }
 
+        let occ_rank = OccRank::build(&bwt);
         Ok(FmIndex {
             bwt,
             sa,
             c,
             n: text_len,
+            occ_rank,
         })
     }
 
@@ -210,11 +296,121 @@ impl FmIndex {
             .collect()
     }
 
-    /// Linear-scan implementation of the Occ(ch, pos) function: counts `ch`
-    /// in `bwt[0..pos]`. A real FM-index uses sampled rank tables; this
-    /// minimal port is O(pos) per call.
+    /// `Occ(ch, pos)`: counts `ch` in `bwt[0..pos]`, using the two-level sampled
+    /// rank tables (C `fm_getOccCount`): superblock cumulative + within-superblock
+    /// block cumulative + a short scan of the trailing partial block. O(`FREQ_CNT_B`).
     fn occ(&self, ch: u8, pos: usize) -> usize {
-        self.bwt[..pos].iter().filter(|&&b| b == ch).count()
+        let rank = &self.occ_rank;
+        let s = rank.sym_of[ch as usize];
+        if s < 0 {
+            return 0;
+        }
+        let s = s as usize;
+        let ns = rank.n_sym();
+        let sb = pos / FREQ_CNT_SB;
+        let b = pos / FREQ_CNT_B;
+        let mut cnt = rank.occ_sb[sb * ns + s] as usize + rank.occ_b[b * ns + s] as usize;
+        let block_start = b * FREQ_CNT_B;
+        for &x in &self.bwt[block_start..pos] {
+            if x == ch {
+                cnt += 1;
+            }
+        }
+        cnt
+    }
+
+    /// `OccLT(ch, pos)`: number of BWT symbols *strictly less than* `ch` in
+    /// `bwt[0..pos]` (the sentinel byte 0 and any smaller bases all count). This
+    /// is the second value C's `fm_getOccCountLT()` returns and is the quantity
+    /// the bi-directional forward interval update needs. Uses the same sampled
+    /// rank tables, summed over the present symbols `< ch`.
+    fn occ_lt(&self, ch: u8, pos: usize) -> usize {
+        let rank = &self.occ_rank;
+        let ns = rank.n_sym();
+        let sb = pos / FREQ_CNT_SB;
+        let b = pos / FREQ_CNT_B;
+        let mut cnt = 0usize;
+        for (s, &sym) in rank.symbols.iter().enumerate() {
+            if sym < ch {
+                cnt += rank.occ_sb[sb * ns + s] as usize + rank.occ_b[b * ns + s] as usize;
+            }
+        }
+        let block_start = b * FREQ_CNT_B;
+        for &x in &self.bwt[block_start..pos] {
+            if x < ch {
+                cnt += 1;
+            }
+        }
+        cnt
+    }
+
+    /// Total occurrences of `ch` across the whole BWT (= count of `ch` in the
+    /// indexed text). Used to seed a single-character interval.
+    fn occ_total(&self, ch: u8) -> usize {
+        self.occ(ch, self.bwt.len())
+    }
+
+    /// Half-open interval over the suffix array for a single character `ch`
+    /// (the starting point of a forward or backward search). Empty if `ch`
+    /// does not occur.
+    pub fn char_interval(&self, ch: u8) -> Option<FmInterval> {
+        if ch == 0 {
+            return None;
+        }
+        let lo = self.c[ch as usize];
+        let hi = lo + self.occ_total(ch);
+        (lo < hi).then_some(FmInterval { lo, hi })
+    }
+
+    /// Apply one *forward* (left-to-right) search step of the bi-directional
+    /// BWT, faithful port of C `fm_updateIntervalForward()` (Algorithm 4 of
+    /// Simpson 2010, `hmmer/src/fm_general.c`).
+    ///
+    /// Maintains the synchronized pair of intervals over a single index:
+    /// `bk` is the SA-range of `reverse(W)` (the mirror, updated by a normal
+    /// backward-search step) and `fwd` is the SA-range of the forward pattern
+    /// `W` itself (updated via the `OccLT` offset). Appending `ch` to the
+    /// pattern (`W -> W·ch`) returns the new `(bk, fwd)` pair, where `fwd` is
+    /// directly locatable via [`locate_interval`]. Returns `None` when the
+    /// extended pattern does not occur.
+    ///
+    /// C uses inclusive `[lower, upper]` ranges; this port uses the crate's
+    /// half-open `[lo, hi)` convention throughout (verified in the unit tests
+    /// against a brute-force forward search).
+    pub fn update_interval_forward(
+        &self,
+        bk: FmInterval,
+        fwd: FmInterval,
+        ch: u8,
+    ) -> Option<(FmInterval, FmInterval)> {
+        if ch == 0 || bk.is_empty() || bk.hi > self.bwt.len() {
+            return None;
+        }
+        let occ_lo = self.occ(ch, bk.lo);
+        let occ_hi = self.occ(ch, bk.hi);
+        // New mirror (backward) interval: normal backward-search step on `ch`.
+        let new_bk_lo = self.c[ch as usize] + occ_lo;
+        let new_bk_hi = self.c[ch as usize] + occ_hi;
+        if new_bk_lo >= new_bk_hi {
+            return None;
+        }
+        // New forward interval: shift `fwd.lo` by the number of suffixes in the
+        // current mirror range that carry a symbol strictly smaller than `ch`,
+        // then take the same size as the new mirror range.
+        let occ_lt_lo = self.occ_lt(ch, bk.lo);
+        let occ_lt_hi = self.occ_lt(ch, bk.hi);
+        let new_fwd_lo = fwd.lo + (occ_lt_hi - occ_lt_lo);
+        let new_fwd_hi = new_fwd_lo + (new_bk_hi - new_bk_lo);
+        Some((
+            FmInterval {
+                lo: new_bk_lo,
+                hi: new_bk_hi,
+            },
+            FmInterval {
+                lo: new_fwd_lo,
+                hi: new_fwd_hi,
+            },
+        ))
     }
 }
 
@@ -297,5 +493,61 @@ mod tests {
 
         assert_eq!(interval.len(), 2);
         assert!(fm.prepend_interval(interval, b'G').is_none());
+    }
+
+    /// Forward (left-to-right) bi-directional search must locate the same text
+    /// positions as the backward-search `locate()`, for several patterns and a
+    /// pattern that is absent. This validates the half-open port of C's
+    /// `fm_updateIntervalForward` against a brute-force oracle.
+    ///
+    /// Mirrors C's two-index setup: the interval math runs on the backward
+    /// index `fmb` (BWT of the reversed text), while the synchronized forward
+    /// interval is located on the forward index `fmf` (BWT of the text). See
+    /// `fm_getSARangeForward` (`fm_general.c`).
+    #[test]
+    fn fm_index_forward_search_matches_locate() {
+        let text = b"ACGTACGTTTACGGTACAACGTAC";
+        let fmf = FmIndex::build(text);
+        let rev: Vec<u8> = text.iter().rev().copied().collect();
+        let fmb = FmIndex::build(&rev);
+
+        let forward_locate = |pattern: &[u8]| -> Option<Vec<usize>> {
+            let (&first, rest) = pattern.split_first().unwrap();
+            // Single-char start: C[c]..C[c]+occ_total are identical on fmf/fmb
+            // (same character multiset), so init both intervals there.
+            let mut bk = fmb.char_interval(first)?;
+            let mut fwd = bk;
+            for &ch in rest {
+                let (nb, nf) = fmb.update_interval_forward(bk, fwd, ch)?;
+                bk = nb;
+                fwd = nf;
+            }
+            // The forward interval lives in fmf's coordinate space.
+            let mut pos = fmf.locate_interval(fwd);
+            pos.sort();
+            Some(pos)
+        };
+
+        for pattern in [
+            &b"ACGT"[..],
+            &b"ACG"[..],
+            &b"TAC"[..],
+            &b"AACGTAC"[..],
+            &b"A"[..],
+            &b"GGTA"[..],
+        ] {
+            let mut expected = fmf.locate(pattern);
+            expected.sort();
+            assert_eq!(
+                forward_locate(pattern),
+                Some(expected),
+                "forward search disagrees with locate() for {:?}",
+                std::str::from_utf8(pattern).unwrap()
+            );
+        }
+
+        // Absent pattern: forward search must terminate with no interval.
+        assert_eq!(forward_locate(b"ACGTACGTACGTAC"), None);
+        assert!(fmf.locate(b"ACGTACGTACGTAC").is_empty());
     }
 }
