@@ -144,7 +144,7 @@ struct Args {
     // space-separated form C/Easel uses (e.g. `-T -20`); clap otherwise treats
     // `-20` as flags. The `-T=-20` form also still works.
     #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
-    score_threshold: Option<f32>,
+    score_threshold: Option<f64>,
 
     /// Include sequences <= this E-value threshold
     #[arg(
@@ -157,7 +157,7 @@ struct Args {
 
     /// Include sequences >= this score threshold
     #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
-    inc_t: Option<f32>,
+    inc_t: Option<f64>,
 
     // --- Model-specific cutoffs ---
     /// Use model's GA gathering cutoffs to set all thresholding
@@ -255,7 +255,7 @@ struct Args {
 
     /// Retained for C command-line compatibility; not used by nhmmer output
     #[arg(long = "domT", conflicts_with = "dom_e", hide = true, allow_hyphen_values = true)]
-    dom_t: Option<f32>,
+    dom_t: Option<f64>,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
     #[arg(long = "incdomE", default_value = "0.01", value_parser = parse_positive_f64, conflicts_with = "inc_dom_t", hide = true)]
@@ -263,7 +263,7 @@ struct Args {
 
     /// Retained for C command-line compatibility; not used by nhmmer output
     #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true, allow_hyphen_values = true)]
-    inc_dom_t: Option<f32>,
+    inc_dom_t: Option<f64>,
 
     /// Set RNG seed (0: one-time arbitrary seed)
     #[arg(long = "seed", default_value = "42")]
@@ -1707,6 +1707,25 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     // for minus-strand hits, iali/jali and ienv/jenv are
                     // emitted in reverse order (iali > jali) so the `strand`
                     // column can be derived as iali < jali ? '+' : '-'.
+                    //
+                    // LOW-2 (audit 02-nhmmer-longtarget): C folds the strand
+                    // flip, `seq_start`, and `window_start` into one expression
+                    //   iali = seq_start - (window_start + iali) + 2
+                    // inside p7_pli_postViterbi_LongTarget (p7_pipeline.c:1445).
+                    // The Rust driver instead reverse-complements the target up
+                    // front, applies the window->sequence offset inside
+                    // `search_longtarget` (`+= win_start - 1`), then does the
+                    // whole-sequence `sq.n - x + 1` flip here. These are
+                    // algebraically identical to C precisely when
+                    // `seq_start == sq.start == 1`, which is ALWAYS true for the
+                    // Rust driver: it reads whole sequences (no blocked
+                    // `esl_sqio_ReadWindow` streaming — see LOW-3 below), so
+                    // `seq_start` never differs from 1. Verified bit-identical
+                    // to C on MADE1/3box and on multi-segment FM DBs, both
+                    // strands. Adopting C's single expression here would change
+                    // nothing observable (seq_start is constant 1) while risking
+                    // the currently-green crick coordinate parity, so the
+                    // verified-equivalent two-step form is kept deliberately.
                     for hit in &mut rc_hits {
                         for dom in &mut hit.dcl {
                             // Both forward coords; ali higher first, lower second.
@@ -8191,10 +8210,10 @@ pub(crate) struct NhmmerThresholdConfig {
     dom_e_value_threshold: f64,
     inc_e: f64,
     inc_dome: f64,
-    t: Option<f32>,
-    dom_t: Option<f32>,
-    inc_t: Option<f32>,
-    inc_dom_t: Option<f32>,
+    t: Option<f64>,
+    dom_t: Option<f64>,
+    inc_t: Option<f64>,
+    inc_dom_t: Option<f64>,
 }
 
 impl NhmmerThresholdConfig {
@@ -8293,6 +8312,13 @@ fn search_longtarget(
                 score: 0.0,
                 target_len: sq.n,
                 complement: is_complement,
+                // Per-segment FM path: each searched `sq` IS one FM segment, so
+                // id is constant within this call and windows are already in
+                // segment-local (RC-local for crick) coordinates. id=0 (single
+                // segment per call) and fm_n=-1 (no concatenated-FM frame, so
+                // no complement extension flip — see HmmWindow docs).
+                id: 0,
+                fm_n: -1,
             })
             .collect()
     } else {
@@ -8512,6 +8538,8 @@ fn search_longtarget(
                     score: w.score,
                     target_len: sq.n,
                     complement: is_complement,
+                    id: 0,
+                    fm_n: -1,
                 });
             }
         }
@@ -8527,42 +8555,11 @@ fn search_longtarget(
     // p7_pli_postSSV_LongTarget (p7_pipeline.c:1620-1634). If a merged window
     // is longer than 80000 residues, split it into overlapping sub-windows of
     // length at most 80000 with overlap = min(40000, max_length).
+    // LOW-1: split via the faithful do/while port (see
+    // ssv_longtarget::split_long_windows; mirrors p7_pipeline.c:1620-1634).
     const MAX_WINDOW_LEN: usize = 80000;
     let overlap_len = 40000_usize.min(ml);
-    let mut split_windows: Vec<ssv_longtarget::HmmWindow> = Vec::new();
-    for w in &windows {
-        if w.length <= MAX_WINDOW_LEN {
-            split_windows.push(w.clone());
-            continue;
-        }
-        // Trim current window to MAX_WINDOW_LEN, then emit tail windows.
-        let mut head = w.clone();
-        head.length = MAX_WINDOW_LEN;
-        split_windows.push(head);
-        let mut new_n = w.n;
-        let mut new_len = w.length;
-        loop {
-            let shift = MAX_WINDOW_LEN - overlap_len;
-            new_n += shift;
-            new_len = new_len.saturating_sub(shift);
-            if new_len == 0 {
-                break;
-            }
-            let chunk = new_len.min(MAX_WINDOW_LEN);
-            split_windows.push(ssv_longtarget::HmmWindow {
-                n: new_n,
-                k: 0,
-                length: chunk,
-                score: 0.0,
-                target_len: w.target_len,
-                complement: w.complement,
-            });
-            if new_len <= MAX_WINDOW_LEN {
-                break;
-            }
-        }
-    }
-    windows = split_windows;
+    windows = ssv_longtarget::split_long_windows(&windows, MAX_WINDOW_LEN, overlap_len);
 
     // Phase 2: Run full pipeline on each window
     let mut all_hits = Vec::new();
@@ -8680,7 +8677,10 @@ fn longtarget_domain_hit(
     threshold_config: NhmmerThresholdConfig,
 ) -> hmmer_pure_rs::tophits::Hit {
     let score = dom.bitscore;
-    let bias = dom.dombias.max(0.0);
+    // C prints the raw (occasionally negative) bias correction in
+    // tblout/domtblout and the human tables (p7_tophits.c:1664, unclamped);
+    // do not clamp to 0.0. Matches the pipeline.rs / domaindef.rs unclamping.
+    let bias = dom.dombias;
     let mut flags = src_hit.flags;
     let mut nreported = 1;
     let mut nincluded = 1;
@@ -8690,11 +8690,11 @@ fn longtarget_domain_hit(
             | hmmer_pure_rs::tophits::P7_IS_DROPPED);
         let target_reported = threshold_config
             .t
-            .map(|threshold| score >= threshold)
+            .map(|threshold| score as f64 >= threshold)
             .unwrap_or(src_hit.flags & hmmer_pure_rs::tophits::P7_IS_REPORTED != 0);
         let target_included = threshold_config
             .inc_t
-            .map(|threshold| score >= threshold)
+            .map(|threshold| score as f64 >= threshold)
             .unwrap_or(src_hit.flags & hmmer_pure_rs::tophits::P7_IS_INCLUDED != 0);
         let reported = dom.is_reported && target_reported;
         let included = dom.is_included && reported && target_included;

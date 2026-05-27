@@ -51,7 +51,7 @@ struct Args {
 
     /// Report sequences >= this score threshold
     #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
-    score_threshold: Option<f32>,
+    score_threshold: Option<f64>,
 
     /// Report domains <= this E-value threshold
     #[arg(
@@ -64,7 +64,7 @@ struct Args {
 
     /// Report domains >= this score threshold
     #[arg(long = "domT", conflicts_with = "dom_e", allow_hyphen_values = true)]
-    dom_t: Option<f32>,
+    dom_t: Option<f64>,
 
     /// Include sequences <= this E-value threshold
     #[arg(
@@ -77,7 +77,7 @@ struct Args {
 
     /// Include sequences >= this score threshold
     #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
-    inc_t: Option<f32>,
+    inc_t: Option<f64>,
 
     /// Include domains <= this E-value threshold
     #[arg(
@@ -90,7 +90,7 @@ struct Args {
 
     /// Include domains >= this score threshold
     #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
-    inc_dom_t: Option<f32>,
+    inc_dom_t: Option<f64>,
 
     /// Hidden C-compatible model gathering cutoff flag
     #[arg(

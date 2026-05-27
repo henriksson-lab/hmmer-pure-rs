@@ -719,6 +719,91 @@ fn hmmsearch_parallel_workers_honor_sequence_reporting_thresholds() {
     }
 }
 
+/// Regression for the "bias columns clamp small negatives to 0.0" audit finding.
+/// C HMMER prints the raw per-domain bias correction
+/// (`dcl[d].dombias * eslCONST_LOG2R`, p7_tophits.c:1664) unclamped, which can be
+/// slightly negative. `RVT_1_pfam.hmm --max` vs `human_swissprot_2k.fasta` produces
+/// several negative domain-bias values; the Rust port must reproduce them byte-for-byte
+/// rather than flooring at 0.0. Guards against re-introducing a `.max(0.0)` clamp on the
+/// bias fed to the domtblout writer.
+#[test]
+fn hmmsearch_domtblout_preserves_negative_domain_bias_like_c() {
+    let hmm = format!("{}/test_data/RVT_1_pfam.hmm", project_root());
+    let db = format!("{}/test_data/human_swissprot_2k.fasta", project_root());
+    if !std::path::Path::new(&hmm).exists() || !std::path::Path::new(&db).exists() {
+        eprintln!("skipping: fixtures not present");
+        return;
+    }
+
+    let rust_dt = std::env::temp_dir().join("rust_neg_bias_domtbl.txt");
+    let rust = Command::new(hmmer())
+        .args(["hmmsearch", "--max"])
+        .arg("--domtblout")
+        .arg(&rust_dt)
+        .args(["-o", "/dev/null"])
+        .args([&hmm, &db])
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    let stdout = std::fs::read_to_string(&rust_dt).unwrap();
+
+    // Collect (target, dom-bias) pairs for negative-bias domains. domtblout column 14
+    // (1-based) — index 13 (0-based) — is the per-domain bias correction in bits.
+    let neg: Vec<(String, String)> = stdout
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() > 13 && f[13].parse::<f32>().map(|v| v < 0.0).unwrap_or(false) {
+                Some((f[0].to_string(), f[13].to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // These are the values C HMMER 3.4 emits on this fixture (verified against
+    // `hmmer/src/hmmsearch`); they are genuinely negative, not clamped to 0.0.
+    assert!(
+        neg.iter().any(|(t, b)| t.contains("ZF69B_HUMAN") && b == "-1.3"),
+        "expected ZF69B_HUMAN dom-bias -1.3, got {neg:?}"
+    );
+    assert!(
+        neg.iter().any(|(t, b)| t.contains("DYN1_HUMAN") && b == "-2.6"),
+        "expected DYN1_HUMAN dom-bias -2.6, got {neg:?}"
+    );
+    assert!(
+        neg.iter().any(|(t, b)| t.contains("CACO1_HUMAN") && b == "-3.0"),
+        "expected CACO1_HUMAN dom-bias -3.0, got {neg:?}"
+    );
+
+    // If the C binary is available, require byte-identical domtblout data rows so this
+    // doubles as a true parity check (not merely a snapshot of hard-coded values).
+    let c_bin = format!("{}/hmmer/src/hmmsearch", project_root());
+    if std::path::Path::new(&c_bin).exists() {
+        let c_dt = std::env::temp_dir().join("c_neg_bias_domtbl.txt");
+        let c = Command::new(&c_bin)
+            .args(["--max"])
+            .arg("--domtblout")
+            .arg(&c_dt)
+            .args(["-o", "/dev/null"])
+            .args([&hmm, &db])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+        let c_out = std::fs::read_to_string(&c_dt).unwrap();
+        let mut c_rows: Vec<&str> = c_out.lines().filter(|l| !l.starts_with('#')).collect();
+        let mut r_rows: Vec<&str> = stdout.lines().filter(|l| !l.starts_with('#')).collect();
+        c_rows.sort_unstable();
+        r_rows.sort_unstable();
+        assert_eq!(c_rows, r_rows, "domtblout data rows must match C exactly");
+    }
+}
+
 #[test]
 fn search_commands_accept_sequence_stdin() {
     let seq = std::fs::read("hmmer/tutorial/7LESS_DROME").unwrap();
@@ -5728,6 +5813,33 @@ fn hmmsim_is_deterministic_and_supports_c_scoring_option_names() {
             .count(),
         3
     );
+}
+
+#[test]
+fn hmmsim_accepts_negative_seed_like_c() {
+    // C hmmsim.c declares --seed as eslARG_INT with NO range, so a negative seed
+    // is accepted (the C binary exits 0). Match that: the run must succeed.
+    let output = Command::new(hmmer())
+        .args([
+            "sim",
+            "-N",
+            "2",
+            "-L",
+            "10",
+            "--seed",
+            "-5",
+            "--vit",
+            "hmmer/tutorial/fn3.hmm",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "negative --seed should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("# hmmsim: 2 random sequences of length 10 against fn3"));
 }
 
 #[test]

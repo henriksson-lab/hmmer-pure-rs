@@ -2030,6 +2030,110 @@ fn test_nhmmer_fmindex_3box_filter_residue_counters_match_c() {
     assert_fm_counters_match_c("hmmer/testsuite/3box.hmm", "hmmer/testsuite/3box-alitest.fa");
 }
 
+// MED-2 regression: a MULTI-SEGMENT FM database. The single-segment fixtures
+// (made1/3box/ecori) map to one FM segment, so they never exercise the
+// `id` merge guard, the p7_COMPLEMENT extension flip, or the cross-segment
+// coordinate transform that MED-2/LOW-2 touch. This test builds an FM DB from
+// a DNA FASTA split into many separate records (segments) and asserts the Rust
+// and bundled-C nhmmer hit sets (target name + ali coords + strand) match
+// across segments on BOTH strands, at default and low reporting thresholds.
+fn write_multi_segment_dna_fasta(path: &std::path::Path, source_rel: &str, seg_len: usize) {
+    let src = std::fs::read_to_string(test_path(source_rel)).unwrap();
+    let mut seq = String::new();
+    for line in src.lines() {
+        if !line.starts_with('>') {
+            seq.push_str(line.trim());
+        }
+    }
+    let mut out = String::new();
+    let mut k = 0;
+    let mut i = 0;
+    while i < seq.len() {
+        let end = (i + seg_len).min(seq.len());
+        out.push_str(&format!(">seg{k}\n"));
+        let chunk = &seq[i..end];
+        for j in (0..chunk.len()).step_by(60) {
+            let line_end = (j + 60).min(chunk.len());
+            out.push_str(&chunk[j..line_end]);
+            out.push('\n');
+        }
+        i = end;
+        k += 1;
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+fn assert_multi_segment_fm_parity(hmm_rel: &str, source_rel: &str, seg_len: usize, extra: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("multi.fa");
+    write_multi_segment_dna_fasta(&fasta, source_rel, seg_len);
+
+    // makehmmerdb on the multi-segment FASTA (multiple FM segments).
+    let db = dir.path().join("multi.hmmerdb");
+    let out = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--dna",
+            fasta.to_str().unwrap(),
+            db.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run makehmmerdb");
+    assert!(
+        out.status.success(),
+        "makehmmerdb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let db = db.to_str().unwrap();
+    let hmm = test_path(hmm_rel);
+
+    let mut args = vec!["--cpu", "1", "--noali"];
+    args.extend_from_slice(extra);
+    let (_stdout, rust_tbl) = run_nhmmer(&hmm, db, &args);
+    let c_tbl = run_c_nhmmer_tblout_with_args(&hmm, db, &args);
+    let rust_keys = fm_hit_keys(&parse_nhmmer_rows(&rust_tbl));
+    let c_keys = fm_hit_keys(&parse_nhmmer_rows(&c_tbl));
+    assert_eq!(
+        rust_keys, c_keys,
+        "multi-segment FM nhmmer hit set diverged from C for {hmm_rel} (seg_len {seg_len}, {extra:?})\n\
+         Rust ({} hits): {rust_keys:?}\nC ({} hits): {c_keys:?}",
+        rust_keys.len(),
+        c_keys.len()
+    );
+    // The multi-segment DB must actually span more than one segment of hits to
+    // be a meaningful exercise of the cross-segment paths.
+    let distinct_segments: std::collections::BTreeSet<_> =
+        c_keys.iter().map(|(name, _, _, _)| name.clone()).collect();
+    assert!(
+        distinct_segments.len() >= 2,
+        "expected hits across >=2 FM segments to exercise MED-2; got {distinct_segments:?}"
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_multi_segment_matches_c_hit_set() {
+    // 4 segments (~82.5kb each) from the tutorial DNA target. MADE1 hits land in
+    // multiple segments on both strands.
+    assert_multi_segment_fm_parity(
+        "hmmer/tutorial/MADE1.hmm",
+        "hmmer/tutorial/dna_target.fa",
+        82500,
+        &[],
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_multi_segment_low_threshold_matches_c() {
+    // Many small segments + low threshold: stresses the id merge guard and the
+    // complement extension/coordinate paths near segment boundaries.
+    assert_multi_segment_fm_parity(
+        "hmmer/tutorial/MADE1.hmm",
+        "hmmer/tutorial/dna_target.fa",
+        10000,
+        &["-T", "0"],
+    );
+}
+
 #[test]
 fn test_nhmmer_accepts_space_separated_negative_threshold() {
     // C/Easel accepts `-T -20` (space-separated negative bit score); Rust's clap

@@ -496,14 +496,16 @@ fn write_annotation<W: std::io::Write>(
 ) -> HmmerResult<()> {
     let len = m + 2;
     if let Some(d) = data {
-        if d.len() >= len {
-            w.write_all(&d[..len]).map_err(HmmerError::Io)?;
-        } else {
-            w.write_all(d).map_err(HmmerError::Io)?;
-            for _ in d.len()..len {
-                w.write_all(&[0u8]).map_err(HmmerError::Io)?;
-            }
-        }
+        // C keeps these arrays as: index 0 = ' ', 1..M = data, M+1 = '\0'
+        // (see p7_hmmfile.c read_asc30hmm / read_bin30hmm, ~lines 1560-1562),
+        // and p7_hmmfile_WriteBinary dumps the full m+2 bytes verbatim. Our
+        // reader leaves index M+1 as a space, so force the trailing byte to a
+        // NUL terminator here to match C's binary output byte-for-byte.
+        let mut buf = vec![0u8; len];
+        let n = d.len().min(len);
+        buf[..n].copy_from_slice(&d[..n]);
+        buf[len - 1] = 0;
+        w.write_all(&buf).map_err(HmmerError::Io)?;
     } else {
         let mut empty = vec![b' '; len];
         empty[len - 1] = 0;
@@ -681,6 +683,49 @@ mod tests {
                     "mat[{}][{}] mismatch",
                     node,
                     x
+                );
+            }
+        }
+    }
+
+    /// Regression: the Rust binary writer must be byte-for-byte identical to
+    /// C `hmmconvert -b`. A prior bug wrote a trailing space (0x20) instead of
+    /// the NUL terminator at index M+1 of the per-node annotation arrays
+    /// (rf/mm/cons/cs/ca), diverging by one byte just before the
+    /// comlog/nseq/ctime region. C keeps array[M+1] == '\0' (p7_hmmfile.c:1560-1562)
+    /// and dumps the full M+2 bytes verbatim (p7_hmmfile.c:1037-1041).
+    #[test]
+    fn binary_write_matches_c_hmmconvert_byte_for_byte() {
+        // Exercise models with CONS/CS/RF/MAP/COMPO and ctime/comlog/nseq fields.
+        for rel in [
+            "test_data/Pkinase_pfam.hmm", // CONS annotation, exposed the trailing-NUL bug
+            "hmmer/tutorial/fn3.hmm",     // CS + MAP + DATE + NSEQ + EFFN
+            "hmmer/tutorial/MADE1.hmm",   // DNA, RF + CONS + max_length (3/c+)
+        ] {
+            let text_path = test_path(rel);
+            if !text_path.exists() {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let c_h3m = std::fs::read(c_binary_hmm_from_text(&text_path, &dir)).unwrap();
+
+            let hmms = crate::hmmfile::read_hmm_file(&text_path).unwrap();
+            let mut rust_h3m = Vec::new();
+            for hmm in &hmms {
+                write_binary_hmm(&mut rust_h3m, hmm).unwrap();
+            }
+
+            assert_eq!(
+                rust_h3m.len(),
+                c_h3m.len(),
+                "{rel}: length differs (rust {} vs C {})",
+                rust_h3m.len(),
+                c_h3m.len()
+            );
+            if let Some(off) = rust_h3m.iter().zip(&c_h3m).position(|(a, b)| a != b) {
+                panic!(
+                    "{rel}: first byte divergence at offset {off}: rust=0x{:02x} c=0x{:02x}",
+                    rust_h3m[off], c_h3m[off]
                 );
             }
         }

@@ -208,10 +208,10 @@ pub struct Pipeline {
     pub inc_dome: f64,              // domain inclusion E-value (default 0.01)
 
     // Reporting thresholds (score based, set by -T/--domT/--incT/--incdomT or --cut_*)
-    pub t: Option<f32>,         // per-sequence score threshold
-    pub dom_t: Option<f32>,     // per-domain score threshold
-    pub inc_t: Option<f32>,     // inclusion score threshold
-    pub inc_dom_t: Option<f32>, // domain inclusion score threshold
+    pub t: Option<f64>,         // per-sequence score threshold
+    pub dom_t: Option<f64>,     // per-domain score threshold
+    pub inc_t: Option<f64>,     // inclusion score threshold
+    pub inc_dom_t: Option<f64>, // domain inclusion score threshold
 
     // Whether to use E-value or score thresholds
     pub by_e: bool,        // report by E-value (default true)
@@ -334,7 +334,7 @@ impl Pipeline {
                 c_exp_f64(lnp) * self.current_target_z() <= self.e_value_threshold
             }
         } else if let Some(t) = self.t {
-            score >= t
+            score as f64 >= t
         } else {
             c_exp_f64(lnp) * self.current_target_z() <= self.e_value_threshold
         }
@@ -348,7 +348,7 @@ impl Pipeline {
                 c_exp_f64(lnp) * self.current_target_z() <= self.inc_e
             }
         } else if let Some(t) = self.inc_t {
-            score >= t
+            score as f64 >= t
         } else {
             c_exp_f64(lnp) * self.current_target_z() <= self.inc_e
         }
@@ -374,28 +374,28 @@ impl Pipeline {
                 if cutoffs[P7_GA1] == CUTOFF_UNSET || cutoffs[P7_GA2] == CUTOFF_UNSET {
                     return Err("GA cutoff not set in model".to_string());
                 }
-                self.t = Some(cutoffs[P7_GA1]);
-                self.inc_t = Some(cutoffs[P7_GA1]);
-                self.dom_t = Some(cutoffs[P7_GA2]);
-                self.inc_dom_t = Some(cutoffs[P7_GA2]);
+                self.t = Some(cutoffs[P7_GA1] as f64);
+                self.inc_t = Some(cutoffs[P7_GA1] as f64);
+                self.dom_t = Some(cutoffs[P7_GA2] as f64);
+                self.inc_dom_t = Some(cutoffs[P7_GA2] as f64);
             }
             BitCutoff::TC => {
                 if cutoffs[P7_TC1] == CUTOFF_UNSET || cutoffs[P7_TC2] == CUTOFF_UNSET {
                     return Err("TC cutoff not set in model".to_string());
                 }
-                self.t = Some(cutoffs[P7_TC1]);
-                self.inc_t = Some(cutoffs[P7_TC1]);
-                self.dom_t = Some(cutoffs[P7_TC2]);
-                self.inc_dom_t = Some(cutoffs[P7_TC2]);
+                self.t = Some(cutoffs[P7_TC1] as f64);
+                self.inc_t = Some(cutoffs[P7_TC1] as f64);
+                self.dom_t = Some(cutoffs[P7_TC2] as f64);
+                self.inc_dom_t = Some(cutoffs[P7_TC2] as f64);
             }
             BitCutoff::NC => {
                 if cutoffs[P7_NC1] == CUTOFF_UNSET || cutoffs[P7_NC2] == CUTOFF_UNSET {
                     return Err("NC cutoff not set in model".to_string());
                 }
-                self.t = Some(cutoffs[P7_NC1]);
-                self.inc_t = Some(cutoffs[P7_NC1]);
-                self.dom_t = Some(cutoffs[P7_NC2]);
-                self.inc_dom_t = Some(cutoffs[P7_NC2]);
+                self.t = Some(cutoffs[P7_NC1] as f64);
+                self.inc_t = Some(cutoffs[P7_NC1] as f64);
+                self.dom_t = Some(cutoffs[P7_NC2] as f64);
+                self.inc_dom_t = Some(cutoffs[P7_NC2] as f64);
             }
             BitCutoff::None => {}
         }
@@ -860,8 +860,11 @@ impl Pipeline {
                 .min_by(|a, b| a.lnp.total_cmp(&b.lnp))
                 .expect("long_target hit must have at least one domain");
             let best_bitscore = best.bitscore;
-            // dom.dombias is already in bits (see domaindef.rs).
-            let best_bias = best.dombias.max(0.0);
+            // dom.dombias is already in bits (see domaindef.rs). C does not clamp
+            // the long-target bias (p7_pipeline.c:1455 stores dom_bias raw and
+            // p7_tophits.c:1664 prints dcl[0].dombias * eslCONST_LOG2R unclamped),
+            // so keep the raw (possibly slightly negative) value to match C.
+            let best_bias = best.dombias;
             let pre = best_bitscore + best_bias;
             let pre_lnp_lt = stats::exponential::logsurv(pre as f64, mu_f, lam_f);
             (best_bitscore, pre, best_bias, best.lnp, pre_lnp_lt)
@@ -910,7 +913,7 @@ impl Pipeline {
             let target_reported = if self.by_e {
                 (self.z.max(1.0)) * c_exp_f64(hit.lnp) <= self.e_value_threshold
             } else if let Some(t) = self.t {
-                hit.score >= t
+                hit.score as f64 >= t
             } else {
                 (self.z.max(1.0)) * c_exp_f64(hit.lnp) <= self.e_value_threshold
             };
@@ -925,7 +928,7 @@ impl Pipeline {
                 let dom_reported = if self.dom_by_e {
                     (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.dom_e_value_threshold
                 } else if let Some(t) = self.dom_t {
-                    dom.bitscore >= t
+                    dom.bitscore as f64 >= t
                 } else {
                     (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.dom_e_value_threshold
                 };
@@ -934,7 +937,7 @@ impl Pipeline {
                     let dom_included = if self.incdom_by_e {
                         (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.inc_dome
                     } else if let Some(t) = self.inc_dom_t {
-                        dom.bitscore >= t
+                        dom.bitscore as f64 >= t
                     } else {
                         (self.domz.max(1.0)) * c_exp_f64(dom.lnp) <= self.inc_dome
                     };

@@ -29,6 +29,37 @@ pub struct HmmWindow {
     pub target_len: usize,
     /// Whether this is the complement strand
     pub complement: bool,
+    /// FM segment id (C `P7_HMM_WINDOW.id`): the database-sequence id of the
+    /// segment this window's diagonal hit. Used as a merge guard so windows
+    /// from different FM segments on the same strand are never merged
+    /// (C `p7_pipeline.c:506`). Defaults to 0 for the FASTA / single-segment
+    /// path where there is exactly one segment per searched sequence.
+    pub id: i32,
+    /// Position in the concatenated FM-index sequence at which the diagonal
+    /// starts (C `P7_HMM_WINDOW.fm_n`). Carried through extend+merge so the
+    /// FM segment-boundary trim pass (C `p7_pipeline.c:1812-1849`) can map a
+    /// window back to its original FM segment, and doubling as the sentinel
+    /// for whether this window lives in the forward concatenated-FM frame
+    /// (see `needs_complement_extension_flip`). The Rust FASTA / per-segment-FM
+    /// driver sets `fm_n = -1` ("RC-local frame, no flip"); a future faithful
+    /// concatenated-FM path would set `fm_n >= 0`.
+    pub fm_n: i64,
+}
+
+impl HmmWindow {
+    /// Returns whether this window is on the complement strand in the **forward
+    /// concatenated-FM coordinate frame** — i.e. whether C's `p7_COMPLEMENT`
+    /// extension flip (`p7_pipeline.c:470-481`) should be applied during
+    /// extension. The Rust FASTA / per-segment-FM driver reverse-complements
+    /// the target up front and produces complement windows already in a
+    /// forward-style RC-local frame, where the non-complement extension formula
+    /// is the correct one; in that frame `fm_n < 0` is used as the sentinel for
+    /// "not in the concatenated-FM frame". A window built directly in the
+    /// concatenated forward FM frame (a future faithful FM path) would set
+    /// `fm_n >= 0` and `complement = true`, triggering the flip.
+    fn needs_complement_extension_flip(&self) -> bool {
+        self.complement && self.fm_n >= 0
+    }
 }
 
 /// Extract SSV emission scores from the oprofile into a flat array.
@@ -313,6 +344,10 @@ pub unsafe fn ssv_filter_longtarget(
                 score: ret_sc,
                 target_len: l,
                 complement: false,
+                // FASTA SSV scan: single-segment, RC-local frame. id=0 (one
+                // segment), fm_n=-1 (no concatenated-FM frame -> no flip).
+                id: 0,
+                fm_n: -1,
             });
 
             // Skip forward past the hit
@@ -517,23 +552,52 @@ pub fn extend_and_merge_windows_with_scoredata(
             .min(prefix_lengths.len().saturating_sub(1));
         let pre_ext_f = ml * (base_frac + prefix_lengths[prefix_k] as f64);
         let suf_ext_f = ml * (base_frac + suffix_lengths[k] as f64);
-        // Match C: (int64_t)(n - double), (int64_t)(n + length + double) with
-        // truncation toward zero.
-        let start_f = (w.n as i64) as f64 - pre_ext_f;
-        let start = if start_f < 1.0 {
-            1
+
+        let (window_start, window_end): (i64, i64);
+        let tlen = w.target_len.max(target_len) as i64;
+        if w.needs_complement_extension_flip() {
+            // Port of C p7_pli_ExtendAndMergeWindows complement branch
+            // (hmmer/src/p7_pipeline.c:470-481): flip n into target-relative
+            // coordinates, extend with prefix/suffix SWAPPED, then flip the
+            // bounds back. This is only used for windows in the forward
+            // concatenated-FM frame (fm_n >= 0); the per-segment RC-local Rust
+            // path uses the non-complement branch below.
+            //
+            // C:
+            //   n = target_len - n + 1;
+            //   window_start = MAX(1, n - length - max_length*(0.1+suffix[k]));
+            //   window_end   = MIN(target_len, n + max_length*(0.1+prefix[k-length+1]));
+            //   tmp = window_end;
+            //   window_end   = target_len - window_start;
+            //   window_start = target_len - tmp;
+            //   n = target_len - n + 1;
+            let n_flipped = tlen - w.n as i64 + 1;
+            let ws = (n_flipped - w.length as i64) as f64 - suf_ext_f;
+            let ws = if ws < 1.0 { 1.0 } else { ws };
+            let we = (n_flipped as f64) + pre_ext_f;
+            let we = if we > tlen as f64 { tlen as f64 } else { we };
+            let start_flipped = ws as i64;
+            let end_flipped = we as i64;
+            // flip the bounds back (C does NOT add the commented-out +1)
+            window_end = tlen - start_flipped;
+            window_start = tlen - end_flipped;
         } else {
-            start_f as i64 as usize
-        };
-        let end_f = ((w.n + w.length) as i64) as f64 + suf_ext_f;
-        let end_raw = if end_f < 1.0 {
-            1
-        } else {
-            end_f as i64 as usize
-        };
-        let end = end_raw.min(target_len);
-        w.length = end - start + 1;
-        w.n = start;
+            // Match C non-complement branch (p7_pipeline.c:485-486) and the
+            // (int64_t)(n - double) / (int64_t)(n + length + double)
+            // truncation toward zero.
+            let start_f = (w.n as i64) as f64 - pre_ext_f;
+            window_start = if start_f < 1.0 { 1 } else { start_f as i64 };
+            let end_f = ((w.n + w.length) as i64) as f64 + suf_ext_f;
+            let end_raw = if end_f < 1.0 { 1 } else { end_f as i64 };
+            window_end = end_raw.min(tlen);
+        }
+
+        let window_start = window_start.max(1);
+        let window_end = window_end.min(target_len as i64).max(window_start);
+        // C p7_pipeline.c:489-492: length, then fm_n -= (n - window_start), n.
+        w.length = (window_end - window_start + 1) as usize;
+        w.fm_n -= w.n as i64 - window_start;
+        w.n = window_start as usize;
     }
     merge_windows_impl(windows, pct_overlap);
 }
@@ -571,9 +635,16 @@ fn merge_windows_impl(windows: &mut Vec<HmmWindow>, pct_overlap: f32) {
             0.0
         };
 
-        if prev.complement == curr.complement && pct > pct_overlap {
+        // C p7_pipeline.c:505-507 requires BOTH complementarity AND id (the FM
+        // segment id) to match before merging, so windows from different FM
+        // segments on the same strand are never merged. id defaults to 0 in the
+        // FASTA / per-segment path (one segment), so this adds no behavior
+        // change there.
+        if prev.complement == curr.complement && prev.id == curr.id && pct > pct_overlap {
             let new_start = prev.n.min(curr.n);
             let new_end = prev_end.max(curr_end);
+            // C p7_pipeline.c:514-516: fm_n -= (n - window_start) before n is moved.
+            prev.fm_n -= prev.n as i64 - new_start as i64;
             prev.n = new_start;
             prev.length = new_end - new_start + 1;
             if curr.score > prev.score {
@@ -612,4 +683,158 @@ pub fn extend_and_merge_windows_pct(
     }
 
     merge_windows_impl(windows, pct_overlap);
+}
+
+/// Split windows longer than `max_window_len` into overlapping sub-windows for
+/// numerical stability in Forward. Faithful port of C
+/// p7_pli_postSSV_LongTarget's split loop (hmmer/src/p7_pipeline.c:1620-1634):
+///
+/// ```c
+/// if (window.length > max_window_len) {
+///   new_n   = window.n;
+///   new_len = window.length;
+///   window.length = max_window_len;        // trim the head
+///   do {
+///     int shift = max_window_len - overlap_len;
+///     new_n   += shift;
+///     new_len -= shift;
+///     p7_hmmwindow_new(.., ESL_MIN(max_window_len, new_len), ..);
+///   } while (new_len > max_window_len);
+/// }
+/// ```
+///
+/// LOW-1 (audit 02-nhmmer-longtarget): the C structure is a `do/while`, so it
+/// ALWAYS emits at least one tail window per oversized input window — including
+/// a 0-length (or, via C `int32_t` underflow, negative-length) tail when
+/// `new_len` lands exactly on a `shift` multiple. The previous Rust code broke
+/// out on `new_len == 0` BEFORE pushing, dropping that final tail. We reproduce
+/// C exactly with signed `i64` arithmetic; non-positive `ESL_MIN(max_window_len,
+/// new_len)` becomes a 0-length window that downstream `win_len < hmm.m` guards
+/// drop, matching C (where such a window contributes nothing in later passes).
+pub fn split_long_windows(
+    windows: &[HmmWindow],
+    max_window_len: usize,
+    overlap_len: usize,
+) -> Vec<HmmWindow> {
+    let mut out: Vec<HmmWindow> = Vec::with_capacity(windows.len());
+    for w in windows {
+        if w.length <= max_window_len {
+            out.push(w.clone());
+            continue;
+        }
+        let mut head = w.clone();
+        head.length = max_window_len;
+        out.push(head);
+        let mut new_n = w.n as i64;
+        let mut new_len = w.length as i64;
+        let shift = (max_window_len - overlap_len) as i64;
+        loop {
+            new_n += shift;
+            new_len -= shift;
+            let chunk = (max_window_len as i64).min(new_len);
+            out.push(HmmWindow {
+                n: new_n.max(0) as usize,
+                k: 0,
+                length: chunk.max(0) as usize,
+                score: 0.0,
+                target_len: w.target_len,
+                complement: w.complement,
+                id: w.id,
+                fm_n: -1,
+            });
+            if new_len <= max_window_len as i64 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win(n: usize, length: usize, complement: bool, id: i32) -> HmmWindow {
+        HmmWindow {
+            n,
+            k: 1,
+            length,
+            score: 0.0,
+            target_len: 1_000_000,
+            complement,
+            id,
+            fm_n: -1,
+        }
+    }
+
+    // LOW-1: C's do/while always emits at least one tail per oversized window.
+    #[test]
+    fn split_long_windows_emits_tail_at_exact_shift_multiple() {
+        let max = 80000;
+        let overlap = 40000; // shift = 40000
+        let w = win(1, max + (max - overlap), false, 0); // 120000
+        let out = split_long_windows(&[w], max, overlap);
+        assert!(
+            out.len() >= 2,
+            "expected head plus a tail, got {}",
+            out.len()
+        );
+        assert_eq!(out[0].length, max);
+        // new_len: 120000 - 40000 = 80000 (<=max) => final tail length 80000.
+        assert_eq!(out[1].length, 80000);
+    }
+
+    #[test]
+    fn split_long_windows_walks_multiple_tails() {
+        let max = 80000;
+        let overlap = 40000; // shift 40000
+        let w = win(1, 120001, false, 0);
+        let out = split_long_windows(&[w], max, overlap);
+        // head=80000; iter1 new_len=80001 (>max) push 80000; iter2 new_len=40001
+        // (<=max) push 40001, stop.
+        assert_eq!(out[0].length, 80000);
+        assert_eq!(out[1].length, 80000);
+        assert_eq!(out[2].length, 40001);
+        assert_eq!(out.len(), 3);
+
+        let w2 = win(1, max + 2 * 40000, false, 0); // 160000
+        let out2 = split_long_windows(&[w2], max, overlap);
+        // head 80000; iter1 new_len 120000 push 80000; iter2 new_len 80000 push
+        // 80000 stop.
+        assert_eq!(out2.len(), 3);
+        assert!(out2.iter().all(|w| w.length <= max));
+    }
+
+    // MED-2: merges require BOTH complementarity AND id to match.
+    #[test]
+    fn merge_respects_id_guard() {
+        let mut ws = vec![win(100, 100, false, 0), win(110, 100, false, 1)];
+        merge_windows_impl(&mut ws, 0.0);
+        assert_eq!(ws.len(), 2, "windows from different FM segments must not merge");
+
+        let mut ws2 = vec![win(100, 100, false, 7), win(110, 100, false, 7)];
+        merge_windows_impl(&mut ws2, 0.0);
+        assert_eq!(ws2.len(), 1, "same-segment overlapping windows must merge");
+
+        let mut ws3 = vec![win(100, 100, false, 3), win(110, 100, true, 3)];
+        merge_windows_impl(&mut ws3, 0.0);
+        assert_eq!(ws3.len(), 2, "opposite-strand windows must not merge");
+    }
+
+    // MED-2: the complement extension flip only fires in the forward
+    // concatenated-FM frame (fm_n >= 0); RC-local windows (fm_n=-1) do not flip.
+    #[test]
+    fn complement_flip_gated_on_fm_frame() {
+        let mut rc_local = win(10, 5, true, 0);
+        rc_local.fm_n = -1;
+        assert!(!rc_local.needs_complement_extension_flip());
+
+        let mut fm_frame = win(10, 5, true, 0);
+        fm_frame.fm_n = 0;
+        assert!(fm_frame.needs_complement_extension_flip());
+
+        let mut fwd = win(10, 5, false, 0);
+        fwd.fm_n = 0;
+        assert!(!fwd.needs_complement_extension_flip());
+    }
 }

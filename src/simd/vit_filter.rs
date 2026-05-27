@@ -350,6 +350,12 @@ pub unsafe fn viterbi_filter_longtarget(
                             score: 0.0,
                             target_len: l,
                             complement: false,
+                            // Vit peaks are produced per sub-sequence in the
+                            // per-segment RC-local frame; sensible defaults
+                            // (one segment, no concatenated-FM flip). See
+                            // HmmWindow field docs.
+                            id: 0,
+                            fm_n: -1,
                         });
                     }
                 }

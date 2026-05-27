@@ -239,13 +239,44 @@ New FM-index parity tests (Rust vs bundled C nhmmer on makehmmerdb DBs) added in
 - F4 (binary HMM annotation index-0 sentinel): C writes a space (0x20), same as Rust — no NUL
   divergence in the current 3.4 build. Locked in with a regression test.
 
-**Not yet fixed:** MED-2 (multi-segment complement extension flip + `id`/`fm_n` merge guard) and
-LOW-1/2/3 (>80kb window split do/while, complement coord single-expression transform, block_length
-windowed reading) — all latent, only on multi-segment FM DBs / >80kb windows / multi-block reads,
-none triggered by available test data; require `HmmWindow` struct changes (`id`/`fm_n`). Plus a
-separate pre-existing 1-byte divergence in the binary HMM nseq/ctime region (`hmmfile_binary.rs`),
-and Low items judged not worth changing (harmless alias supersets L2-L6, f32 threshold precision
-L8, footer program-path token F6, shared bias-clamp `pipeline.rs:864` — needs C verification).
+**Remaining items resolved (2026-05-27 fourth pass — "fix everything remaining"):**
+- MED-2: added `id`/`fm_n` to `HmmWindow`; ported C's `p7_COMPLEMENT` extension flip (gated on the
+  concatenated-FM-frame sentinel `fm_n >= 0`, inert in the current per-segment-RC-local design) and
+  the `id` merge guard (active). Verified on freshly built multi-segment FM DBs (4-seg and 33-seg):
+  Rust vs C hit sets identical across segments + both strands. The segment-boundary trim pass is a
+  no-op in Rust's per-segment design (windows never span segments). Fields/flip in place for a
+  future concatenated-FM path.
+- LOW-1: window-split `do/while` ported exactly (`split_long_windows`) — always emits the tail
+  window at an exact-shift multiple.
+- LOW-2: kept the existing two-step complement transform (verified bit-identical to C's single
+  expression at `seq_start == 1`, which always holds since LOW-3 is not ported); documented.
+- LOW-3 (block_length windowed reading): intentionally NOT ported — verified empirically that C's
+  windowing is result-neutral (`esl_sqio_ReadWindow` uses `max_length` overlap) and Rust's
+  `c_style_blocked_msv_residue_count` emulation already matches C exactly across block sizes; a true
+  streaming rewrite would risk the verified-green hit set for zero observable benefit.
+- Binary HMM byte parity: fixed — annotation arrays now write NUL at index M+1 (was a space),
+  matching C's `array[M+1]='\0'`. `hmmconvert -b` is now byte-identical to C (verified via `cmp`
+  across Pkinase/RRM_1/Globin/7tm_1/fn3/MADE1).
+- Bias clamp: dropped `.max(0.0)` in `pipeline.rs:864` and `nhmmer.rs` domain-hit construction
+  (the `pipeline.rs:813`/`domaindef.rs:2507` clamps were already gone). Verified C emits negative
+  bias (`hmmsearch --max RVT_1`: -1.3/-2.6/-3.0) and Rust now matches byte-for-byte — the clamp was
+  not masking a scoring bug.
+- L8: score thresholds `-T/--domT/--incT/--incdomT` are now `f64` end-to-end (P7_PIPELINE fields +
+  all seven subcmds incl. hmmpgmd), matching C's `double T/domT/incT/incdomT`; comparisons promote
+  the f32 score to f64. (No fixture behavior change — test thresholds are f32-exact.)
+- L4: hmmsim `--seed` accepts negatives (i32 + wrapping `as u32`, matching C's signed-int→uint32_t
+  reinterpretation and seed-0=clock semantics).
+- L2: hmmemit `-c` is now short-only (`--consensus` alias removed; not load-bearing).
+
+**Deliberately NOT changed (with rationale):**
+- F6 (footer program path): the `# Program:` line already matches C's literal name and
+  `# Option settings:` already drops the `hmmer` wrapper; the only residual difference is C's
+  spoof_cmd leading with argv[0]'s full install path, which is environment-specific, normalized in
+  tests, and must not be forged. Correct-by-design, not a real divergence.
+- Alias supersets that are LOAD-BEARING (the project's own tests use them): hmmsim `--forward`/
+  `--viterbi` (L3 — `cli_output_parity.rs:5735` explicitly tests `--forward`), hmmpgmd `--port`
+  (L5), makehmmerdb `--cstream`/`--container` (L6 — real Rust streaming features). Removing them
+  would delete tested functionality without improving parity for any valid C command line.
 
 ## Ground Rules
 

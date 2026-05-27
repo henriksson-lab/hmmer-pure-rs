@@ -43,7 +43,8 @@ struct Args {
     alignment: bool,
 
     /// Emit consensus sequence
-    #[arg(short = 'c', long, action = ArgAction::SetTrue,
+    // C (hmmemit.c:32): -c is short-only (no long form). Do NOT add `long`.
+    #[arg(short = 'c', action = ArgAction::SetTrue,
           conflicts_with_all = ["alignment", "fancy_consensus", "profile"])]
     consensus: bool,
 
@@ -739,6 +740,14 @@ mod tests {
         );
         let args = Args::try_parse_from(["hmmemit", "-N", "3", "model.hmm"]).unwrap();
         assert_eq!(args.n.map(NonZeroUsize::get), Some(3));
+    }
+
+    #[test]
+    fn hmmemit_c_is_short_only_no_consensus_alias() {
+        // C (hmmemit.c:32): -c is short-only. The short form works; the
+        // previously-erroneous --consensus long alias must be rejected.
+        assert!(Args::try_parse_from(["hmmemit", "-c", "model.hmm"]).is_ok());
+        assert!(Args::try_parse_from(["hmmemit", "--consensus", "model.hmm"]).is_err());
     }
 
     #[test]

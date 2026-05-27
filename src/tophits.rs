@@ -516,7 +516,7 @@ impl TopHits {
             let reported = if pli.by_e {
                 evalue <= pli.e_value_threshold
             } else if let Some(t) = pli.t {
-                hit.score >= t
+                hit.score as f64 >= t
             } else {
                 evalue <= pli.e_value_threshold
             };
@@ -531,7 +531,7 @@ impl TopHits {
             let included = if pli.inc_by_e {
                 evalue <= pli.inc_e
             } else if let Some(t) = pli.inc_t {
-                hit.score >= t
+                hit.score as f64 >= t
             } else {
                 evalue <= pli.inc_e
             };
@@ -565,7 +565,7 @@ impl TopHits {
                 let dom_reported = if pli.dom_by_e {
                     dom_evalue <= pli.dom_e_value_threshold
                 } else if let Some(t) = pli.dom_t {
-                    dom.bitscore >= t
+                    dom.bitscore as f64 >= t
                 } else {
                     dom_evalue <= pli.dom_e_value_threshold
                 };
@@ -579,7 +579,7 @@ impl TopHits {
                     && if pli.incdom_by_e {
                         dom_evalue <= pli.inc_dome
                     } else if let Some(t) = pli.inc_dom_t {
-                        dom.bitscore >= t
+                        dom.bitscore as f64 >= t
                     } else {
                         dom_evalue <= pli.inc_dome
                     };

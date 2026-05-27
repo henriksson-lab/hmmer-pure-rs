@@ -49,7 +49,7 @@ struct Args {
 
     /// Report models >= this score threshold
     #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
-    score_threshold: Option<f32>,
+    score_threshold: Option<f64>,
 
     /// Include models <= this E-value threshold
     #[arg(
@@ -62,7 +62,7 @@ struct Args {
 
     /// Include models >= this score threshold
     #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
-    inc_t: Option<f32>,
+    inc_t: Option<f64>,
 
     /// Use model's GA gathering cutoffs to set all thresholding
     #[arg(
@@ -123,7 +123,7 @@ struct Args {
 
     /// Retained for C command-line compatibility
     #[arg(long = "domT", conflicts_with = "dom_e", hide = true, allow_hyphen_values = true)]
-    dom_t: Option<f32>,
+    dom_t: Option<f64>,
 
     /// Retained for C command-line compatibility
     #[arg(long = "incdomE", default_value = "0.01", value_parser = parse_positive_f64, conflicts_with = "inc_dom_t", hide = true)]
@@ -131,7 +131,7 @@ struct Args {
 
     /// Retained for C command-line compatibility
     #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true, allow_hyphen_values = true)]
-    inc_dom_t: Option<f32>,
+    inc_dom_t: Option<f64>,
 
     /// Random number seed
     #[arg(long = "seed", default_value = "42")]

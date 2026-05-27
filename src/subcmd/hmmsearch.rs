@@ -60,7 +60,7 @@ struct Args {
 
     /// Report sequences >= this score threshold
     #[arg(short = 'T', conflicts_with = "e_value", allow_hyphen_values = true)]
-    score_threshold: Option<f32>,
+    score_threshold: Option<f64>,
 
     /// Report domains <= this E-value threshold
     #[arg(
@@ -73,7 +73,7 @@ struct Args {
 
     /// Report domains >= this score threshold
     #[arg(long = "domT", conflicts_with = "dom_e", allow_hyphen_values = true)]
-    dom_t: Option<f32>,
+    dom_t: Option<f64>,
 
     // --- Inclusion thresholds ---
     /// Include sequences <= this E-value threshold
@@ -87,7 +87,7 @@ struct Args {
 
     /// Include sequences >= this score threshold
     #[arg(long = "incT", conflicts_with = "inc_e", allow_hyphen_values = true)]
-    inc_t: Option<f32>,
+    inc_t: Option<f64>,
 
     /// Include domains <= this E-value threshold
     #[arg(
@@ -100,7 +100,7 @@ struct Args {
 
     /// Include domains >= this score threshold
     #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
-    inc_dom_t: Option<f32>,
+    inc_dom_t: Option<f64>,
 
     // --- Model-specific cutoffs ---
     /// Use model's GA gathering cutoffs to set all thresholding
@@ -2685,5 +2685,38 @@ mod tests {
         assert_eq!(args.f1, -0.5);
         assert_eq!(args.f2, -1e-3);
         assert_eq!(args.f3, -2.0);
+    }
+
+    #[test]
+    fn hmmsearch_threshold_preserves_f64_precision() {
+        // C's -T/--domT/--incT/--incdomT are eslARG_REAL (double). Rust stores
+        // them as f64 too, so a value with >7 significant digits must NOT be
+        // rounded to f32. 12.3456789 is not exactly representable in f32; the
+        // f32-rounded value differs from the exact f64 parse, so this asserts
+        // the parsed threshold kept full double precision (matching C).
+        let val = "12.3456789";
+        let exact: f64 = val.parse().unwrap();
+        let args = Args::try_parse_from([
+            "hmmsearch",
+            "-T",
+            val,
+            "--domT",
+            val,
+            "--incT",
+            val,
+            "--incdomT",
+            val,
+            "model.hmm",
+            "targets.fa",
+        ])
+        .unwrap();
+        // Round-trip at f64: the parsed values equal the exact f64 parse.
+        assert_eq!(args.score_threshold, Some(exact));
+        assert_eq!(args.dom_t, Some(exact));
+        assert_eq!(args.inc_t, Some(exact));
+        assert_eq!(args.inc_dom_t, Some(exact));
+        // And the f64 parse is strictly more precise than the f32 round-trip
+        // would have been (proving precision is not lost to f32).
+        assert_ne!(exact, (val.parse::<f32>().unwrap()) as f64);
     }
 }

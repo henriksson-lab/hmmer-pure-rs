@@ -192,10 +192,10 @@ struct SearchOptions {
     dom_e_value_threshold: f64,
     inc_e: f64,
     inc_dome: f64,
-    t: Option<f32>,
-    dom_t: Option<f32>,
-    inc_t: Option<f32>,
-    inc_dom_t: Option<f32>,
+    t: Option<f64>,
+    dom_t: Option<f64>,
+    inc_t: Option<f64>,
+    inc_dom_t: Option<f64>,
     bit_cutoff: BitCutoff,
     max: bool,
     f1: f64,
@@ -2793,13 +2793,13 @@ fn apply_hmmpgmd_option(
 ) -> Result<(), String> {
     match option {
         "-E" | "--E" => parsed.e_value_threshold = parse_hmmpgmd_f64_option(option, value)?,
-        "-T" | "--T" => parsed.t = Some(parse_hmmpgmd_f32_option(option, value)?),
+        "-T" | "--T" => parsed.t = Some(parse_hmmpgmd_f64_option(option, value)?),
         "--domE" => parsed.dom_e_value_threshold = parse_hmmpgmd_f64_option(option, value)?,
-        "--domT" => parsed.dom_t = Some(parse_hmmpgmd_f32_option(option, value)?),
+        "--domT" => parsed.dom_t = Some(parse_hmmpgmd_f64_option(option, value)?),
         "--incE" => parsed.inc_e = parse_hmmpgmd_f64_option(option, value)?,
-        "--incT" => parsed.inc_t = Some(parse_hmmpgmd_f32_option(option, value)?),
+        "--incT" => parsed.inc_t = Some(parse_hmmpgmd_f64_option(option, value)?),
         "--incdomE" => parsed.inc_dome = parse_hmmpgmd_f64_option(option, value)?,
-        "--incdomT" => parsed.inc_dom_t = Some(parse_hmmpgmd_f32_option(option, value)?),
+        "--incdomT" => parsed.inc_dom_t = Some(parse_hmmpgmd_f64_option(option, value)?),
         "--F1" => parsed.f1 = parse_hmmpgmd_f64_option(option, value)?,
         "--F2" => parsed.f2 = parse_hmmpgmd_f64_option(option, value)?,
         "--F3" => parsed.f3 = parse_hmmpgmd_f64_option(option, value)?,
@@ -2811,12 +2811,6 @@ fn apply_hmmpgmd_option(
 fn parse_hmmpgmd_f64_option(option: &str, value: &str) -> Result<f64, String> {
     value
         .parse::<f64>()
-        .map_err(|_| format!("{option} requires a numeric value"))
-}
-
-fn parse_hmmpgmd_f32_option(option: &str, value: &str) -> Result<f32, String> {
-    value
-        .parse::<f32>()
         .map_err(|_| format!("{option} requires a numeric value"))
 }
 
