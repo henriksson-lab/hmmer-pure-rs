@@ -7,8 +7,8 @@ use std::path::Path;
 use crate::alphabet::{Alphabet, AlphabetType};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
-use crate::output::{fmt_fixed2, fmt_fixed4, fmt_fixed5, fmt_fixed6, fmt_hmm_prob};
-use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
+use crate::output::{fmt_fixed1, fmt_fixed2, fmt_fixed4, fmt_fixed5, fmt_fixed6, fmt_hmm_prob};
+use crate::util::cmath::{c_expf_to_f32, c_log_f64, c_logf_to_f32};
 
 /// Open an HMM save file and read every HMM contained in it.
 ///
@@ -145,6 +145,71 @@ pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     }
 
     Ok(hmms)
+}
+
+/// Outcome of a sequential single-key fetch over an HMM file.
+pub enum FetchOutcome {
+    /// The requested key was found; this is the matching HMM record.
+    Found(Hmm),
+    /// The requested key was not present in the file.
+    NotFound,
+}
+
+/// Fetch a single HMM by name or accession from an HMM file, mirroring C's
+/// `onefetch` no-SSI scan loop (`hmmfetch.c:309-326`).
+///
+/// C reads records one at a time via `p7_hmmfile_Read`, threading a single
+/// `ESL_ALPHABET` object: the first record fixes the alphabet, and any later
+/// record with a different alphabet raises `eslEINCOMPAT` *before* it can be
+/// matched. C `break`s on the first name/accession match, so it never reads
+/// past the matched record. This means fetching the first (e.g. amino) model
+/// from a mixed amino+DNA file succeeds, but fetching a later model (or a
+/// missing key) fails with "contains different alphabets" once the scan reaches
+/// the differing record. This function reproduces that alphabet-stateful,
+/// break-on-match behavior exactly, for both ASCII and binary files.
+pub fn fetch_one_sequential(path: &Path, key: &str) -> HmmerResult<FetchOutcome> {
+    if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
+        let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+        let mut reader = BufReader::new(file);
+        let mut expected_abc = None;
+        while let Some(hmm) = crate::hmmfile_binary::read_binary_hmm(&mut reader)? {
+            check_shared_alphabet(&mut expected_abc, hmm.abc_type)?;
+            if hmm.name == key || hmm.acc.as_deref() == Some(key) {
+                return Ok(FetchOutcome::Found(hmm));
+            }
+        }
+        return Ok(FetchOutcome::NotFound);
+    }
+
+    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+    let mut lines = BufReader::new(file).lines();
+    let mut expected_abc = None;
+    while let Some((hmm, _fmt)) = read_one_hmm_with_format(&mut lines)? {
+        check_shared_alphabet(&mut expected_abc, hmm.abc_type)?;
+        if hmm.name == key || hmm.acc.as_deref() == Some(key) {
+            return Ok(FetchOutcome::Found(hmm));
+        }
+    }
+    Ok(FetchOutcome::NotFound)
+}
+
+/// Thread a single alphabet across sequentially read records, matching C's
+/// shared `ESL_ALPHABET` semantics: the first record sets it; a later record
+/// with a different alphabet is the `eslEINCOMPAT` case.
+fn check_shared_alphabet(
+    expected_abc: &mut Option<AlphabetType>,
+    abc_type: AlphabetType,
+) -> HmmerResult<()> {
+    match expected_abc {
+        Some(expected) if *expected != abc_type => Err(HmmerError::Format(
+            "contains different alphabets".to_string(),
+        )),
+        Some(_) => Ok(()),
+        None => {
+            *expected_abc = Some(abc_type);
+            Ok(())
+        }
+    }
 }
 
 pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
@@ -1232,6 +1297,250 @@ pub fn write_hmm_with_format<W: std::io::Write>(
     Ok(())
 }
 
+/// Write an H3 HMM in HMMER2 ASCII save-file format (`hmmconvert -2`).
+///
+/// Mirrors `p7_h2io_WriteASCII` in `hmmer/src/h2_io.c`. HMMER2 stored the null
+/// model and the search configuration (local vs glocal) in the HMM file; H3
+/// only stores the core HMM, so the output is emitted for HMMER2's default
+/// "ls mode" (glocal) with default null-model and special-state (NECJ)
+/// transitions. Statistical calibration and the alignment checksum are omitted
+/// (H2 and H3 differ too much for those).
+pub fn write_hmm_h2_ascii<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
+    let abc = Alphabet::new(hmm.abc_type);
+    let bg = crate::bg::Bg::new(&abc);
+    let k = hmm.abc_k;
+
+    // Default H2 null-model / special-state transitions: amino vs nucleic only.
+    // (h2_io.c:96-97 — computed as double then narrowed to float.)
+    let (pmove, ploop): (f32, f32) = if hmm.abc_type == AlphabetType::Amino {
+        ((1.0_f64 / 351.0) as f32, (350.0_f64 / 351.0) as f32)
+    } else {
+        ((1.0_f64 / 1001.0) as f32, (1000.0_f64 / 1001.0) as f32)
+    };
+
+    // magic header (HMMER_VERSION == "3.4")
+    writeln!(w, "HMMER2.0  [converted from 3.4]").map_err(HmmerError::Io)?;
+    writeln!(w, "NAME  {}", hmm.name).map_err(HmmerError::Io)?;
+    if let Some(ref acc) = hmm.acc {
+        writeln!(w, "ACC   {}", acc).map_err(HmmerError::Io)?;
+    }
+    if let Some(ref desc) = hmm.desc {
+        writeln!(w, "DESC  {}", desc).map_err(HmmerError::Io)?;
+    }
+    writeln!(w, "LENG  {}", hmm.m).map_err(HmmerError::Io)?;
+    match hmm.abc_type {
+        AlphabetType::Amino => writeln!(w, "ALPH  Amino").map_err(HmmerError::Io)?,
+        AlphabetType::Dna | AlphabetType::Rna => {
+            writeln!(w, "ALPH  Nucleic").map_err(HmmerError::Io)?
+        }
+        AlphabetType::Unknown => {
+            return Err(HmmerError::InvalidArg(
+                "Only protein, DNA, RNA HMMs can be saved in H2 format".to_string(),
+            ));
+        }
+    }
+    writeln!(
+        w,
+        "RF    {}",
+        if hmm.flags & P7H_RF != 0 { "yes" } else { "no" }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "CS    {}",
+        if hmm.flags & P7H_CS != 0 { "yes" } else { "no" }
+    )
+    .map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "MAP   {}",
+        if hmm.flags & P7H_MAP != 0 { "yes" } else { "no" }
+    )
+    .map_err(HmmerError::Io)?;
+
+    if let Some(ref comlog) = hmm.comlog {
+        h2_multiline(w, "COM   ", comlog)?;
+    }
+    if hmm.nseq != -1 {
+        writeln!(w, "NSEQ  {}", hmm.nseq).map_err(HmmerError::Io)?;
+    }
+    if let Some(ref ctime) = hmm.ctime {
+        writeln!(w, "DATE  {}", ctime).map_err(HmmerError::Io)?;
+    }
+    // Checksum is intentionally not written (H2 and H3 use different algorithms).
+
+    if hmm.flags & P7H_GA != 0 {
+        writeln!(
+            w,
+            "GA    {} {}",
+            fmt_fixed1(hmm.cutoff[P7_GA1] as f64),
+            fmt_fixed1(hmm.cutoff[P7_GA2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
+    if hmm.flags & P7H_TC != 0 {
+        writeln!(
+            w,
+            "TC    {} {}",
+            fmt_fixed1(hmm.cutoff[P7_TC1] as f64),
+            fmt_fixed1(hmm.cutoff[P7_TC2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
+    if hmm.flags & P7H_NC != 0 {
+        writeln!(
+            w,
+            "NC    {} {}",
+            fmt_fixed1(hmm.cutoff[P7_NC1] as f64),
+            fmt_fixed1(hmm.cutoff[P7_NC2] as f64)
+        )
+        .map_err(HmmerError::Io)?;
+    }
+
+    // XT: special-state transitions (NB NN EC EJ CT CC JB JJ), default ls config.
+    write!(w, "XT     ").map_err(HmmerError::Io)?;
+    h2_printprob(w, 6, pmove, 1.0)?; // NB
+    h2_printprob(w, 6, ploop, 1.0)?; // NN
+    h2_printprob(w, 6, 0.5, 1.0)?; // EC
+    h2_printprob(w, 6, 0.5, 1.0)?; // EJ
+    h2_printprob(w, 6, pmove, 1.0)?; // CT
+    h2_printprob(w, 6, ploop, 1.0)?; // CC
+    h2_printprob(w, 6, pmove, 1.0)?; // JB
+    h2_printprob(w, 6, ploop, 1.0)?; // JJ
+    writeln!(w).map_err(HmmerError::Io)?;
+
+    // NULT: default H2 null-model transitions (NOT H3's).
+    write!(w, "NULT   ").map_err(HmmerError::Io)?;
+    h2_printprob(w, 6, ploop, 1.0)?; // 1-p1
+    h2_printprob(w, 6, pmove, 1.0)?; // p1
+    writeln!(w).map_err(HmmerError::Io)?;
+
+    // NULE: H3 null-model emissions (these really are H3's).
+    write!(w, "NULE   ").map_err(HmmerError::Io)?;
+    let nule_null = (1.0_f64 / k as f64) as f32;
+    for x in 0..k {
+        h2_printprob(w, 6, bg.f[x], nule_null)?;
+    }
+    writeln!(w).map_err(HmmerError::Io)?;
+
+    // Main model section.
+    write!(w, "HMM      ").map_err(HmmerError::Io)?;
+    for x in 0..k {
+        write!(w, "  {}    ", abc.sym[x] as char).map_err(HmmerError::Io)?;
+    }
+    writeln!(w).map_err(HmmerError::Io)?;
+    writeln!(
+        w,
+        "       {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "m->m", "m->i", "m->d", "i->m", "i->i", "d->m", "d->d", "b->m", "m->e"
+    )
+    .map_err(HmmerError::Io)?;
+
+    // BEGIN node (k=0) transition line: m->m = 1 - t[0][MD], m->i = '*', m->d = t[0][MD].
+    write!(w, "      ").map_err(HmmerError::Io)?;
+    h2_printprob(w, 6, 1.0 - hmm.t[0][MD], 1.0)?;
+    write!(w, " {:>6}", "*").map_err(HmmerError::Io)?;
+    h2_printprob(w, 6, hmm.t[0][MD], 1.0)?;
+    writeln!(w).map_err(HmmerError::Io)?;
+
+    for node in 1..=hmm.m {
+        // Line 1: node index, match emissions, optional map.
+        write!(w, " {:>5} ", node).map_err(HmmerError::Io)?;
+        for x in 0..k {
+            h2_printprob(w, 6, hmm.mat[node][x], bg.f[x])?;
+        }
+        if hmm.flags & P7H_MAP != 0 {
+            let mapval = hmm.map.as_ref().map(|m| m[node]).unwrap_or(0);
+            write!(w, " {:>5}", mapval).map_err(HmmerError::Io)?;
+        }
+        writeln!(w).map_err(HmmerError::Io)?;
+
+        // Line 2: RF char + insert emissions (0.0 at the final node).
+        let rf_char = if hmm.flags & P7H_RF != 0 {
+            hmm.rf.as_ref().map(|r| r[node]).unwrap_or(b'-') as char
+        } else {
+            '-'
+        };
+        write!(w, " {:>5} ", rf_char).map_err(HmmerError::Io)?;
+        for x in 0..k {
+            let p = if node < hmm.m { hmm.ins[node][x] } else { 0.0 };
+            h2_printprob(w, 6, p, bg.f[x])?;
+        }
+        writeln!(w).map_err(HmmerError::Io)?;
+
+        // Line 3: CS char + transitions (b->m only at node 1; m->e only at the last node).
+        let cs_char = if hmm.flags & P7H_CS != 0 {
+            hmm.cs.as_ref().map(|c| c[node]).unwrap_or(b'-') as char
+        } else {
+            '-'
+        };
+        write!(w, " {:>5} ", cs_char).map_err(HmmerError::Io)?;
+        for ts in 0..7 {
+            let p = if node < hmm.m { hmm.t[node][ts] } else { 0.0 };
+            h2_printprob(w, 6, p, 1.0)?;
+        }
+        let bm = if node == 1 { hmm.t[0][MM] } else { 0.0 };
+        h2_printprob(w, 6, bm, 1.0)?;
+        let me = if node < hmm.m { 0.0 } else { 1.0 };
+        h2_printprob(w, 6, me, 1.0)?;
+        writeln!(w).map_err(HmmerError::Io)?;
+    }
+    writeln!(w, "//").map_err(HmmerError::Io)?;
+    Ok(())
+}
+
+/// Print one probability as an H2-format integer log-odds score, with a leading
+/// space, right-justified in `fieldwidth`. Mirrors `printprob()` in
+/// `hmmer/src/h2_io.c`:
+///   - `p == 0.0`                  → `" %*s"` with `"*"`
+///   - `null == 1.0 && p == 1.0`   → `" %*d"` with `0`
+///   - else                        → `" %*d"` with `floor(0.5 + 1442.695 * log(p/null))`
+fn h2_printprob<W: std::io::Write>(
+    w: &mut W,
+    fieldwidth: usize,
+    p: f32,
+    null: f32,
+) -> HmmerResult<()> {
+    if p == 0.0 {
+        write!(w, " {:>width$}", "*", width = fieldwidth).map_err(HmmerError::Io)
+    } else if null == 1.0 && p == 1.0 {
+        write!(w, " {:>width$}", 0, width = fieldwidth).map_err(HmmerError::Io)
+    } else {
+        // C: (int) floor(0.5 + 1442.695 * log(p/null)). p/null is computed in
+        // f32 (both are float), promoted to f64 for log() (libc, via c_log_f64).
+        let score = (0.5 + 1442.695 * c_log_f64((p / null) as f64)).floor() as i32;
+        write!(w, " {:>width$}", score, width = fieldwidth).map_err(HmmerError::Io)
+    }
+}
+
+/// Print a multi-line record (e.g. the command log) with a fixed prefix, one
+/// line per `\n`-separated segment. Mirrors `h2_multiline()` in `h2_io.c`
+/// (note: H2 records bare commands, with no `[n]` numbering — the Rust comlog is
+/// already stored without the numbering).
+fn h2_multiline<W: std::io::Write>(w: &mut W, pfx: &str, s: &str) -> HmmerResult<()> {
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    loop {
+        match bytes[start..].iter().position(|&c| c == b'\n') {
+            Some(rel) => {
+                let end = start + rel;
+                write!(w, "{} ", pfx).map_err(HmmerError::Io)?;
+                w.write_all(&bytes[start..end]).map_err(HmmerError::Io)?;
+                writeln!(w).map_err(HmmerError::Io)?;
+                start = end + 1;
+                if start >= bytes.len() {
+                    break; // C loop ends when *sptr == '\0' after the final '\n'.
+                }
+            }
+            None => {
+                writeln!(w, "{} {}", pfx, &s[start..]).map_err(HmmerError::Io)?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Format a probability `p` as `-ln(p)` (or `*` if zero) using single-precision
 /// `logf`, matching the C HMMER ASCII writer's field width and digits.
 ///
@@ -1290,6 +1599,58 @@ mod tests {
         let mut hmm = Hmm::new(1, abc_type, abc.k);
         hmm.name = name.to_string();
         hmm
+    }
+
+    #[test]
+    fn fetch_one_sequential_mirrors_c_onefetch_on_mixed_alphabet() {
+        // fn3 (amino) followed by MADE1 (DNA): C's onefetch break-on-match
+        // succeeds on the first record but fails on the second / on a miss.
+        let dir = tempfile::tempdir().unwrap();
+        let mixed = dir.path().join("mixed.hmm");
+        let mut bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        ))
+        .unwrap();
+        bytes.extend_from_slice(
+            &std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/hmmer/tutorial/MADE1.hmm"
+            ))
+            .unwrap(),
+        );
+        std::fs::write(&mixed, bytes).unwrap();
+
+        // First (amino) record: found, never reads the DNA record.
+        match fetch_one_sequential(&mixed, "fn3").unwrap() {
+            FetchOutcome::Found(hmm) => {
+                assert_eq!(hmm.name, "fn3");
+                assert_eq!(hmm.abc_type, AlphabetType::Amino);
+            }
+            FetchOutcome::NotFound => panic!("fn3 should be found"),
+        }
+
+        // Second (DNA) record: scan threads the alphabet change → error.
+        let made1 = fetch_one_sequential(&mixed, "MADE1");
+        assert!(made1.is_err(), "MADE1 should hit the alphabet mismatch");
+
+        // Missing key forces reading the whole file → same alphabet error.
+        let miss = fetch_one_sequential(&mixed, "NOSUCH");
+        assert!(miss.is_err(), "missing key must hit the alphabet mismatch");
+
+        // Uniform-alphabet file: missing key is a clean NotFound, not an error.
+        let uniform = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/fn3.hmm"
+        ));
+        assert!(matches!(
+            fetch_one_sequential(uniform, "NOSUCH").unwrap(),
+            FetchOutcome::NotFound
+        ));
+        assert!(matches!(
+            fetch_one_sequential(uniform, "fn3").unwrap(),
+            FetchOutcome::Found(_)
+        ));
     }
 
     #[test]

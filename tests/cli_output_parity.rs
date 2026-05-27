@@ -268,6 +268,157 @@ fn hmmlogo_uses_only_first_hmm_like_c() {
     assert!(!stdout.contains("86:"));
 }
 
+/// Regression for hmmlogo F1: C's hmmlogo_ScoreHeights (hmmer/src/hmmlogo.c:108-116)
+/// computes log(p/bg) UNCONDITIONALLY, so an exact-zero match emission yields
+/// log(0) = -inf, printed as "  -inf" under %6.3f. Rust previously guarded
+/// p <= 0.0 and printed " 0.000". Verify byte-for-byte against the C binary on a
+/// hand-edited model with a `*` (zero) match emission at node 2, residue 0.
+#[test]
+fn hmmlogo_score_mode_zero_emission_matches_c() {
+    // Build a model with a zero match emission by replacing node 2's first
+    // (residue 0) emission score field with `*`.
+    let src = std::fs::read_to_string("hmmer/tutorial/fn3.hmm").unwrap();
+    let mut edited = String::with_capacity(src.len());
+    let mut done = false;
+    for line in src.lines() {
+        if !done && line.starts_with("      2 ") {
+            // Split off the leading "      2", then replace the first numeric
+            // field with `*` keeping the column layout.
+            let rest = &line[7..];
+            let trimmed = rest.trim_start();
+            let lead = rest.len() - trimmed.len();
+            let first_end = trimmed.find(char::is_whitespace).unwrap();
+            let after = &trimmed[first_end..];
+            edited.push_str("      2");
+            edited.push_str(&" ".repeat(lead));
+            // Right-align `*` in a field as wide as the original first value.
+            let width = first_end;
+            edited.push_str(&format!("{:>width$}", "*", width = width));
+            edited.push_str(after);
+            edited.push('\n');
+            done = true;
+        } else {
+            edited.push_str(line);
+            edited.push('\n');
+        }
+    }
+    assert!(done, "did not find node 2 match-emission line to edit");
+
+    let dir = tempfile::tempdir().unwrap();
+    let zero_hmm = dir.path().join("fn3_zero.hmm");
+    std::fs::write(&zero_hmm, &edited).unwrap();
+
+    let rust = Command::new(hmmer())
+        .args(["logo", "--height_score", zero_hmm.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    let stdout = String::from_utf8(rust.stdout.clone()).unwrap();
+    // Node 2's first residue height must be the -inf token (not 0.000).
+    let node2 = stdout
+        .lines()
+        .find(|l| l.starts_with("2: "))
+        .expect("node 2 line present");
+    assert!(
+        node2.starts_with("2:   -inf "),
+        "expected '-inf' at node 2 residue 0, got: {node2:?}"
+    );
+
+    // Byte-for-byte against the C binary.
+    let c = Command::new(format!("{}/hmmer/src/hmmlogo", project_root()))
+        .args(["--height_score", zero_hmm.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(c.status.success());
+    assert_eq!(
+        rust.stdout, c.stdout,
+        "hmmlogo --height_score zero-emission output must match C byte-for-byte"
+    );
+}
+
+/// Regression for hmmconvert C2: an invalid --outfmt code must reproduce C's
+/// p7_Fail (hmmer/src/errors.c:48-52) error text byte-for-byte:
+/// "\nError: No such 3.x output format code <fmt>.\n\n", exit 1, empty stdout.
+/// hmmconvert `-2` emits HMMER2 ASCII (ls mode) byte-identical to C's
+/// `p7_h2io_WriteASCII`, across amino (with GA/TC/NC cutoffs + ACC/DESC + MAP),
+/// nucleic, and multi-model inputs.
+#[test]
+fn hmmconvert_hmmer2_output_matches_c() {
+    let models = [
+        "hmmer/tutorial/fn3.hmm",          // amino, MAP
+        "hmmer/tutorial/MADE1.hmm",        // nucleic (DNA)
+        "test_data/RVT_1_pfam.hmm",        // amino, GA/TC/NC + ACC/DESC
+        "test_data/Pkinase_pfam.hmm",      // larger amino Pfam model
+    ];
+    for m in models {
+        let path = format!("{}/{}", project_root(), m);
+        if !std::path::Path::new(&path).exists() {
+            continue;
+        }
+        let rust = Command::new(hmmer())
+            .args(["convert", "-2", &path])
+            .output()
+            .unwrap();
+        let c = Command::new(c_hmmconvert())
+            .args(["-2", &path])
+            .output()
+            .unwrap();
+        assert!(rust.status.success(), "rust convert -2 failed for {m}");
+        assert!(c.status.success(), "c hmmconvert -2 failed for {m}");
+        assert_eq!(
+            rust.stdout, c.stdout,
+            "hmmconvert -2 output differs from C for {m}"
+        );
+        // Sanity: it really is HMMER2 format.
+        assert!(rust.stdout.starts_with(b"HMMER2.0  [converted from "));
+    }
+
+    // Multi-model file: H2 records are concatenated, each terminated by "//".
+    let multi = format!("{}/.tmp/h2_multi.hmm", project_root());
+    std::fs::create_dir_all(format!("{}/.tmp", project_root())).unwrap();
+    let fn3 = std::fs::read(format!("{}/hmmer/tutorial/fn3.hmm", project_root())).unwrap();
+    let pk = std::fs::read(format!("{}/hmmer/tutorial/Pkinase.hmm", project_root())).unwrap();
+    let mut joined = fn3.clone();
+    joined.extend_from_slice(&pk);
+    std::fs::write(&multi, &joined).unwrap();
+    let rust = Command::new(hmmer())
+        .args(["convert", "-2", &multi])
+        .output()
+        .unwrap();
+    let c = Command::new(c_hmmconvert())
+        .args(["-2", &multi])
+        .output()
+        .unwrap();
+    assert_eq!(rust.stdout, c.stdout, "multi-model hmmconvert -2 differs from C");
+    let _ = std::fs::remove_file(&multi);
+}
+
+#[test]
+fn hmmconvert_invalid_outfmt_error_matches_c_bytes() {
+    let rust = Command::new(hmmer())
+        .args(["convert", "--outfmt", "foo", "hmmer/tutorial/fn3.hmm"])
+        .output()
+        .unwrap();
+    assert_eq!(rust.status.code(), Some(1));
+    assert!(rust.stdout.is_empty());
+    assert_eq!(
+        rust.stderr,
+        b"\nError: No such 3.x output format code foo.\n\n".to_vec()
+    );
+
+    // Cross-check against the C binary byte-for-byte.
+    let c = Command::new(c_hmmconvert())
+        .args(["--outfmt", "foo", "hmmer/tutorial/fn3.hmm"])
+        .output()
+        .unwrap();
+    assert_eq!(c.status.code(), Some(1));
+    assert_eq!(rust.stderr, c.stderr);
+}
+
 #[test]
 fn hmmsearch_tblout_has_c_style_header_options_and_footer() {
     let dir = tempfile::tempdir().unwrap();
@@ -6779,6 +6930,141 @@ fn hmmfetch_uses_existing_ssi_for_random_access() {
     assert!(stdout.contains("ACC   PF00041.13"), "{stdout}");
 }
 
+/// Build a mixed amino+DNA multi-model HMM file (fn3 amino, then MADE1 DNA).
+fn write_mixed_hmm(dir: &std::path::Path) -> std::path::PathBuf {
+    let mixed = dir.join("mixed.hmm");
+    let mut bytes = std::fs::read("hmmer/tutorial/fn3.hmm").unwrap();
+    bytes.extend_from_slice(&std::fs::read("hmmer/tutorial/MADE1.hmm").unwrap());
+    std::fs::write(&mixed, bytes).unwrap();
+    mixed
+}
+
+// F1: fetching the first (amino) model from a mixed amino+DNA file (no SSI)
+// must succeed, mirroring C's onefetch break-on-match. Fetching a later (DNA)
+// model or a missing key must fail (exit 1) once the scan threads the
+// differing-alphabet record, like C's eslEINCOMPAT.
+#[test]
+fn hmmfetch_mixed_alphabet_first_model_succeeds_later_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let mixed = write_mixed_hmm(dir.path());
+
+    // First record (amino) succeeds and never reads the DNA record.
+    let first = Command::new(hmmer())
+        .args(["fetch", mixed.to_str().unwrap(), "fn3"])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "fetching first/amino model from mixed file should succeed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let stdout = String::from_utf8(first.stdout).unwrap();
+    assert!(stdout.contains("NAME  fn3"), "{stdout}");
+    assert!(stdout.contains("ALPH  amino"), "{stdout}");
+
+    // Second record (DNA) cannot be reached without crossing the alphabet
+    // change: C fails with "different alphabets" (exit 1); we match the exit.
+    let second = Command::new(hmmer())
+        .args(["fetch", mixed.to_str().unwrap(), "MADE1"])
+        .output()
+        .unwrap();
+    assert!(
+        !second.status.success(),
+        "fetching the later DNA model from a mixed file must fail like C"
+    );
+
+    // A missing key forces reading the whole file → also fails on the alphabet.
+    let missing = Command::new(hmmer())
+        .args(["fetch", mixed.to_str().unwrap(), "NOSUCH"])
+        .output()
+        .unwrap();
+    assert!(
+        !missing.status.success(),
+        "missing key in a mixed file must fail like C"
+    );
+}
+
+// F2: `--index` on a mixed-alphabet file must refuse (exit 1) with C's
+// "different alphabets" message, leaving the 0-byte `.ssi` stub that
+// esl_newssi_Open's fopen() creates before the read loop.
+#[test]
+fn hmmfetch_index_refuses_mixed_alphabet_leaving_empty_ssi() {
+    let dir = tempfile::tempdir().unwrap();
+    let mixed = write_mixed_hmm(dir.path());
+    let ssi = std::path::PathBuf::from(format!("{}.ssi", mixed.to_string_lossy()));
+
+    let index = Command::new(hmmer())
+        .args(["fetch", "--index", mixed.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !index.status.success(),
+        "--index on a mixed-alphabet file must fail like C"
+    );
+    let stderr = String::from_utf8(index.stderr).unwrap();
+    assert!(
+        stderr.contains("contains different alphabets"),
+        "stderr: {stderr}"
+    );
+    // C leaves a 0-byte .ssi (fopen before the read loop).
+    assert!(ssi.exists(), "C leaves an empty .ssi stub on failed index");
+    assert_eq!(
+        std::fs::metadata(&ssi).unwrap().len(),
+        0,
+        "the failed-index .ssi stub must be 0 bytes like C"
+    );
+
+    // A uniform-alphabet file must still index successfully (no regression).
+    let uniform = dir.path().join("fn3.hmm");
+    std::fs::copy("hmmer/tutorial/fn3.hmm", &uniform).unwrap();
+    let ok = Command::new(hmmer())
+        .args(["fetch", "--index", uniform.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        ok.status.success(),
+        "uniform-alphabet --index must still succeed: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}
+
+// F5: a failed fetch with `-o`/`-O` must still leave a 0-byte output file,
+// matching C (which fopen()s the output stream before attempting the fetch).
+#[test]
+fn hmmfetch_failed_fetch_leaves_empty_output_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("fn3.hmm");
+    std::fs::copy("hmmer/tutorial/fn3.hmm", &hmm).unwrap();
+
+    // -o <file>: the file exists and is empty after a not-found fetch.
+    let out = dir.path().join("out.hmm");
+    let o = Command::new(hmmer())
+        .args([
+            "fetch",
+            "-o",
+            out.to_str().unwrap(),
+            hmm.to_str().unwrap(),
+            "NOSUCHKEY",
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(out.exists(), "-o output file must exist after a failed fetch");
+    assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
+
+    // -O <key>: the file named after the key exists and is empty.
+    let workdir = tempfile::tempdir().unwrap();
+    let big_o = Command::new(hmmer())
+        .current_dir(workdir.path())
+        .args(["fetch", "-O", hmm.to_str().unwrap(), "NOSUCH"])
+        .output()
+        .unwrap();
+    assert!(!big_o.status.success());
+    let keyed = workdir.path().join("NOSUCH");
+    assert!(keyed.exists(), "-O output file must exist after a failed fetch");
+    assert_eq!(std::fs::metadata(&keyed).unwrap().len(), 0);
+}
+
 #[test]
 fn hmmstat_20aa_stdout_matches_golden() {
     let output = Command::new(hmmer())
@@ -7016,7 +7302,9 @@ fn hmmbuild_builds_from_a2m_informat_with_consensus_insert_semantics() {
     assert!(saved.contains("LENG  6\n"), "{saved}");
     assert!(saved.contains("RF    yes\n"), "{saved}");
     let processed = std::fs::read_to_string(processed_msa).unwrap();
-    assert!(processed.contains("toy1 GA-ATTC\n"), "{processed}");
+    // Insert-column gaps are '.' (A2M convention); C `esl-reformat stockholm`
+    // on this A2M emits "GA.ATTC" / "#=GC RF xx.xxxx".
+    assert!(processed.contains("toy1 GA.ATTC\n"), "{processed}");
     assert!(processed.contains("toy2 GAaATTC\n"), "{processed}");
     assert!(processed.contains("#=GC RF xx.xxxx\n"), "{processed}");
 }
@@ -8159,7 +8447,9 @@ fn hmmbuild_preserves_stockholm_gf_accession_and_description() {
     );
     let hmm = std::fs::read_to_string(hmm_out).unwrap();
     assert!(hmm.contains("ACC   PF99999.1\n"));
-    assert!(hmm.contains("DESC  first line second line\n"));
+    // C `esl_msa_SetDesc` overwrites on each #=GF DE line, so the LAST line wins.
+    // Verified with `esl-reformat stockholm` (emits only "#=GF DE second line").
+    assert!(hmm.contains("DESC  second line\n"));
 }
 
 #[test]
@@ -8543,7 +8833,9 @@ fn alimask_accepts_c_relative_weighting_options_for_model_maps() {
         String::from_utf8_lossy(&wgiven.stderr)
     );
     let stdout = String::from_utf8(wgiven.stdout).unwrap();
-    assert!(stdout.contains("# relative weighting scheme:        given\n"));
+    // C's alimask output_header (alimask.c:166-170) emits NO relative-weighting
+    // line for --wgiven, so neither should the Rust port (F6).
+    assert!(!stdout.contains("# relative weighting scheme:"));
     assert!(stdout.contains("          4..4        ->       -..-  (no map)\n"));
 
     let wblosum = Command::new(hmmer())
@@ -8658,6 +8950,115 @@ fn alimask_appendmask_merges_alignment_range_and_model_mask() {
     );
     let masked = std::fs::read_to_string(masked).unwrap();
     assert!(masked.contains("#=GC MM mmm................."));
+}
+
+#[test]
+fn alimask_appendmask_ors_onto_existing_input_mm_line() {
+    // F1 (alimask.c:368-374,447-452): with --appendmask, C ORs the new range
+    // ON TOP of the input MSA's existing #=GC MM line. Input mmmm...... +
+    // --alirange 9-10 must yield mmmm....mm (existing 1-4 preserved + new 9-10).
+    let dir = tempfile::tempdir().unwrap();
+    let sto = dir.path().join("withmm.sto");
+    let masked = dir.path().join("masked.sto");
+    std::fs::write(
+        &sto,
+        b"# STOCKHOLM 1.0\nseq1 ACDEFGHIKL\nseq2 ACDEFGHIKL\nseq3 ACDEFGHIKL\n#=GC MM mmmm......\n//\n",
+    )
+    .unwrap();
+
+    let appended = Command::new(hmmer())
+        .args([
+            "alimask",
+            "--appendmask",
+            "--alirange",
+            "9-10",
+            sto.to_str().unwrap(),
+            masked.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        appended.status.success(),
+        "{}",
+        String::from_utf8_lossy(&appended.stderr)
+    );
+    let out = std::fs::read_to_string(&masked).unwrap();
+    assert!(
+        out.contains("#=GC MM mmmm....mm\n"),
+        "expected OR-merged mask mmmm....mm, got:\n{out}"
+    );
+    assert!(!out.contains("#=GC MM ........mm\n"));
+
+    // Without --appendmask the existing mask is reset to '.' first (keep_mm=FALSE).
+    let masked2 = dir.path().join("masked2.sto");
+    let replaced = Command::new(hmmer())
+        .args([
+            "alimask",
+            "--alirange",
+            "9-10",
+            sto.to_str().unwrap(),
+            masked2.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(replaced.status.success());
+    let out2 = std::fs::read_to_string(&masked2).unwrap();
+    assert!(
+        out2.contains("#=GC MM ........mm\n"),
+        "expected reset mask ........mm, got:\n{out2}"
+    );
+}
+
+#[test]
+fn alimask_summary_header_seed_wid_wgiven_match_c() {
+    // F5/F6/F7: seed line gated on IsUsed (FALSE for default 42; seed 0 prints
+    // TWO lines); --wgiven prints no weighting line; the BLOSUM cutoff line is
+    // gated on --wid being explicitly given, not on --wblosum.
+    let dir = tempfile::tempdir().unwrap();
+    let sto = dir.path().join("hdr.sto");
+    let post = dir.path().join("post.sto");
+    std::fs::write(
+        &sto,
+        b"# STOCKHOLM 1.0\nseq1 ACDEFGHIKL\nseq2 ACDEFGHIKL\nseq3 ACDEFGHIKL\n//\n",
+    )
+    .unwrap();
+
+    let run_summary = |extra: &[&str]| -> String {
+        let mut args = vec!["alimask"];
+        args.extend_from_slice(extra);
+        args.push(sto.to_str().unwrap());
+        args.push(post.to_str().unwrap());
+        let out = Command::new(hmmer()).args(&args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    // F5: --seed 42 (default) prints no seed line.
+    let s = run_summary(&["--alirange", "5-10", "--seed", "42"]);
+    assert!(!s.contains("# random number seed"), "{s}");
+    // F5: --seed 0 prints both the arbitrary line and "set to: 0".
+    let s = run_summary(&["--alirange", "5-10", "--seed", "0"]);
+    assert!(s.contains("# random number seed:               one-time arbitrary\n"), "{s}");
+    assert!(s.contains("# random number seed set to:        0\n"), "{s}");
+    // F5: --seed 7 prints the single resolved line.
+    let s = run_summary(&["--alirange", "5-10", "--seed", "7"]);
+    assert!(s.contains("# random number seed set to:        7\n"), "{s}");
+
+    // F6: --wgiven prints no relative-weighting line. (use --modelrange so the
+    // weighting path is exercised)
+    let s = run_summary(&["--modelrange", "1-3", "--dna", "--wgiven"]);
+    assert!(!s.contains("# relative weighting scheme:"), "{s}");
+
+    // F7: bare --wblosum prints no BLOSUM cutoff line.
+    let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum"]);
+    assert!(s.contains("# relative weighting scheme:        BLOSUM filter\n"), "{s}");
+    assert!(!s.contains("# frac id cutoff for BLOSUM wgts:"), "{s}");
+    // F7: --wblosum --wid 0.5 (non-default) prints the cutoff line.
+    let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum", "--wid", "0.5"]);
+    assert!(s.contains("# frac id cutoff for BLOSUM wgts:   0.500000\n"), "{s}");
+    // F7: --wblosum --wid 0.62 (explicit default) prints no cutoff line (IsUsed=FALSE).
+    let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum", "--wid", "0.62"]);
+    assert!(!s.contains("# frac id cutoff for BLOSUM wgts:"), "{s}");
 }
 
 #[test]
@@ -12596,4 +12997,127 @@ fn hmmscan_empty_desc_has_no_dash_and_footer_strips_wrapper() {
         !footer.contains("hmmer hmmscan"),
         "footer must not keep the hmmer wrapper token: {footer}"
     );
+}
+
+fn c_hmmbuild() -> String {
+    format!("{}/hmmer/src/hmmbuild", project_root())
+}
+
+/// Build an HMM with the bundled C `hmmbuild` and the Rust `hmmer build` using
+/// identical options, returning the two ASCII-HMM bodies with volatile/header
+/// lines (DATE, COM, HMMER3 version, NAME) stripped for comparison.
+fn build_c_and_rust(opts: &[&str], msa_rel: &str) -> (String, String) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let uniq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let c_out = dir.join(format!("hmmbuild_parity_c_{pid}_{uniq}.hmm"));
+    let r_out = dir.join(format!("hmmbuild_parity_r_{pid}_{uniq}.hmm"));
+    let msa = format!("{}/{}", project_root(), msa_rel);
+
+    let mut c_args: Vec<String> = opts.iter().map(|s| s.to_string()).collect();
+    c_args.push(c_out.to_str().unwrap().to_string());
+    c_args.push(msa.clone());
+    let c_status = Command::new(c_hmmbuild())
+        .args(&c_args)
+        .output()
+        .expect("run C hmmbuild");
+    assert!(
+        c_status.status.success(),
+        "C hmmbuild failed: {}",
+        String::from_utf8_lossy(&c_status.stderr)
+    );
+
+    let mut r_args: Vec<String> = vec!["build".to_string()];
+    r_args.extend(opts.iter().map(|s| s.to_string()));
+    r_args.push(r_out.to_str().unwrap().to_string());
+    r_args.push(msa);
+    let r_status = Command::new(hmmer())
+        .args(&r_args)
+        .output()
+        .expect("run Rust hmmer build");
+    assert!(
+        r_status.status.success(),
+        "Rust hmmer build failed: {}",
+        String::from_utf8_lossy(&r_status.stderr)
+    );
+
+    let strip = |path: &std::path::Path| -> String {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|l| {
+                !l.starts_with("DATE")
+                    && !l.starts_with("COM")
+                    && !l.starts_with("HMMER3")
+                    && !l.starts_with("NAME")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let c_body = strip(&c_out);
+    let r_body = strip(&r_out);
+    let _ = std::fs::remove_file(&c_out);
+    let _ = std::fs::remove_file(&r_out);
+    (c_body, r_body)
+}
+
+fn effn_of(body: &str) -> f64 {
+    body.lines()
+        .find(|l| l.starts_with("EFFN"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("no EFFN line in:\n{body}"))
+}
+
+/// F1: a `--dna` build must use the nucleic transition Dirichlet prior, making
+/// the whole ASCII model byte-identical to C (previously ~166 transition lines
+/// diverged because the amino transition prior was always used).
+#[test]
+fn hmmbuild_dna_matches_c_with_nucleic_transition_prior() {
+    let (c_body, r_body) = build_c_and_rust(&["--dna", "--seed", "42"], "hmmer/tutorial/MADE1.sto");
+    assert_eq!(c_body, r_body, "DNA build diverges from C");
+}
+
+/// F1 (RNA variant): same expectation for `--rna`.
+#[test]
+fn hmmbuild_rna_matches_c_with_nucleic_transition_prior() {
+    let (c_body, r_body) = build_c_and_rust(&["--rna", "--seed", "42"], "hmmer/tutorial/MADE1.sto");
+    assert_eq!(c_body, r_body, "RNA build diverges from C");
+}
+
+/// F2: `--plaplace` must thread the Laplace prior into the entropy-weight
+/// bisection, so EFFN matches C (was 0.96 vs C 74.05 on fn3).
+#[test]
+fn hmmbuild_plaplace_effn_matches_c() {
+    let (c_body, r_body) =
+        build_c_and_rust(&["--plaplace", "--seed", "42"], "hmmer/tutorial/fn3.sto");
+    let (c_effn, r_effn) = (effn_of(&c_body), effn_of(&r_body));
+    assert!(
+        (c_effn - r_effn).abs() < 1e-4,
+        "--plaplace EFFN mismatch: C={c_effn} R={r_effn}"
+    );
+    // With the prior threaded, the full ASCII body matches C as well.
+    assert_eq!(c_body, r_body, "--plaplace build diverges from C");
+}
+
+/// F2/F4: `--pnone` (NULL prior) must match C's EFFN, which uses pure
+/// renormalization in the entropy-weight trials.
+#[test]
+fn hmmbuild_pnone_effn_matches_c() {
+    let (c_body, r_body) =
+        build_c_and_rust(&["--pnone", "--seed", "42"], "hmmer/tutorial/globins4.sto");
+    let (c_effn, r_effn) = (effn_of(&c_body), effn_of(&r_body));
+    assert!(
+        (c_effn - r_effn).abs() < 1e-4,
+        "--pnone EFFN mismatch: C={c_effn} R={r_effn}"
+    );
+}
+
+/// Non-regression: the default amino build stays byte-identical to C.
+#[test]
+fn hmmbuild_amino_default_still_matches_c() {
+    let (c_body, r_body) = build_c_and_rust(&["--seed", "42"], "hmmer/tutorial/fn3.sto");
+    assert_eq!(c_body, r_body, "amino default build regressed vs C");
 }

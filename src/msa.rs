@@ -478,8 +478,10 @@ fn parse_a2m_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
         let mut row = Vec::with_capacity(alen);
         for idx in 0..=ncons {
             row.extend_from_slice(&record.inserts[idx]);
+            // Insert (non-consensus) gap columns use '.' in A2M; C
+            // `esl_msafile_a2m.c` emits '.' here (consensus gaps use '-').
             row.extend(
-                std::iter::repeat(b'-').take(insert_widths[idx] - record.inserts[idx].len()),
+                std::iter::repeat(b'.').take(insert_widths[idx] - record.inserts[idx].len()),
             );
             if idx < ncons {
                 row.push(record.consensus[idx]);
@@ -1097,27 +1099,13 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
         } else if trimmed.starts_with("#=GF AC") {
             acc = Some(trimmed[7..].trim().to_string());
         } else if trimmed.starts_with("#=GF DE") {
-            let line = trimmed[7..].trim();
-            if !line.is_empty() {
-                desc.get_or_insert_with(String::new);
-                if let Some(desc) = &mut desc {
-                    if !desc.is_empty() {
-                        desc.push(' ');
-                    }
-                    desc.push_str(line);
-                }
-            }
+            // C `stockholm_parse_gf` calls `esl_msa_SetDesc`, which frees the
+            // existing value and overwrites it: the LAST `#=GF DE` line wins.
+            // (esl_msa.c esl_msa_SetDesc.)
+            desc = Some(trimmed[7..].trim().to_string());
         } else if trimmed.starts_with("#=GF AU") {
-            let line = trimmed[7..].trim();
-            if !line.is_empty() {
-                author.get_or_insert_with(String::new);
-                if let Some(author) = &mut author {
-                    if !author.is_empty() {
-                        author.push(' ');
-                    }
-                    author.push_str(line);
-                }
-            }
+            // Likewise C `esl_msa_SetAuthor` overwrites; the LAST `#=GF AU` wins.
+            author = Some(trimmed[7..].trim().to_string());
         } else if trimmed.starts_with("#=GF GA") {
             cutoffs.ga = Some(parse_stockholm_cutoffs("GA", trimmed[7..].trim())?);
         } else if trimmed.starts_with("#=GF TC") {
@@ -1788,6 +1776,19 @@ mod tests {
     }
 
     #[test]
+    fn stockholm_de_and_au_last_line_wins() {
+        // C `esl_msa_SetDesc`/`SetAuthor` (called from stockholm_parse_gf) free
+        // and overwrite the field: the LAST #=GF DE / #=GF AU line wins. Verified
+        // with `esl-reformat stockholm` on this input (emits "second part" /
+        // "Author Two" only).
+        let input = b"# STOCKHOLM 1.0\n#=GF ID testaln\n#=GF DE first part\n#=GF DE second part\n#=GF AU Author One\n#=GF AU Author Two\nseq1 ACDEF\nseq2 ACDEG\n//\n";
+        let msas = read_stockholm_from_reader(BufReader::new(&input[..])).unwrap();
+        let msa = &msas[0];
+        assert_eq!(msa.desc.as_deref(), Some("second part"));
+        assert_eq!(msa.author.as_deref(), Some("Author Two"));
+    }
+
+    #[test]
     fn rejects_unterminated_stockholm_block() {
         let input = b"# STOCKHOLM 1.0\nseq AC\n";
         let err = read_stockholm_from_reader(BufReader::new(&input[..])).unwrap_err();
@@ -1818,10 +1819,9 @@ mod tests {
         let input = b"# STOCKHOLM 1.0\n#=GF AU first author\n#=GF AU second author\n#=GF GA 25.0 24.5\n#=GF TC 30.0;\n#=GF NC -1.0 -2.0;\ns1 AC\n//\n";
         let records = read_stockholm_preserved_from_reader(BufReader::new(&input[..])).unwrap();
         let record = &records[0];
-        assert_eq!(
-            record.msa.author.as_deref(),
-            Some("first author second author")
-        );
+        // C `esl_msa_SetAuthor` overwrites: the LAST #=GF AU line wins (verified
+        // with `esl-reformat stockholm`).
+        assert_eq!(record.msa.author.as_deref(), Some("second author"));
         assert_eq!(record.cutoffs.ga, Some([25.0, 24.5]));
         assert_eq!(record.cutoffs.tc, Some([30.0, 30.0]));
         assert_eq!(record.cutoffs.nc, Some([-1.0, -2.0]));
@@ -1913,7 +1913,9 @@ mod tests {
         assert_eq!(msa.sqname, ["s1", "s2"]);
         assert_eq!(msa.sqdesc, ["first", "second"]);
         assert_eq!(msa.alen, 7);
-        assert_eq!(msa.aseq[0], b"GA-ATTC");
+        // Insert-column gaps are '.' (C esl-reformat emits "GA.ATTC"), verified
+        // against `esl-reformat afa` on the same A2M input.
+        assert_eq!(msa.aseq[0], b"GA.ATTC");
         assert_eq!(msa.aseq[1], b"GAaATTC");
         assert_eq!(msa.rf.as_deref(), Some(&b"xx.xxxx"[..]));
     }

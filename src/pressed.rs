@@ -158,13 +158,17 @@ fn write_optional_len_prefixed_cstr<W: Write>(w: &mut W, s: Option<&str>) -> Hmm
 fn write_annotation<W: Write>(w: &mut W, annotation: Option<&[u8]>, m: usize) -> HmmerResult<()> {
     let len = m + 2;
     match annotation {
-        Some(bytes) if bytes.len() >= len => w.write_all(&bytes[..len]).map_err(HmmerError::Io),
+        // C dumps `om->rf/mm/cs/consensus` of width M+2 (impl_sse/io.c:146-149).
+        // Those arrays are `strcpy`'d from the gm strings (p7_oprofile.c:1112),
+        // so index M+1 is the copied `'\0'` terminator. Our in-memory arrays
+        // keep a `' '` (space) sentinel at index M+1; force the trailing byte to
+        // a NUL to match C byte-for-byte (same class as the hmmfile_binary fix).
         Some(bytes) => {
-            w.write_all(bytes).map_err(HmmerError::Io)?;
-            for _ in bytes.len()..len {
-                w.write_all(&[0]).map_err(HmmerError::Io)?;
-            }
-            Ok(())
+            let mut buf = vec![0u8; len];
+            let n = bytes.len().min(len);
+            buf[..n].copy_from_slice(&bytes[..n]);
+            buf[len - 1] = 0;
+            w.write_all(&buf).map_err(HmmerError::Io)
         }
         None => {
             let zeros = vec![0u8; len];
@@ -188,7 +192,9 @@ pub fn write_h3f_record<W: Write>(
     write_i32_ne(w, om.m as i32)?;
     write_i32_ne(w, abc_type)?;
     write_len_prefixed_cstr(w, &om.name)?;
-    write_i32_ne(w, om.l)?;
+    // C `impl_sse/io.c:102` writes `om->max_length` here (the per-model upper
+    // bound on emitted length, from the HMM `MAXL` line), NOT the configured L.
+    write_i32_ne(w, om.max_length)?;
     w.write_all(&[om.tbm_b, om.tec_b, om.tjb_b])
         .map_err(HmmerError::Io)?;
     write_f32_ne(w, om.scale_b)?;
@@ -211,8 +217,14 @@ pub fn write_h3f_record<W: Write>(
     for offset in offsets {
         w.write_all(&offset.to_ne_bytes()).map_err(HmmerError::Io)?;
     }
-    for value in om.compo {
-        write_f32_ne(w, value)?;
+    // C writes p7_MAXABET(=20) compo floats (impl_sse/io.c:118). For nucleic
+    // (K=4) models the unused tail entries are 0.0 in C's array, whereas our
+    // `om.compo` keeps COMPO_UNSET (-1.0) there. Emit the real composition for
+    // [0..K) and 0.0 for the tail so the .h3f matches C byte-for-byte. Amino
+    // (K=20) uses every entry, so this is a no-op for amino models.
+    for (i, value) in om.compo.iter().enumerate() {
+        let out = if i < om.abc_k { *value } else { 0.0 };
+        write_f32_ne(w, out)?;
     }
     write_u32_ne(w, V3F_FMAGIC)
 }
@@ -449,6 +461,15 @@ mod tests {
         hmmfile::read_hmm_file(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/hmmer/tutorial/fn3.hmm"
+        )))
+        .unwrap()
+        .remove(0)
+    }
+
+    fn made1_hmm() -> Hmm {
+        hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/tutorial/MADE1.hmm"
         )))
         .unwrap()
         .remove(0)
@@ -962,6 +983,118 @@ mod tests {
 
         assert_eq!(msv.offsets, [11, 22, 33]);
         assert_oprofile_exact(&actual, &expected);
+    }
+
+    // === Regression tests for pressed-DB byte parity with C hmmpress ===
+    // F1: .h3f field 6 must be om.max_length (HMM MAXL), not the configured L.
+    // F2: .h3p annotation arrays must carry a '\0' (not ' ') sentinel at M+1.
+    // F3: .h3f compo tail [K..20] must be 0.0 (not COMPO_UNSET) for nucleic.
+
+    /// Parse the `max_length` field and the 20 compo floats out of a written
+    /// `.h3f` record (single record). Returns (max_length, compo).
+    fn parse_h3f_max_length_and_compo(bytes: &[u8]) -> (i32, [f32; 20]) {
+        let mut off = 0usize;
+        let rd_i32 = |b: &[u8], o: &mut usize| {
+            let v = i32::from_ne_bytes(b[*o..*o + 4].try_into().unwrap());
+            *o += 4;
+            v
+        };
+        // magic, M, abc
+        let _magic = rd_i32(bytes, &mut off);
+        let _m = rd_i32(bytes, &mut off);
+        let _abc = rd_i32(bytes, &mut off);
+        // name: len-prefixed cstr (len, bytes, NUL)
+        let nlen = rd_i32(bytes, &mut off) as usize;
+        off += nlen + 1;
+        let max_length = rd_i32(bytes, &mut off);
+        // compo is the last 20 floats before the 4-byte footer magic.
+        let compo_start = bytes.len() - 4 - 20 * 4;
+        let mut compo = [0.0f32; 20];
+        for (i, c) in compo.iter_mut().enumerate() {
+            let o = compo_start + i * 4;
+            *c = f32::from_ne_bytes(bytes[o..o + 4].try_into().unwrap());
+        }
+        (max_length, compo)
+    }
+
+    #[test]
+    fn h3f_writes_hmm_max_length_not_configured_length() {
+        // F1: MADE1 has MAXL 426; configured L is 400. C writes max_length(426).
+        let hmm = made1_hmm();
+        assert_eq!(hmm.max_length, 426);
+        let om = oprofile_for_press(&hmm);
+        assert_eq!(om.l, 400, "press configures L=400");
+        let mut h3f = Vec::new();
+        write_h3f_record(&mut h3f, &hmm, &om, [0, 0, 0]).unwrap();
+        let (max_length, _compo) = parse_h3f_max_length_and_compo(&h3f);
+        assert_eq!(max_length, 426, "F1: .h3f must store HMM MAXL, not L=400");
+
+        // fn3 (amino, no MAXL) → C writes -1.
+        let amino = fn3_hmm();
+        assert_eq!(amino.max_length, -1);
+        let om_a = oprofile_for_press(&amino);
+        let mut h3f_a = Vec::new();
+        write_h3f_record(&mut h3f_a, &amino, &om_a, [0, 0, 0]).unwrap();
+        let (max_length_a, _) = parse_h3f_max_length_and_compo(&h3f_a);
+        assert_eq!(max_length_a, -1, "F1: amino model with no MAXL → -1");
+    }
+
+    #[test]
+    fn h3f_zero_fills_compo_tail_for_nucleic() {
+        // F3: nucleic K=4; compo[4..20] must be 0.0 (C zeroed array), not -1.0.
+        let hmm = made1_hmm();
+        let om = oprofile_for_press(&hmm);
+        let mut h3f = Vec::new();
+        write_h3f_record(&mut h3f, &hmm, &om, [0, 0, 0]).unwrap();
+        let (_max_length, compo) = parse_h3f_max_length_and_compo(&h3f);
+        for (i, &c) in compo.iter().enumerate().skip(4) {
+            assert_eq!(c, 0.0, "F3: compo[{i}] tail must be 0.0 for nucleic");
+        }
+        // [0..4) carry the real composition (finite, not COMPO_UNSET).
+        for (i, &c) in compo.iter().enumerate().take(4) {
+            assert!(c.is_finite() && c != -1.0, "compo[{i}] should be real");
+        }
+    }
+
+    #[test]
+    fn h3p_annotation_arrays_end_with_nul_sentinel() {
+        // F2: each present annotation array of width M+2 must have '\0' at M+1.
+        let hmm = fn3_hmm();
+        let m = hmm.m;
+        let om = oprofile_for_press(&hmm);
+        let mut h3p = Vec::new();
+        write_h3p_record(&mut h3p, &hmm, &om).unwrap();
+
+        // Re-walk the record header to locate the first annotation array.
+        let mut off = 0usize;
+        let rd_i32 = |b: &[u8], o: &mut usize| {
+            let v = i32::from_ne_bytes(b[*o..*o + 4].try_into().unwrap());
+            *o += 4;
+            v
+        };
+        let _magic = rd_i32(&h3p, &mut off);
+        let _m = rd_i32(&h3p, &mut off);
+        let _abc = rd_i32(&h3p, &mut off);
+        let nlen = rd_i32(&h3p, &mut off) as usize; // name
+        off += nlen + 1;
+        let acclen = rd_i32(&h3p, &mut off) as usize; // acc
+        if acclen > 0 {
+            off += acclen + 1;
+        }
+        let desclen = rd_i32(&h3p, &mut off) as usize; // desc
+        if desclen > 0 {
+            off += desclen + 1;
+        }
+        // Now four annotation arrays of width m+2: rf, mm, cs, consensus.
+        let width = m + 2;
+        for arr in 0..4 {
+            let base = off + arr * width;
+            assert_eq!(
+                h3p[base + m + 1],
+                0,
+                "F2: annotation array {arr} must end with NUL at index M+1"
+            );
+        }
     }
 
     #[test]
@@ -1907,6 +2040,7 @@ pub fn oprofile_from_pressed_records(
         xf: profile.xf,
         m: msv.m,
         l: profile.l,
+        max_length: msv.max_length,
         nj: profile.nj,
         mode: profile.mode,
         evparam: msv.evparam,

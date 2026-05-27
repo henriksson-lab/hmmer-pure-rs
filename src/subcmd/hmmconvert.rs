@@ -22,7 +22,7 @@ struct Args {
     #[arg(short = 'b', action = ArgAction::SetTrue, conflicts_with_all = ["ascii", "hmmer2"])]
     binary: bool,
 
-    /// HMMER2 ASCII output is intentionally unsupported in this Rust port
+    /// HMMER2: output backward-compatible HMMER2 ASCII format (ls mode)
     #[arg(short = '2', action = ArgAction::SetTrue, conflicts_with_all = ["ascii", "binary"])]
     hmmer2: bool,
 
@@ -43,13 +43,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     // -a/-b/-2 mutual exclusion (C: "-a,-b,-2" toggle group) is enforced at
     // parse time by clap.
-    if args.hmmer2 {
-        eprintln!("Error: hmmconvert -2 HMMER2 ASCII output is intentionally unsupported");
-        std::process::exit(1);
-    }
     let ascii_format = match args.outfmt.as_deref() {
         Some(outfmt) => HmmAsciiFormat::parse(outfmt).unwrap_or_else(|| {
-            eprintln!("Error: No such 3.x output format code {outfmt}");
+            // Match C's p7_Fail (hmmer/src/errors.c:48-52): leading "\nError: ",
+            // the format string "No such 3.x output format code %s.\n", then a
+            // trailing "\n". Net bytes: "\nError: No such 3.x output format code <fmt>.\n\n".
+            eprint!("\nError: No such 3.x output format code {outfmt}.\n\n");
             std::process::exit(1);
         }),
         None => HmmAsciiFormat::Hmmer3f,
@@ -64,7 +63,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let mut out = stdout.lock();
 
     for hmm in &hmms {
-        if args.binary {
+        if args.hmmer2 {
+            hmmfile::write_hmm_h2_ascii(&mut out, hmm).unwrap_or_else(|e| {
+                eprintln!("Error writing HMMER2 HMM: {}", e);
+                std::process::exit(1);
+            });
+        } else if args.binary {
             hmmfile_binary::write_binary_hmm_with_format(&mut out, hmm, ascii_format)
                 .unwrap_or_else(|e| {
                     eprintln!("Error writing binary HMM: {}", e);

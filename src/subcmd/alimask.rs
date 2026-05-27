@@ -132,13 +132,18 @@ fn parse_fraction(s: &str) -> Result<f64, String> {
 /// optionally augmented with a `#=GC MM` model mask line. Corresponds to `main()` in
 /// hmmer/src/alimask.c, with the Rust port focused on the simple mask-annotation flow.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
-    let wid_was_requested = args
+    let wid_on_cmdline = args
         .iter()
         .any(|arg| arg == "--wid" || arg.starts_with("--wid="));
-    let seed_was_requested = args
+    let seed_on_cmdline = args
         .iter()
         .any(|arg| arg == "--seed" || arg.starts_with("--seed="));
     let args = Args::parse_from(&args);
+    // C uses esl_opt_IsUsed("--seed"/"--wid"), which is FALSE when the supplied
+    // value equals the option default (42 / 0.62 respectively). So `--seed 42`
+    // and `--wid 0.62` print no header line, matching the no-flag case.
+    let seed_was_requested = seed_on_cmdline && args.seed != 42;
+    let wid_was_requested = wid_on_cmdline && args.wid != 0.62;
     if [args.amino, args.dna, args.rna]
         .into_iter()
         .filter(|v| *v)
@@ -251,7 +256,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     });
 
     if mapping_mode {
-        write_summary_report(&args, seed_was_requested).unwrap_or_else(|e| {
+        write_summary_report(&args, seed_was_requested, wid_was_requested).unwrap_or_else(|e| {
             eprintln!("Error writing summary output: {}", e);
             std::process::exit(1);
         });
@@ -292,7 +297,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
-    write_summary_report(&args, seed_was_requested).unwrap_or_else(|e| {
+    write_summary_report(&args, seed_was_requested, wid_was_requested).unwrap_or_else(|e| {
         eprintln!("Error writing summary output: {}", e);
         std::process::exit(1);
     });
@@ -340,7 +345,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         };
 
         let mut range_mask = ali_ranges.as_ref().map(|ranges| {
-            let mut mask = vec![b'.'; alignment.alen];
+            // C (alimask.c:368-374): keep_mm = IsUsed("--appendmask"). If the
+            // input MSA has no #=GC MM line, msa->mm is freshly allocated and
+            // keep_mm forced FALSE. When !keep_mm the mask is reset to all '.'.
+            // So with --appendmask AND an existing MM line, start from the
+            // existing mask and OR the new range columns on top; otherwise
+            // start from a fresh all-'.' mask.
+            let mut mask = match (args.appendmask, alignment.mm.as_ref()) {
+                (true, Some(existing)) if existing.len() == alignment.alen => existing.clone(),
+                _ => vec![b'.'; alignment.alen],
+            };
             for &(start, end) in ranges {
                 if start == 0 {
                     eprintln!("Mask ranges can not start before position 1; start 0 is invalid");
@@ -403,7 +417,11 @@ fn parse_ranges(spec: &str) -> Result<Vec<(usize, usize)>, String> {
     Ok(ranges)
 }
 
-fn write_summary_report(args: &Args, seed_was_requested: bool) -> std::io::Result<()> {
+fn write_summary_report(
+    args: &Args,
+    seed_was_requested: bool,
+    wid_was_requested: bool,
+) -> std::io::Result<()> {
     let mut file;
     let stdout;
     let out: &mut dyn Write = if let Some(ref path) = args.summary_out {
@@ -412,18 +430,19 @@ fn write_summary_report(args: &Args, seed_was_requested: bool) -> std::io::Resul
     } else {
         stdout = std::io::stdout();
         let mut lock = stdout.lock();
-        write_summary_report_to(&mut lock, args, seed_was_requested)?;
+        write_summary_report_to(&mut lock, args, seed_was_requested, wid_was_requested)?;
         lock.flush()?;
         return Ok(());
     };
 
-    write_summary_report_to(out, args, seed_was_requested)
+    write_summary_report_to(out, args, seed_was_requested, wid_was_requested)
 }
 
 fn write_summary_report_to<W: Write + ?Sized>(
     out: &mut W,
     args: &Args,
     seed_was_requested: bool,
+    wid_was_requested: bool,
 ) -> std::io::Result<()> {
     writeln!(
         out,
@@ -505,31 +524,39 @@ fn write_summary_report_to<W: Write + ?Sized>(
             fmt_fixed3(args.fragthresh)
         )?;
     }
+    // C (alimask.c:171-174): gated on IsUsed("--seed"), which is FALSE when the
+    // supplied value equals the default (42). For seed 0 C prints BOTH lines:
+    // the first `if (seed==0 && fprintf(...)<0)` actually evaluates the fprintf
+    // (printing "one-time arbitrary"), the condition is false, so the `else if`
+    // fprintf("set to: 0") also fires.
     if seed_was_requested {
         if args.seed == 0 {
             writeln!(
                 out,
                 "# random number seed:               one-time arbitrary"
             )?;
+            writeln!(out, "# random number seed set to:        0")?;
         } else {
             writeln!(out, "# random number seed set to:        {}", args.seed)?;
         }
     }
-    if args.wpb {
-        writeln!(out, "# relative weighting scheme:        Henikoff PB")?;
-    }
+    // C (alimask.c) gates the scheme line on esl_opt_IsUsed of a NON-default
+    // weighting: --wpb is the default, so it never prints a scheme line (even
+    // when given explicitly); only --wgsc/--wblosum/--wnone do.
     if args.wgsc {
         writeln!(out, "# relative weighting scheme:        G/S/C")?;
     }
     if args.wblosum {
         writeln!(out, "# relative weighting scheme:        BLOSUM filter")?;
-        writeln!(out, "# frac id cutoff for BLOSUM wgts:   {:.6}", args.wid)?;
     }
     if args.wnone {
         writeln!(out, "# relative weighting scheme:        none")?;
     }
-    if args.wgiven {
-        writeln!(out, "# relative weighting scheme:        given")?;
+    // C (alimask.c:170): the BLOSUM identity-cutoff line is gated on
+    // IsUsed("--wid"), i.e. printed only when --wid is explicitly supplied,
+    // NOT on --wblosum. (--wgiven has no header line in C at all, F6.)
+    if wid_was_requested {
+        writeln!(out, "# frac id cutoff for BLOSUM wgts:   {:.6}", args.wid)?;
     }
     writeln!(
         out,

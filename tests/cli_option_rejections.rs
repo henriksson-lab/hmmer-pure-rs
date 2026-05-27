@@ -1459,7 +1459,9 @@ fn hmmconvert_unknown_outfmt_fails_explicitly_before_io() {
 }
 
 #[test]
-fn hmmconvert_hmmer2_output_is_explicitly_unsupported_before_io() {
+fn hmmconvert_hmmer2_output_is_supported_and_fails_only_on_missing_input() {
+    // `-2` (HMMER2 ASCII output) is now implemented; a missing input file must
+    // fail with a file-read error, NOT the old "unsupported" rejection.
     let output = Command::new(hmmer())
         .args(["convert", "-2", "missing.hmm"])
         .output()
@@ -1467,7 +1469,11 @@ fn hmmconvert_hmmer2_output_is_explicitly_unsupported_before_io() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("HMMER2 ASCII output is intentionally unsupported"));
+    assert!(
+        !stderr.contains("intentionally unsupported"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("Error reading HMM file"), "stderr: {stderr}");
 }
 
 #[test]

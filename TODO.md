@@ -7,6 +7,90 @@ benchmark, or failed experiment changes the next useful target.
 Preserve evidence for active parity/speed claims until each item has regression
 coverage.
 
+## Broad Core-Library Audit - 2026-05-27 (audit-20260527b)
+
+Read-only parallel audit of the core library + SIMD DP layer (7 areas: SIMD filters,
+domaindef/trace, pipeline/scoring, builder/prior, hmmfile/pressed/ssi, msa/sequence/alphabet,
+fm_index/tophits). Reports in `reports/audit-20260527b/`.
+
+**Confirmed-real findings, FIXED (all verified byte-for-byte vs fresh C binaries):**
+- 04-F1 (HIGH): DNA/RNA builds used the AMINO transition Dirichlet prior. Added nucleic
+  transition alphas (`p7_prior_CreateNucleic`: tm=[2,0.1,0.1], ti=[0.12,0.4], td=[0.5,1.0]),
+  selected by alphabet. MADE1/RNA `--dna` ASCII-HMM body now byte-identical to C (was 170 lines off).
+- 04-F2 (HIGH): entropy weighting ignored `--plaplace`/`--pnone` (hardcoded default prior in the
+  bisection). Now threads the selected prior through. `--plaplace` EFFN 74.05 = C.
+- 04-F3/F4: single-seq consensus case-thresholding (`p7_hmm_SetConsensus`) + `--pnone`
+  `p7_hmm_Renormalize` terminal fixups ported.
+- 05-F1 (HIGH): `.h3f` wrote `om.l` instead of `om->max_length`. Added `OProfile.max_length`
+  (from `gm.max_length`); `.h3f` now correct. C `nhmmscan` on a Rust-pressed nucleic DB now matches.
+- 05-F2 (HIGH): `.h3p` annotation arrays wrote a space at index M+1 (same class as the
+  hmmfile_binary NUL bug, not applied to pressed.rs) — now NUL. `.h3m/.h3f/.h3p/.h3i` all
+  byte-identical to C for nucleic + amino.
+- 05-F3: `.h3f` `compo` tail zero-filled (was -1.0) for nucleic.
+- 06-M1: Stockholm `#=GF DE`/`AU` now last-wins (overwrite, matching `esl_msa_SetDesc/SetAuthor`),
+  was space-concatenated. 06-M2: A2M insert-column gaps now `.` (was `-`). 06-S1: digital
+  FASTA/EMBL now accept `.`/`_` as gaps (reject only `-`), matching Easel.
+
+**Phantom findings — FALSE POSITIVES from stale `target/release/*` per-subcommand binaries
+(April 12), now deleted:** 02-F1 (claimed multidomain envelopes collapse 4→1) — re-verified with
+the fresh multicall binary: C and Rust both emit 1610 domain rows, EED_HUMAN has 4 domains in
+both. 02-F2 (spensemble over-count), 07-O1 (tblout column shift — longest-name row byte-identical),
+07-O2 (score divergence — Agents 01/03 confirmed scores byte-identical after rebuild). The
+domaindef/spensemble, fm_index, and tophits layers are FAITHFUL. SIMD DP filters, pipeline/scoring,
+profile/bg/logsum/calibrate, fm_index, dsqdata, and tophits were all audited and found faithful.
+
+**Cleanup:** deleted ~20 stale standalone per-subcommand binaries under `target/release/` (only
+`hmmer` is a build target); they had misled four audit agents into phantom score/domain divergences.
+
+## hmmconvert -2 (HMMER2 ASCII) implemented - 2026-05-27
+
+Ported `p7_h2io_WriteASCII` (`hmmer/src/h2_io.c`) as `hmmfile::write_hmm_h2_ascii` + the
+`h2_printprob`/`h2_multiline` helpers; wired into `hmmconvert -2`. Emits HMMER2.0 ls-mode format
+with default null/special-state (NECJ) transitions (amino pmove=1/351, nucleic 1/1001), H3 null
+emissions, and integer log-odds scores `floor(0.5 + 1442.695*log(p/null))` using libc `log`
+(`c_log_f64`) for bit-exactness. **Verified byte-identical to C `hmmconvert -2`** across fn3,
+Pkinase, globins4, MADE1 (nucleic), all 18 `test_data/*_pfam.hmm` (GA/TC/NC + ACC/DESC + MAP),
+multi-model files, stdin (`-`), and binary (.h3m) input. Regression test
+`hmmconvert_hmmer2_output_matches_c`. This closes the last hmmconvert output gap (only `-h` banner
+text remains as the project-wide clap-vs-Easel cosmetic difference).
+
+## Thin-Coverage Subcommand Audit - 2026-05-27 (audit-20260527c)
+
+Read-only parallel audit of subcommands whose FULL behavior prior audits skipped (alimask,
+hmmlogo, hmmfetch, hmmconvert/hmmstat output). Reports in `reports/audit-20260527c/`. All agents
+used the fresh multicall binary (stale standalone binaries were deleted last round).
+
+**hmmlogo + hmmstat: faithful** (all height modes / stat columns byte-identical to C). hmmconvert
+supported formats all byte-identical.
+
+**Fixed (verified byte-for-byte vs fresh C):**
+- alimask F1 (HIGH, data-corrupting): `--appendmask` dropped the existing `#=GC MM` line instead of
+  OR-ing the new range onto it. Fixed (input `mmmm......`+`--alirange 9-10` → `mmmm....mm` = C).
+- alimask F5/F6/F7 + `--wpb`: summary-header lines now match C's `esl_opt_IsUsed` gating — `--seed`
+  (no line for default 42; two lines for 0), `--wgiven` (no line), `--wid` cutoff (gated on explicit
+  `--wid`, not `--wblosum`), and the weighting-scheme line (no line for the default `--wpb`; only
+  `--wgsc`/`--wblosum`/`--wnone` print).
+- hmmfetch F1/F2/F5: single-key fetch now reads record-by-record with a shared alphabet and
+  breaks on match (fetching the first model from a mixed amino+DNA file succeeds, like C, via a new
+  additive `hmmfile::fetch_one_sequential`); `--index` on a mixed-alphabet file now refuses with C's
+  error + a 0-byte `.ssi` stub (C's `esl_newssi_Open` fopens before the read loop); failed `-o`/`-O`
+  fetch now leaves a 0-byte file. (Audit's "no .ssi"/"no file" claims were corrected against fresh C.)
+- hmmconvert C2 (LOW): invalid `--outfmt` error text now byte-identical to C's `p7_Fail`
+  (`\nError: ...code foo.\n\n`). hmmlogo F1 (LOW): score-mode zero match emission now prints `-inf`
+  (unguarded `log(p/bg)`), matching C; relent modes keep the guard; real-model output unchanged.
+
+**Deferred / surfaced (not fixed):**
+- alimask F3 (HIGH): masked-MSA output is not byte-identical to C — Rust splices the MM line into the
+  original input lines; C re-serializes via `esl_msafile_Write` (cpl=200 block-wrapping with
+  `#=GC MM`/RF repeated per block, name-column padding, gap normalization, GF/GS reflow). The mask
+  CONTENT is correct in every case; only the surrounding serialization differs. Needs a new
+  C-faithful Stockholm writer in `src/msa.rs` (none exists; the jackhmmer/hmmemit writers don't
+  block-wrap) — a focused follow-up.
+- hmmconvert C1 (MED): `-2` HMMER2 legacy ASCII output — **IMPLEMENTED 2026-05-27** (see below).
+- alimask F4 (afa/clustal output formats), F2 (`--modelmask` Rust superset), and the project-wide
+  clap-vs-Easel patterns (error wording, exit code 2-vs-1, options-after-positionals, help banner)
+  across hmmfetch/hmmlogo — intentional or low-value, left as-is.
+
 ## Known Remaining Feature Gaps - 2026-05-26
 
 Status after the feature-gap resolution pass (see below). Only the items marked

@@ -158,6 +158,11 @@ pub struct OProfile {
     // === Common fields ===
     pub m: usize,
     pub l: i32,
+    /// Upper bound on emitted sequence length (HMM `MAXL`); written as the
+    /// `.h3f` `max_length` field. Mirrors C `om->max_length`, copied from
+    /// `gm->max_length` in `p7_oprofile_Convert` (p7_oprofile.c:1097). `-1`
+    /// when the model has no MAXL line.
+    pub max_length: i32,
     pub nj: f32,
     pub mode: i32,
     pub evparam: [f32; 6],
@@ -653,6 +658,7 @@ impl OProfile {
             xf,
             m,
             l: gm.l,
+            max_length: gm.max_length,
             nj: gm.nj,
             mode: gm.mode,
             evparam: gm.evparam,

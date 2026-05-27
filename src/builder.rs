@@ -963,6 +963,7 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
         } => Some(crate::eweight::entropy_weight(
             &mut hmm,
             bg,
+            prior_strategy,
             target_re,
             target_sigma,
         )),
@@ -970,7 +971,7 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
             target_re,
             target_sigma,
         } => {
-            crate::eweight::entropy_weight_exp(&mut hmm, bg, target_re, target_sigma);
+            crate::eweight::entropy_weight_exp(&mut hmm, bg, prior_strategy, target_re, target_sigma);
             None
         }
         EffectiveSeqNumber::Cluster { identity_cutoff } => {

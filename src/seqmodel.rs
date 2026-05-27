@@ -618,12 +618,24 @@ pub fn build_single_seq_hmm_with_matrix_and_calibration(
 
     set_composition(&mut hmm);
 
-    // Set consensus from sequence
+    // Set consensus from sequence. Port of p7_hmm_SetConsensus(hmm, sq)
+    // (p7_hmm.c:700-732): with sq given, x = sq->dsq[k]; the symbol is
+    // upper-cased when its own match-emission probability mat[k][x] >= mthresh,
+    // lower-cased otherwise. mthresh = 0.5 amino, 0.9 DNA/RNA, 0.5 otherwise.
+    let mthresh: f32 = match abc.abc_type {
+        AlphabetType::Dna | AlphabetType::Rna => 0.9,
+        _ => 0.5,
+    };
     let mut cons = vec![b' '; m + 2];
     for node in 1..=m {
         let residue = dsq[node] as usize;
         if residue < abc.kp {
-            cons[node] = abc.sym[residue];
+            let sym = abc.sym[residue];
+            cons[node] = if residue < k && hmm.mat[node][residue] >= mthresh {
+                sym.to_ascii_uppercase()
+            } else {
+                sym.to_ascii_lowercase()
+            };
         }
     }
     hmm.consensus = Some(cons);
@@ -642,4 +654,56 @@ pub fn build_single_seq_hmm_with_matrix_and_calibration(
     hmm.eff_nseq = 1.0;
 
     Ok(hmm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::Alphabet;
+
+    /// F3: single-seq consensus is case-thresholded like C's
+    /// `p7_hmm_SetConsensus` (`p7_hmm.c:720-721`): a residue whose own
+    /// match-emission probability is below `mthresh` (0.5 amino) is
+    /// lower-cased, otherwise upper-cased.
+    #[test]
+    fn single_seq_consensus_case_thresholded() {
+        let abc = Alphabet::new(AlphabetType::Amino);
+        let bg = Bg::new(&abc);
+        // A short protein query. Each residue maps to its canonical symbol;
+        // the conditional self-emission prob from BLOSUM62 is < 0.5 for these
+        // residues, so all consensus chars must be LOWER case.
+        let seq = b"ACDEFGHIKLMNPQRSTVWY";
+        let mut dsq = vec![0u8; seq.len() + 2];
+        for (i, &c) in seq.iter().enumerate() {
+            dsq[i + 1] = abc.digitize_symbol(c);
+        }
+        let hmm = build_single_seq_hmm(
+            "q", &dsq, seq.len(), &abc, &bg, 0.02, 0.4,
+        );
+        let cons = hmm.consensus.as_ref().expect("consensus set");
+        for node in 1..=hmm.m {
+            let residue = dsq[node] as usize;
+            let p = hmm.mat[node][residue];
+            let ch = cons[node];
+            if p >= 0.5 {
+                assert!(
+                    ch.is_ascii_uppercase(),
+                    "node {node} p={p} should be UPPER, got {}",
+                    ch as char
+                );
+            } else {
+                assert!(
+                    ch.is_ascii_lowercase(),
+                    "node {node} p={p} should be lower, got {}",
+                    ch as char
+                );
+            }
+        }
+        // Sanity: at least one residue is below threshold (lower-cased), which
+        // is the behaviour the old code got wrong (always upper-cased).
+        assert!(
+            (1..=hmm.m).any(|k| cons[k].is_ascii_lowercase()),
+            "expected at least one lower-cased consensus residue"
+        );
+    }
 }

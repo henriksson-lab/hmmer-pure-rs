@@ -3,6 +3,7 @@
 
 use crate::bg::Bg;
 use crate::hmm::Hmm;
+use crate::prior::PriorStrategy;
 use crate::util::cmath::{c_log_f64, ESL_CONST_LOG2R};
 
 /// Target relative entropy per match position (bits).
@@ -22,6 +23,7 @@ const LOG2_INV: f64 = ESL_CONST_LOG2R;
 pub fn entropy_weight(
     hmm: &mut Hmm,
     bg: &Bg,
+    prior: PriorStrategy,
     target_re: Option<f64>,
     target_sigma: Option<f64>,
 ) -> f32 {
@@ -33,7 +35,7 @@ pub fn entropy_weight(
         return 1.0;
     }
 
-    let fx_full = relative_entropy_fx(hmm, bg, nseq, etarget);
+    let fx_full = relative_entropy_fx(hmm, bg, prior, nseq, etarget);
     if fx_full <= 0.0 {
         hmm.eff_nseq = nseq as f32;
         return nseq as f32;
@@ -41,7 +43,9 @@ pub fn entropy_weight(
 
     // esl_root_Bisection (esl_rootfinder.c:244) with abs_tol=0.01 (eweight.c:82),
     // rel_tol=1e-12, residual_tol=0, max_iter=100 (rootfinder Create defaults).
-    let neff = bisection(0.0, nseq, 0.01, |x| relative_entropy_fx(hmm, bg, x, etarget)) as f32;
+    let neff = bisection(0.0, nseq, 0.01, |x| {
+        relative_entropy_fx(hmm, bg, prior, x, etarget)
+    }) as f32;
     hmm.eff_nseq = neff;
     neff
 }
@@ -100,17 +104,18 @@ fn bisection<F: FnMut(f64) -> f64>(mut xl: f64, mut xr: f64, abs_tol: f64, mut f
 pub fn entropy_weight_exp(
     hmm: &mut Hmm,
     bg: &Bg,
+    prior: PriorStrategy,
     target_re: Option<f64>,
     target_sigma: Option<f64>,
 ) -> f32 {
     let target = target_re.unwrap_or(default_re_target(hmm));
     let etarget = entropy_target(hmm, target, target_sigma.unwrap_or(ESIGMA_DEFAULT));
 
-    let fx_full = relative_entropy_exp_fx(hmm, bg, 1.0, etarget);
+    let fx_full = relative_entropy_exp_fx(hmm, bg, prior, 1.0, etarget);
     let exp = if fx_full > 0.0 {
         // esl_root_Bisection over [0,1] with abs_tol=0.001 (eweight.c:164).
         bisection(0.0, 1.0, 0.001, |x| {
-            relative_entropy_exp_fx(hmm, bg, x, etarget)
+            relative_entropy_exp_fx(hmm, bg, prior, x, etarget)
         })
     } else {
         1.0
@@ -142,18 +147,24 @@ fn entropy_target(hmm: &Hmm, re_target: f64, esigma: f64) -> f64 {
 }
 
 /// Evaluate `f(Neff) = mean_match_re(scaled HMM) - etarget`; root sought by bisection.
-fn relative_entropy_fx(hmm: &Hmm, bg: &Bg, neff: f64, etarget: f64) -> f64 {
+fn relative_entropy_fx(hmm: &Hmm, bg: &Bg, prior: PriorStrategy, neff: f64, etarget: f64) -> f64 {
     let mut trial = hmm.clone();
     let nseq = trial.nseq as f64;
     scale_counts(&mut trial, neff / nseq);
-    crate::prior::apply_priors(&mut trial);
+    crate::prior::apply_priors_with_strategy(&mut trial, prior);
     mean_match_relative_entropy(&trial, bg) - etarget
 }
 
-fn relative_entropy_exp_fx(hmm: &Hmm, bg: &Bg, exp: f64, etarget: f64) -> f64 {
+fn relative_entropy_exp_fx(
+    hmm: &Hmm,
+    bg: &Bg,
+    prior: PriorStrategy,
+    exp: f64,
+    etarget: f64,
+) -> f64 {
     let mut trial = hmm.clone();
     scale_counts_exponential(&mut trial, exp);
-    crate::prior::apply_priors(&mut trial);
+    crate::prior::apply_priors_with_strategy(&mut trial, prior);
     mean_match_relative_entropy(&trial, bg) - etarget
 }
 
@@ -253,7 +264,7 @@ mod tests {
         let abc = Alphabet::new(hmm.abc_type);
         let bg = Bg::new(&abc);
 
-        let neff = entropy_weight(&mut hmm, &bg, None, None);
+        let neff = entropy_weight(&mut hmm, &bg, PriorStrategy::Default, None, None);
         assert!(
             neff > 0.0 && neff <= hmm.nseq as f32,
             "Neff {} should be between 0 and nseq={}",

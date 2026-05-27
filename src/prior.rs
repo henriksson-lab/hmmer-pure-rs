@@ -230,10 +230,38 @@ impl Default for TransitionPrior {
     /// HMMER3 default transition Dirichlet (Mitchison, trained on Pfam);
     /// the same numbers as `p7_prior_CreateAmino`.
     fn default() -> Self {
+        TransitionPrior::amino()
+    }
+}
+
+impl TransitionPrior {
+    /// Amino-acid transition Dirichlet (Mitchison, trained on Pfam);
+    /// `p7_prior_CreateAmino` (`p7_prior.c:74-85`).
+    pub fn amino() -> Self {
         TransitionPrior {
             tm: [0.7939, 0.0278, 0.0135], // Mitchison, trained on Pfam
             ti: [0.1551, 0.1331],
             td: [0.9002, 0.5630],
+        }
+    }
+
+    /// Nucleic-acid transition Dirichlet (trained on rmark benchmark);
+    /// `p7_prior_CreateNucleic` (`p7_prior.c:190-201`).
+    pub fn nucleic() -> Self {
+        TransitionPrior {
+            tm: [2.0, 0.1, 0.1], // TMM, TMI, TMD
+            ti: [0.12, 0.4],     // TIM, TII
+            td: [0.5, 1.0],      // TDM, TDD
+        }
+    }
+
+    /// Select the transition prior matching the alphabet size, mirroring
+    /// C's `p7_builder.c:134-137` (nucleic for eslDNA/eslRNA, amino otherwise).
+    pub fn for_alphabet(abc_k: usize) -> Self {
+        if abc_k == 4 {
+            TransitionPrior::nucleic()
+        } else {
+            TransitionPrior::amino()
         }
     }
 }
@@ -332,7 +360,7 @@ fn apply_default_priors(hmm: &mut crate::hmm::Hmm) {
     use crate::hmm::*;
     let k = hmm.abc_k;
     let m = hmm.m;
-    let trans = TransitionPrior::default();
+    let trans = TransitionPrior::for_alphabet(k);
 
     for node in 0..=m {
         let mt_counts = [hmm.t[node][MM], hmm.t[node][MI], hmm.t[node][MD]];
@@ -397,8 +425,57 @@ fn apply_default_priors(hmm: &mut crate::hmm::Hmm) {
     }
 }
 
+/// NULL-prior path: C's `p7_ParameterEstimation` returns `p7_hmm_Renormalize`
+/// when `pri==NULL` (`p7_prior.c:307`). Port `p7_hmm_Renormalize`
+/// (`p7_hmm.c:855-883`) exactly: per-group `esl_vec_FNorm`, then the two
+/// terminal-state fixups at node M.
 fn apply_none_priors(hmm: &mut crate::hmm::Hmm) {
-    parameterize_with_uniform_alpha(hmm, 0.0);
+    use crate::hmm::*;
+    let k = hmm.abc_k;
+    let m = hmm.m;
+
+    for node in 0..=m {
+        fnorm(&mut hmm.mat[node][..k]);
+        fnorm(&mut hmm.ins[node][..k]);
+        // Transition groups: TMAT (MM,MI,MD), TINS (IM,II), TDEL (DM,DD).
+        fnorm_t(&mut hmm.t[node], MM, 3);
+        fnorm_t(&mut hmm.t[node], IM, 2);
+        fnorm_t(&mut hmm.t[node], DM, 2);
+    }
+
+    // If t[M][TD*] was all zeros, FNorm made TDD nonzero (0.5/0.5). Re-enforce.
+    hmm.t[m][DM] = 1.0;
+    hmm.t[m][DD] = 0.0;
+
+    // Rare: if t[M][TM*] was all zeros, the nonexistent M_M->D_M+1 became
+    // nonzero. Fix that too.
+    if hmm.t[m][MD] > 0.0 {
+        hmm.t[m][MD] = 0.0;
+        hmm.t[m][MM] = 0.5;
+        hmm.t[m][MI] = 0.5;
+    }
+}
+
+/// `esl_vec_FNorm`: normalise a non-negative vector to sum to 1; if the sum is
+/// zero, set the uniform distribution.
+fn fnorm(values: &mut [f32]) {
+    let sum: f32 = values.iter().sum();
+    if sum != 0.0 {
+        for v in values.iter_mut() {
+            *v /= sum;
+        }
+    } else if !values.is_empty() {
+        let uniform = 1.0 / values.len() as f32;
+        for v in values.iter_mut() {
+            *v = uniform;
+        }
+    }
+}
+
+/// FNorm a contiguous transition group `t[start..start+n]` (indices follow the
+/// p7H_* layout: MM..MD, IM..II, DM..DD).
+fn fnorm_t(t: &mut [f32], start: usize, n: usize) {
+    fnorm(&mut t[start..start + n]);
 }
 
 fn apply_laplace_priors(hmm: &mut crate::hmm::Hmm) {

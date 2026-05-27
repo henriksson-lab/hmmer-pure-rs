@@ -444,6 +444,15 @@ impl<R: Read> SeqFile<R> {
         if code == DSQ_IGNORED {
             return Ok(None);
         }
+        // C's per-format inmaps (`inmap_fasta`/`inmap_embl`, esl_sqio_ascii.c)
+        // inherit the alphabet inmap, which `SetEquiv`s '.' and '_' to the gap
+        // code, and then override only '-' -> ILLEGAL. So in digital read mode
+        // '.' and '_' are accepted as gap residues (stored in the dsq, counted
+        // toward sequence length) while '-' is rejected. Match that exactly:
+        // accept the gap code only when it originated from '.' or '_'.
+        if self.abc.is_gap(code) && (ch == b'.' || ch == b'_') {
+            return Ok(Some(code));
+        }
         if code == DSQ_ILLEGAL || (!self.abc.is_residue(code) && code != self.abc.nonresidue_code())
         {
             let display = if ch.is_ascii_graphic() || ch == b' ' {
@@ -640,6 +649,22 @@ mod tests {
     fn test_read_fasta_rejects_gap() {
         let err = read_fasta_text(">seq\nAC-D\n").unwrap_err();
         assert!(matches!(err, HmmerError::Format(_)));
+    }
+
+    #[test]
+    fn test_read_fasta_accepts_dot_and_underscore_gaps() {
+        // C digital FASTA read (inmap_fasta) accepts '.' and '_' as gap residues
+        // while rejecting '-'. Verified: `esl-seqstat --amino` reports 6 residues
+        // for `>seq\nAC.DEF` and `>seq\nAC_DEF`, but errors on `AC-DEF`.
+        let dot = read_fasta_text(">seq\nAC.DEF\n").unwrap();
+        assert_eq!(dot.n, 6);
+        let under = read_fasta_text(">seq\nAC_DEF\n").unwrap();
+        assert_eq!(under.n, 6);
+        // '-' is still rejected (matches inmap_fasta's '-' -> ILLEGAL override).
+        assert!(matches!(
+            read_fasta_text(">seq\nAC-DEF\n"),
+            Err(HmmerError::Format(_))
+        ));
     }
 
     #[test]

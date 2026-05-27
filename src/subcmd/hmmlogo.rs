@@ -179,6 +179,15 @@ fn residue_heights(
     let mut heights = vec![0.0_f32; k];
     for (x, height) in heights.iter_mut().enumerate().take(k) {
         let p = hmm.mat[node][x];
+        // C's hmmlogo_ScoreHeights (hmmlogo.c:108-116) computes log(p/bg)
+        // UNCONDITIONALLY — no guard on p — so a zero match emission yields
+        // log(0) = -inf, which prints as "  -inf" under %6.3f. The two relent
+        // modes (hmmlogo.c:48-50, 86-92) instead leave height at 0.0 when
+        // p == 0, so they keep the guard.
+        if mode == LogoMode::Score {
+            *height = (c_log_f64((p / bg.f[x]) as f64) * ESL_CONST_LOG2R) as f32;
+            continue;
+        }
         if p <= 0.0 || bg.f[x] <= 0.0 {
             continue;
         }
@@ -192,7 +201,7 @@ fn residue_heights(
                     0.0
                 }
             }
-            LogoMode::Score => logodds,
+            LogoMode::Score => unreachable!("score mode handled above"),
         };
     }
 
@@ -227,5 +236,36 @@ mod tests {
         .filter(|v| *v)
         .count();
         assert_eq!(count, 2);
+    }
+
+    /// hmmlogo F1: in Score mode a zero match emission must yield -inf
+    /// (C's hmmlogo_ScoreHeights computes log(p/bg) unguarded). The two relent
+    /// modes keep the p<=0 guard and leave the height at 0.0, matching C.
+    #[test]
+    fn hmmlogo_score_mode_zero_emission_is_neg_inf() {
+        use hmmer_pure_rs::alphabet::AlphabetType;
+
+        let abc = Alphabet::new(AlphabetType::Amino);
+        let bg = Bg::new(&abc);
+        let k = abc.k;
+
+        // One node, residue 0 has zero emission, residue 1 has a nonzero prob.
+        let mut hmm = hmmer_pure_rs::Hmm::new(1, AlphabetType::Amino, k);
+        hmm.mat[1][0] = 0.0;
+        hmm.mat[1][1] = 1.0;
+
+        let (_relent, heights) = residue_heights(&hmm, &bg, 1, LogoMode::Score);
+        assert!(
+            heights[0].is_infinite() && heights[0] < 0.0,
+            "score-mode zero emission should be -inf, got {}",
+            heights[0]
+        );
+        assert!(heights[1].is_finite());
+
+        // Relent modes keep the guard: zero emission stays 0.0 (finite).
+        let (_r, h_all) = residue_heights(&hmm, &bg, 1, LogoMode::RelentAll);
+        assert_eq!(h_all[0], 0.0);
+        let (_r, h_bg) = residue_heights(&hmm, &bg, 1, LogoMode::RelentAboveBg);
+        assert_eq!(h_bg[0], 0.0);
     }
 }
