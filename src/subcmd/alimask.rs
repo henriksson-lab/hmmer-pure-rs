@@ -202,7 +202,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     }
 
-    let msas = read_stockholm_maybe_stdin(&args.msafile).unwrap_or_else(|e| {
+    let (msas, full_msas) = read_stockholm_maybe_stdin(&args.msafile).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
@@ -302,7 +302,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
 
-    for stockholm in &msas {
+    for (stockholm, full) in msas.iter().zip(full_msas.iter()) {
         let alignment = &stockholm.msa;
         if let Some(ref mask) = args.modelmask {
             if mask.len() != alignment.alen {
@@ -386,7 +386,43 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             range_mask = args.modelmask.as_ref().map(|mask| mask.as_bytes().to_vec());
         }
 
-        write_stockholm_with_updated_mask(&mut out, stockholm, range_mask.as_deref()).unwrap();
+        // C re-serializes the whole MSA via esl_msafile_Write(...
+        // eslMSAFILE_STOCKHOLM) -> stockholm_write(fp, msa, cpl=200). C opens
+        // the input through esl_msafile_Open(&abc, ...) with an explicit or
+        // autodetected alphabet (digital mode), so stockholm_write textizes the
+        // sequences: gap chars normalize to '-' and residues become canonical.
+        // We mirror that by setting MM on the full-fidelity model and writing it
+        // through the faithful writer with that alphabet.
+        let write_abc = inferred_abc.clone().unwrap_or_else(|| {
+            if args.dna {
+                Alphabet::dna()
+            } else if args.rna {
+                Alphabet::rna()
+            } else if args.amino {
+                Alphabet::amino()
+            } else {
+                Alphabet::new(guess_msa_alphabet(alignment).unwrap_or_else(|e| {
+                    eprintln!("{e}; please specify --amino, --dna, or --rna");
+                    std::process::exit(1);
+                }))
+            }
+        });
+        let mut full = full.clone();
+        if let Some(mask) = range_mask.as_deref() {
+            full.mm = Some(mask.to_vec());
+        }
+        // C (alimask.c:380-396): in --modelrange mode the MSA is relative-weighted
+        // before the map is built. --wpb/--wgsc/--wblosum raise eslMSA_HASWGTS, so
+        // the output MSA carries #=GS ... WT lines; --wnone/--wgiven do not.
+        if args.modelrange.is_some() {
+            if let Some(weights) =
+                compute_output_weights(alignment, &write_abc, args.hand, weighting_strategy)
+            {
+                full.has_wgts = true;
+                full.wgt = weights;
+            }
+        }
+        msa::write_stockholm_full(&mut out, &full, 200, Some(&write_abc)).unwrap();
     }
 
     std::process::ExitCode::SUCCESS
@@ -748,50 +784,50 @@ fn write_alignment_to_model_map(
     Ok(())
 }
 
+/// Compute the relative weights that C's `alimask` would write as `#=GS ... WT`
+/// in `--modelrange` mode. Returns `Some` only for the weighting schemes that
+/// raise `eslMSA_HASWGTS` in C (`--wpb`/`--wgsc`/`--wblosum`); `--wnone` and
+/// `--wgiven` return `None` (no WT lines written), matching C.
+fn compute_output_weights(
+    alignment: &msa::Msa,
+    abc: &Alphabet,
+    hand: bool,
+    weighting_strategy: RelativeWeighting,
+) -> Option<Vec<f64>> {
+    match weighting_strategy {
+        RelativeWeighting::PositionBased => Some(builder::pb_weights(alignment, abc, !hand)),
+        RelativeWeighting::Gsc => Some(builder::gsc_weights(alignment, abc)),
+        RelativeWeighting::Blosum { identity_cutoff } => {
+            Some(builder::blosum_weights(alignment, abc, identity_cutoff))
+        }
+        RelativeWeighting::None | RelativeWeighting::Given => None,
+    }
+}
+
 fn is_rf_consensus(sym: u8) -> bool {
     sym != b'.' && sym != b'-' && sym != b'_' && sym != b'~'
 }
 
-fn write_stockholm_with_updated_mask<W: Write>(
-    out: &mut W,
-    stockholm: &msa::StockholmMsa,
-    mask: Option<&[u8]>,
-) -> std::io::Result<()> {
-    writeln!(out, "# STOCKHOLM 1.0")?;
-
-    let mut wrote_mask = false;
-    for line in &stockholm.body_lines {
-        if is_gc_mm_line(line) {
-            if let Some(mask) = mask.filter(|_| !wrote_mask) {
-                writeln!(out, "#=GC MM {}", String::from_utf8_lossy(mask))?;
-                wrote_mask = true;
-            }
-            continue;
-        }
-        writeln!(out, "{line}")?;
-    }
-    if let Some(mask) = mask.filter(|_| !wrote_mask) {
-        writeln!(out, "#=GC MM {}", String::from_utf8_lossy(mask))?;
-    }
-    writeln!(out, "//")?;
-    Ok(())
-}
-
-fn is_gc_mm_line(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix("#=GC ") else {
-        return false;
-    };
-    rest.split_whitespace().next() == Some("MM")
-}
-
+/// Read the input alignment(s) twice: once into the simplified `StockholmMsa`
+/// model (used for the coordinate/weighting/masking math) and once into the
+/// full-fidelity `FullStockholm` model (used to re-serialize the masked MSA
+/// byte-for-byte like C's `esl_msafile_Write`). When the input is stdin, the
+/// bytes are buffered so both parses see identical content.
 fn read_stockholm_maybe_stdin(
     path: &std::path::Path,
-) -> hmmer_pure_rs::errors::HmmerResult<Vec<msa::StockholmMsa>> {
+) -> hmmer_pure_rs::errors::HmmerResult<(Vec<msa::StockholmMsa>, Vec<msa::FullStockholm>)> {
     if path == std::path::Path::new("-") {
-        let stdin = std::io::stdin();
-        msa::read_stockholm_preserved_from_reader(BufReader::new(stdin.lock()))
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
+            .map_err(hmmer_pure_rs::errors::HmmerError::Io)?;
+        let preserved =
+            msa::read_stockholm_preserved_from_reader(BufReader::new(&bytes[..]))?;
+        let full = msa::read_stockholm_full_from_reader(BufReader::new(&bytes[..]))?;
+        Ok((preserved, full))
     } else {
-        msa::read_stockholm_preserved(path)
+        let preserved = msa::read_stockholm_preserved(path)?;
+        let full = msa::read_stockholm_full(path)?;
+        Ok((preserved, full))
     }
 }
 

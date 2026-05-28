@@ -484,6 +484,66 @@ fn write_rows(msa: &TextMsa) -> Vec<msa::WriteRow<'_>> {
 /// optimal accuracy traceback) and stitch the per-sequence traces into a single
 /// text MSA, computing per-column PP_cons. Counterpart to the alignment block of
 /// `main()` in hmmalign.c when no `--mapali` is supplied.
+/// A per-sequence alignment result: the optimal-accuracy traceback and a small
+/// per-trace-position posterior vector (`pp_z[z]` = the posterior for the residue
+/// emitted at trace position `z`; 0 for non-emitting states).
+type AlignedTrace = (hmmer_pure_rs::trace::Trace, Vec<f32>);
+
+/// Forward/Backward + posterior decoding + optimal-accuracy traceback for every
+/// sequence. Mirrors the per-sequence loop in C `p7_tracealign_Seqs`: the DP
+/// matrices (and the profile) are allocated ONCE and reused (grown) across
+/// sequences via `p7_gmx_GrowTo`-style reuse, so only the trace and a small
+/// O(L) posterior vector are retained per sequence — never the O(M*L) matrices.
+fn align_traces(
+    hmm: &hmmer_pure_rs::hmm::Hmm,
+    abc: &Alphabet,
+    bg: &Bg,
+    sequences: &[Sequence],
+) -> Vec<AlignedTrace> {
+    // Configure the (L-independent) profile scores ONCE; only the length model
+    // is updated per sequence via reconfig_length. Mirrors C p7_tracealign_Seqs,
+    // which calls p7_ProfileConfig once and p7_ReconfigLength per target.
+    let mut gm = Profile::new(hmm.m, abc);
+    profile::profile_config(hmm, bg, &mut gm, 100, P7_UNILOCAL);
+    let mut fwd = Gmx::new(hmm.m, 0);
+    let mut bck = Gmx::new(hmm.m, 0);
+    let mut pp = Gmx::new(hmm.m, 0);
+    let mut oa = Gmx::new(hmm.m, 0);
+
+    let mut out = Vec::with_capacity(sequences.len());
+    for sq in sequences {
+        profile::reconfig_length(&mut gm, sq.n as i32);
+        fwd.grow_to(hmm.m, sq.n);
+        bck.grow_to(hmm.m, sq.n);
+        pp.grow_to(hmm.m, sq.n);
+        oa.grow_to(hmm.m, sq.n);
+
+        g_forward(&sq.dsq, sq.n, &gm, &mut fwd);
+        g_backward(&sq.dsq, sq.n, &gm, &mut bck);
+        g_decoding(&gm, &fwd, &bck, &mut pp);
+        g_optimal_accuracy(&gm, &pp, &mut oa);
+        let tr = g_oa_trace(&gm, &pp, &oa);
+        let pp_z = trace_posteriors(&tr, &pp);
+        out.push((tr, pp_z));
+    }
+    out
+}
+
+/// Extract the per-residue posterior probability at each trace position, while
+/// the posterior matrix is still alive, so the O(M*L) matrix can be dropped.
+fn trace_posteriors(tr: &hmmer_pure_rs::trace::Trace, pp: &Gmx) -> Vec<f32> {
+    let mut v = vec![0.0_f32; tr.n];
+    for z in 0..tr.n {
+        v[z] = match tr.st[z] {
+            State::M => pp.mmx(tr.i[z], tr.k[z]),
+            State::I => pp.imx(tr.i[z], tr.k[z]),
+            State::N | State::C => pp.xmx(tr.i[z], state_pp_index(tr.st[z])),
+            _ => 0.0,
+        };
+    }
+    v
+}
+
 fn build_text_msa(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,
@@ -491,38 +551,19 @@ fn build_text_msa(
     sequences: &[Sequence],
     trim: bool,
 ) -> TextMsa {
-    let traces: Vec<_> = sequences
-        .iter()
-        .map(|sq| {
-            let mut gm = Profile::new(hmm.m, abc);
-            profile::profile_config(hmm, bg, &mut gm, sq.n as i32, P7_UNILOCAL);
-
-            let mut fwd = Gmx::new(hmm.m, sq.n);
-            let mut bck = Gmx::new(hmm.m, sq.n);
-            let mut pp = Gmx::new(hmm.m, sq.n);
-            let mut oa = Gmx::new(hmm.m, sq.n);
-
-            g_forward(&sq.dsq, sq.n, &gm, &mut fwd);
-            g_backward(&sq.dsq, sq.n, &gm, &mut bck);
-            g_decoding(&gm, &fwd, &bck, &mut pp);
-            g_optimal_accuracy(&gm, &pp, &mut oa);
-            let tr = g_oa_trace(&gm, &pp, &oa);
-
-            (gm, pp, tr)
-        })
-        .collect();
+    let traces = align_traces(hmm, abc, bg, sequences);
 
     let (inscount, matuse, matmap, alen) = map_new_msa(hmm.m, &traces, trim);
     let mut rows = Vec::with_capacity(sequences.len());
     let mut pp_cons_sum = vec![0.0_f32; alen];
     let mut pp_cons_n = vec![0usize; alen];
 
-    for (sq, (_gm, pp, tr)) in sequences.iter().zip(traces.iter()) {
-        let (aseq, ppline) = make_text_row(abc, sq, tr, pp, &matuse, &matmap, alen, trim);
+    for (sq, (tr, pp_z)) in sequences.iter().zip(traces.iter()) {
+        let (aseq, ppline) = make_text_row(abc, sq, tr, pp_z, &matuse, &matmap, alen, trim);
         for z in 0..tr.n {
             if tr.st[z] == State::M {
                 let apos = matmap[tr.k[z]] - 1;
-                pp_cons_sum[apos] += pp.mmx(tr.i[z], tr.k[z]).min(1.0);
+                pp_cons_sum[apos] += pp_z[z].min(1.0);
                 pp_cons_n[apos] += 1;
             }
         }
@@ -597,27 +638,9 @@ fn build_text_msa_with_mapali(
         inscount[hmm.m] = 0;
     }
 
-    let traces: Vec<_> = sequences
-        .iter()
-        .map(|sq| {
-            let mut gm = Profile::new(hmm.m, abc);
-            profile::profile_config(hmm, bg, &mut gm, sq.n as i32, P7_UNILOCAL);
+    let traces = align_traces(hmm, abc, bg, sequences);
 
-            let mut fwd = Gmx::new(hmm.m, sq.n);
-            let mut bck = Gmx::new(hmm.m, sq.n);
-            let mut pp = Gmx::new(hmm.m, sq.n);
-            let mut oa = Gmx::new(hmm.m, sq.n);
-
-            g_forward(&sq.dsq, sq.n, &gm, &mut fwd);
-            g_backward(&sq.dsq, sq.n, &gm, &mut bck);
-            g_decoding(&gm, &fwd, &bck, &mut pp);
-            g_optimal_accuracy(&gm, &pp, &mut oa);
-            let tr = g_oa_trace(&gm, &pp, &oa);
-            (pp, tr)
-        })
-        .collect();
-
-    for (_, tr) in &traces {
+    for (tr, _) in &traces {
         update_insert_widths_from_trace(&mut inscount, tr, hmm.m);
     }
 
@@ -640,13 +663,14 @@ fn build_text_msa_with_mapali(
 
     let mut pp_cons_sum = vec![0.0_f32; alen];
     let mut pp_cons_n = vec![0usize; alen];
-    for (sq, (pp, tr)) in sequences.iter().zip(traces.iter()) {
-        let (mut aseq, mut ppline) = make_text_row(abc, sq, tr, pp, &matuse, &matmap, alen, trim);
+    for (sq, (tr, pp_z)) in sequences.iter().zip(traces.iter()) {
+        let (mut aseq, mut ppline) =
+            make_text_row(abc, sq, tr, pp_z, &matuse, &matmap, alen, trim);
         rejustify_insertions_text(&mut aseq, &mut ppline, &inscount, &matmap, &matuse, hmm.m);
         for z in 0..tr.n {
             if tr.st[z] == State::M {
                 let apos = matmap[tr.k[z]] - 1;
-                pp_cons_sum[apos] += pp.mmx(tr.i[z], tr.k[z]).min(1.0);
+                pp_cons_sum[apos] += pp_z[z].min(1.0);
                 pp_cons_n[apos] += 1;
             }
         }
@@ -851,7 +875,7 @@ fn normalize_mapped_consensus_char(ch: u8) -> u8 {
 /// HMMER's `p7_tracealign_Seqs()` map-construction step.
 fn map_new_msa(
     m: usize,
-    traces: &[(Profile, Gmx, hmmer_pure_rs::trace::Trace)],
+    traces: &[AlignedTrace],
     trim: bool,
 ) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
     let mut inscount = vec![0usize; m + 1];
@@ -859,7 +883,7 @@ fn map_new_msa(
     matuse[0] = false;
     let mut insnum = vec![0usize; m + 1];
 
-    for (_, _, tr) in traces {
+    for (tr, _) in traces {
         insnum.fill(0);
         for z in 1..tr.n {
             match tr.st[z] {
@@ -903,7 +927,7 @@ fn make_text_row(
     abc: &Alphabet,
     sq: &Sequence,
     tr: &hmmer_pure_rs::trace::Trace,
-    pp: &Gmx,
+    pp_z: &[f32],
     matuse: &[bool],
     matmap: &[usize],
     alen: usize,
@@ -923,7 +947,7 @@ fn make_text_row(
             State::M => {
                 let idx = matmap[tr.k[z]] - 1;
                 aseq[idx] = (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_uppercase() as u8;
-                ppline[idx] = pp_to_char(pp.mmx(tr.i[z], tr.k[z]).min(1.0)) as u8;
+                ppline[idx] = pp_to_char(pp_z[z].min(1.0)) as u8;
                 apos = matmap[tr.k[z]];
             }
             State::D => {
@@ -936,7 +960,7 @@ fn make_text_row(
                 if apos < alen {
                     aseq[apos] =
                         (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_lowercase() as u8;
-                    ppline[apos] = pp_to_char(pp.imx(tr.i[z], tr.k[z]).min(1.0)) as u8;
+                    ppline[apos] = pp_to_char(pp_z[z].min(1.0)) as u8;
                     apos += 1;
                 }
             }
@@ -944,8 +968,7 @@ fn make_text_row(
                 if !trim && tr.i[z] > 0 && apos < alen {
                     aseq[apos] =
                         (abc.sym[sq.dsq[tr.i[z]] as usize] as char).to_ascii_lowercase() as u8;
-                    ppline[apos] =
-                        pp_to_char(pp.xmx(tr.i[z], state_pp_index(tr.st[z])).min(1.0)) as u8;
+                    ppline[apos] = pp_to_char(pp_z[z].min(1.0)) as u8;
                     apos += 1;
                 }
             }

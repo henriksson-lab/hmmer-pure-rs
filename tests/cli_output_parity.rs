@@ -8452,6 +8452,85 @@ fn hmmbuild_preserves_stockholm_gf_accession_and_description() {
     assert!(hmm.contains("DESC  second line\n"));
 }
 
+/// Run both C and Rust `alimask` with the same args (where the last arg is the
+/// output masked-MSA path placeholder) and assert the masked output files are
+/// byte-identical. `args` must NOT include the output path; it is appended.
+fn assert_alimask_masked_byte_identical(args: &[&str], input: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_out = dir.path().join("rust.sto");
+    let c_out = dir.path().join("c.sto");
+
+    let mut rust_args: Vec<&str> = vec!["alimask"];
+    rust_args.extend_from_slice(args);
+    rust_args.push(input);
+    let rust_out_s = rust_out.to_str().unwrap();
+    rust_args.push(rust_out_s);
+    let rust = Command::new(hmmer()).args(&rust_args).output().unwrap();
+    assert!(
+        rust.status.success(),
+        "rust alimask failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let mut c_args: Vec<&str> = args.to_vec();
+    c_args.push(input);
+    let c_out_s = c_out.to_str().unwrap();
+    c_args.push(c_out_s);
+    let c = Command::new(c_alimask()).args(&c_args).output().unwrap();
+    assert!(
+        c.status.success(),
+        "c alimask failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let rust_bytes = std::fs::read(&rust_out).unwrap();
+    let c_bytes = std::fs::read(&c_out).unwrap();
+    assert_eq!(
+        rust_bytes,
+        c_bytes,
+        "masked MSA for `alimask {}` not byte-identical to C:\n--- RUST ---\n{}\n--- C ---\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&rust_bytes),
+        String::from_utf8_lossy(&c_bytes)
+    );
+}
+
+#[test]
+fn alimask_masked_msa_byte_identical_to_c_tutorial_files() {
+    // F3: the masked MSA is re-serialized via the full Stockholm writer (port of
+    // esl_msafile_stockholm.c stockholm_write, cpl=200) and must match C exactly
+    // — name-column margins, GF/GS reflow, gap normalization to '-', block
+    // wrapping at 200 columns, and MM placement among the #=GC lines.
+    for f in ["globins4", "fn3", "Pkinase"] {
+        let input = format!("hmmer/tutorial/{f}.sto");
+        // --alirange: pure reflow, no weighting (no #=GS WT lines).
+        assert_alimask_masked_byte_identical(&["--alirange", "5-20"], &input);
+        // --modelrange: runs relative weighting -> emits #=GS WT lines.
+        assert_alimask_masked_byte_identical(&["--modelrange", "5-20"], &input);
+    }
+}
+
+#[test]
+fn alimask_appendmask_masked_msa_byte_identical_to_c() {
+    // --appendmask ORs the new range onto the input's existing #=GC MM line, and
+    // the whole MSA is re-serialized; verify byte-identity against C.
+    let dir = tempfile::tempdir().unwrap();
+    let withmm = dir.path().join("withmm.sto");
+    // First produce an input that already carries a #=GC MM line, via C alimask.
+    let c0 = Command::new(c_alimask())
+        .args([
+            "--alirange",
+            "1-4",
+            "hmmer/tutorial/globins4.sto",
+            withmm.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(c0.status.success(), "{}", String::from_utf8_lossy(&c0.stderr));
+    let withmm_s = withmm.to_str().unwrap();
+    assert_alimask_masked_byte_identical(&["--appendmask", "--alirange", "9-12"], withmm_s);
+}
+
 #[test]
 fn alimask_accepts_stockholm_stdin_with_informat() {
     for informat in ["stockholm", "sto"] {
@@ -9063,45 +9142,64 @@ fn alimask_summary_header_seed_wid_wgiven_match_c() {
 
 #[test]
 fn alimask_preserves_stockholm_metadata_while_replacing_mask() {
+    // The masked MSA is re-serialized through the full Stockholm writer
+    // (port of esl_msafile_stockholm.c stockholm_write, cpl=200), so the whole
+    // file must be BYTE-IDENTICAL to C alimask. This exercises GF reflow
+    // (ID/AC/DE specials then the arbitrary XX tag), GS reflow (DE then the
+    // arbitrary OS tag, each group followed by a blank line), GR reordering
+    // (SS/SA/PP order regardless of input order), and GC reordering
+    // (SS_cons/SA_cons/PP_cons/RF/MM). Annotation lengths must equal alen or C
+    // rejects the file, so SA is 6 chars here; --amino is needed because the
+    // single 6-residue sequence is too short for alphabet autodetection (C
+    // fails the same way without it).
     let dir = tempfile::tempdir().unwrap();
     let sto = dir.path().join("meta.sto");
-    let masked = dir.path().join("masked.sto");
+    let rust_masked = dir.path().join("rust.sto");
+    let c_masked = dir.path().join("c.sto");
     std::fs::write(
         &sto,
-        b"# STOCKHOLM 1.0\n#=GF ID meta\n#=GF AC PF00001.1\n#=GF DE first line\n#=GF XX unknown gf\n#=GS s1 DE parsed seq desc\n#=GS s1 OS unknown gs\ns1 ACDEFG\n#=GR s1 PP 999999\n#=GR s1 SA unknown\n#=GC RF xxxxxx\n#=GC PP_cons 888888\n#=GC SS_cons <<<<<<\n#=GC MM ......\n//\n",
+        b"# STOCKHOLM 1.0\n#=GF ID meta\n#=GF AC PF00001.1\n#=GF DE first line\n#=GF XX unknown gf\n#=GS s1 DE parsed seq desc\n#=GS s1 OS unknown gs\ns1 ACDEFG\n#=GR s1 PP 999999\n#=GR s1 SA HHHHHH\n#=GC RF xxxxxx\n#=GC PP_cons 888888\n#=GC SS_cons <<<<<<\n#=GC MM ......\n//\n",
     )
     .unwrap();
 
-    let output = Command::new(hmmer())
+    let rust = Command::new(hmmer())
         .args([
             "alimask",
+            "--amino",
             "--alirange",
             "2..4",
             sto.to_str().unwrap(),
-            masked.to_str().unwrap(),
+            rust_masked.to_str().unwrap(),
         ])
         .output()
         .unwrap();
-
     assert!(
-        output.status.success(),
+        rust.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&rust.stderr)
     );
-    let masked = std::fs::read_to_string(masked).unwrap();
-    assert!(masked.contains("#=GF ID meta\n"));
-    assert!(masked.contains("#=GF AC PF00001.1\n"));
-    assert!(masked.contains("#=GF DE first line\n"));
-    assert!(masked.contains("#=GF XX unknown gf\n"));
-    assert!(masked.contains("#=GS s1 DE parsed seq desc\n"));
-    assert!(masked.contains("#=GS s1 OS unknown gs\n"));
-    assert!(masked.contains("#=GR s1 PP 999999\n"));
-    assert!(masked.contains("#=GR s1 SA unknown\n"));
-    assert!(masked.contains("#=GC RF xxxxxx\n"));
-    assert!(masked.contains("#=GC PP_cons 888888\n"));
-    assert!(masked.contains("#=GC SS_cons <<<<<<\n"));
-    assert!(masked.contains("#=GC MM .mmm..\n"));
-    assert!(!masked.contains("#=GC MM ......\n"));
+
+    let c = Command::new(c_alimask())
+        .args([
+            "--amino",
+            "--alirange",
+            "2..4",
+            sto.to_str().unwrap(),
+            c_masked.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+
+    let rust_masked = std::fs::read(rust_masked).unwrap();
+    let c_masked = std::fs::read(c_masked).unwrap();
+    assert_eq!(
+        rust_masked,
+        c_masked,
+        "masked MSA not byte-identical to C:\nRUST:\n{}\nC:\n{}",
+        String::from_utf8_lossy(&rust_masked),
+        String::from_utf8_lossy(&c_masked)
+    );
 }
 
 #[test]

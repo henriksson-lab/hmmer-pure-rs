@@ -42,6 +42,23 @@ profile/bg/logsum/calibrate, fm_index, dsqdata, and tophits were all audited and
 **Cleanup:** deleted ~20 stale standalone per-subcommand binaries under `target/release/` (only
 `hmmer` is a build target); they had misled four audit agents into phantom score/domain divergences.
 
+## hmmalign memory/speed fix - 2026-05-28
+
+A speed+RSS benchmark vs C flagged hmmalign as the one outlier: **199 MB RSS (28× C)** and
+1.43× slower. Root cause: `build_text_msa`/`build_text_msa_with_mapali` collected
+`(Profile, pp-Gmx, Trace)` for EVERY sequence, retaining a full O(M*L) posterior matrix +
+profile per sequence simultaneously. Fix (`src/subcmd/hmmalign.rs`): new `align_traces` helper
+that, like C `p7_tracealign_Seqs`, allocates the DP matrices + profile ONCE and reuses them
+(`Gmx::grow_to`), configures the profile once + `reconfig_length` per sequence (not a full
+`profile_config`), and retains only the trace + a small O(L) per-residue posterior vector
+(`trace_posteriors`). `make_text_row`/`map_new_msa` now take `&[f32]` pp instead of `&Gmx`.
+Result: **RSS 199 MB → 11 MB (28× → 1.6×)**, time 1.67s → 1.48s (1.43× → 1.27× of C; the
+residual is the scalar generic Forward/Backward/decoding/OA, un-vectorized in both C and Rust).
+Output verified byte-identical to the prior Rust version (reuse introduces no stale-read) and
+the 23 hmmalign golden tests stay green. Note: a pre-existing 1-char posterior-decoding float
+edge (`5` vs `6` on one residue of one synthetic emitted seq) is unrelated and predates this fix
+(persists with fresh allocation; not in any golden fixture).
+
 ## hmmconvert -2 (HMMER2 ASCII) implemented - 2026-05-27
 
 Ported `p7_h2io_WriteASCII` (`hmmer/src/h2_io.c`) as `hmmfile::write_hmm_h2_ascii` + the
@@ -80,12 +97,16 @@ supported formats all byte-identical.
   (unguarded `log(p/bg)`), matching C; relent modes keep the guard; real-model output unchanged.
 
 **Deferred / surfaced (not fixed):**
-- alimask F3 (HIGH): masked-MSA output is not byte-identical to C — Rust splices the MM line into the
-  original input lines; C re-serializes via `esl_msafile_Write` (cpl=200 block-wrapping with
-  `#=GC MM`/RF repeated per block, name-column padding, gap normalization, GF/GS reflow). The mask
-  CONTENT is correct in every case; only the surrounding serialization differs. Needs a new
-  C-faithful Stockholm writer in `src/msa.rs` (none exists; the jackhmmer/hmmemit writers don't
-  block-wrap) — a focused follow-up.
+- alimask F3 (HIGH): **FIXED 2026-05-27.** Ported Easel's `stockholm_write` (`esl_msafile_stockholm.c`)
+  as `msa::write_stockholm_full` over a new additive `FullStockholm` model + `read_stockholm_full`
+  (captures ordered GF incl. ID/AC/DE/AU/GA/NC/TC, per-seq GS incl. WT/AC/DE, GC RF/MM/SS_cons/
+  SA_cons/PP_cons + arbitrary, per-seq GR + arbitrary, comments, weights, unique-name handling).
+  alimask now reads full annotation → sets/OR-merges MM → re-serializes (cpl=200 block-wrapping,
+  recomputed margins, GF/GS reflow). **Byte-identical to C `alimask`** across fn3/globins4/Pkinase ×
+  alirange/modelrange/all weighting schemes + appendmask OR-merge. The existing simplified `Msa` /
+  `read_stockholm` / other writers (hmmbuild/hmmalign consumers) were left untouched — new path is
+  isolated. Note: alimask digitizes (gaps→`-`); `esl-reformat stockholm` textizes gaps→`.`, so the
+  writer matches alimask (the actual target), not esl-reformat.
 - hmmconvert C1 (MED): `-2` HMMER2 legacy ASCII output — **IMPLEMENTED 2026-05-27** (see below).
 - alimask F4 (afa/clustal output formats), F2 (`--modelmask` Rust superset), and the project-wide
   clap-vs-Easel patterns (error wording, exit code 2-vs-1, options-after-positionals, help banner)
