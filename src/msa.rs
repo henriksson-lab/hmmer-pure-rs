@@ -2,9 +2,36 @@
 
 use crate::alphabet::{Alphabet, Dsq, DSQ_ILLEGAL};
 use crate::errors::{HmmerError, HmmerResult};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+
+const MAX_TEXT_MSA_BYTES: usize = 512 * 1024 * 1024;
+
+fn read_text_msa_to_string<R: Read>(reader: &mut R) -> HmmerResult<String> {
+    read_text_msa_to_string_with_limit(reader, MAX_TEXT_MSA_BYTES)
+}
+
+fn read_text_msa_to_string_with_limit<R: Read>(
+    reader: &mut R,
+    limit: usize,
+) -> HmmerResult<String> {
+    let mut bytes = Vec::new();
+    let max_read = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    reader
+        .take(max_read)
+        .read_to_end(&mut bytes)
+        .map_err(HmmerError::Io)?;
+    if bytes.len() > limit {
+        return Err(HmmerError::Format(format!(
+            "MSA input exceeds {} bytes",
+            limit
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| HmmerError::Format(format!("invalid UTF-8 in MSA input: {e}")))
+}
 
 /// Stockholm model-specific bit score cutoffs from `#=GF GA/TC/NC`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -171,8 +198,7 @@ pub fn read_afa_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_afa_alignment(&text, alignment_name)?])
 }
 
@@ -193,8 +219,7 @@ pub fn read_a2m_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_a2m_alignment(&text, alignment_name)?])
 }
 
@@ -210,8 +235,7 @@ pub fn read_psiblast_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_psiblast_alignment(&text, alignment_name)?])
 }
 
@@ -227,8 +251,7 @@ pub fn read_clustal_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_clustal_alignment(&text, alignment_name)?])
 }
 
@@ -244,8 +267,7 @@ pub fn read_selex_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_selex_alignment(&text, alignment_name)?])
 }
 
@@ -261,8 +283,7 @@ pub fn read_phylip_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_interleaved_phylip_alignment(
         &text,
         alignment_name,
@@ -281,8 +302,7 @@ pub fn read_phylips_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
 ) -> HmmerResult<Vec<Msa>> {
-    let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(HmmerError::Io)?;
+    let text = read_text_msa_to_string(reader)?;
     Ok(vec![parse_sequential_phylip_alignment(
         &text,
         alignment_name,
@@ -464,8 +484,8 @@ fn parse_a2m_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
 
     let alen = ncons + insert_widths.iter().sum::<usize>();
     let mut rf = Vec::with_capacity(alen);
-    for idx in 0..=ncons {
-        rf.extend(std::iter::repeat(b'.').take(insert_widths[idx]));
+    for (idx, &width) in insert_widths.iter().enumerate().take(ncons + 1) {
+        rf.extend(std::iter::repeat_n(b'.', width));
         if idx < ncons {
             rf.push(b'x');
         }
@@ -476,13 +496,12 @@ fn parse_a2m_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
     let mut aseq = Vec::with_capacity(records.len());
     for record in records {
         let mut row = Vec::with_capacity(alen);
-        for idx in 0..=ncons {
-            row.extend_from_slice(&record.inserts[idx]);
+        for (idx, &width) in insert_widths.iter().enumerate().take(ncons + 1) {
+            let insert = &record.inserts[idx];
+            row.extend_from_slice(insert);
             // Insert (non-consensus) gap columns use '.' in A2M; C
             // `esl_msafile_a2m.c` emits '.' here (consensus gaps use '-').
-            row.extend(
-                std::iter::repeat(b'.').take(insert_widths[idx] - record.inserts[idx].len()),
-            );
+            row.extend(std::iter::repeat_n(b'.', width - insert.len()));
             if idx < ncons {
                 row.push(record.consensus[idx]);
             }
@@ -650,9 +669,8 @@ fn parse_interleaved_phylip_alignment(text: &str, alignment_name: String) -> Hmm
     let mut sqname = Vec::with_capacity(nseq);
     let mut sqdesc = Vec::with_capacity(nseq);
     let mut aseq = vec![Vec::<u8>::new(); nseq];
-    let mut row = 0usize;
 
-    for (line_idx, line) in records {
+    for (row, (line_idx, line)) in records.into_iter().enumerate() {
         if row < nseq {
             let (name, chunk) = parse_named_phylip_row(line, line_idx)?;
             sqname.push(name.to_string());
@@ -665,7 +683,6 @@ fn parse_interleaved_phylip_alignment(text: &str, alignment_name: String) -> Hmm
                 aseq[seq_idx].extend_from_slice(chunk.as_bytes());
             }
         }
-        row += 1;
     }
 
     if sqname.len() != nseq {
@@ -715,7 +732,9 @@ fn parse_sequential_phylip_alignment(text: &str, alignment_name: String) -> Hmme
     msa_from_rows_with_alen("PHYLIPS", alignment_name, sqname, sqdesc, aseq, alen)
 }
 
-fn parse_phylip_lines(text: &str) -> HmmerResult<(usize, usize, Vec<(usize, &str)>)> {
+type PhylipRows<'a> = Vec<(usize, &'a str)>;
+
+fn parse_phylip_lines(text: &str) -> HmmerResult<(usize, usize, PhylipRows<'_>)> {
     let mut lines = text.lines().enumerate().filter_map(|(idx, line)| {
         let trimmed = line.trim();
         (!trimmed.is_empty()).then_some((idx, trimmed))
@@ -1087,82 +1106,82 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
             continue;
         }
 
-        if trimmed.starts_with("#=GF ID") {
-            let fields: Vec<&str> = trimmed[7..].split_whitespace().collect();
+        if let Some(rest) = trimmed.strip_prefix("#=GF ID") {
+            let fields: Vec<&str> = rest.split_whitespace().collect();
             if fields.len() != 1 {
                 return Err(HmmerError::Format(format!(
                     "Stockholm #=GF ID annotation must contain exactly one name token, got '{}'",
-                    trimmed[7..].trim()
+                    rest.trim()
                 )));
             }
             name = fields[0].to_string();
-        } else if trimmed.starts_with("#=GF AC") {
-            acc = Some(trimmed[7..].trim().to_string());
-        } else if trimmed.starts_with("#=GF DE") {
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF AC") {
+            acc = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF DE") {
             // C `stockholm_parse_gf` calls `esl_msa_SetDesc`, which frees the
             // existing value and overwrites it: the LAST `#=GF DE` line wins.
             // (esl_msa.c esl_msa_SetDesc.)
-            desc = Some(trimmed[7..].trim().to_string());
-        } else if trimmed.starts_with("#=GF AU") {
+            desc = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF AU") {
             // Likewise C `esl_msa_SetAuthor` overwrites; the LAST `#=GF AU` wins.
-            author = Some(trimmed[7..].trim().to_string());
-        } else if trimmed.starts_with("#=GF GA") {
-            cutoffs.ga = Some(parse_stockholm_cutoffs("GA", trimmed[7..].trim())?);
-        } else if trimmed.starts_with("#=GF TC") {
-            cutoffs.tc = Some(parse_stockholm_cutoffs("TC", trimmed[7..].trim())?);
-        } else if trimmed.starts_with("#=GF NC") {
-            cutoffs.nc = Some(parse_stockholm_cutoffs("NC", trimmed[7..].trim())?);
-        } else if trimmed.starts_with("#=GC RF") {
+            author = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF GA") {
+            cutoffs.ga = Some(parse_stockholm_cutoffs("GA", rest.trim())?);
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF TC") {
+            cutoffs.tc = Some(parse_stockholm_cutoffs("TC", rest.trim())?);
+        } else if let Some(rest) = trimmed.strip_prefix("#=GF NC") {
+            cutoffs.nc = Some(parse_stockholm_cutoffs("NC", rest.trim())?);
+        } else if let Some(rest) = trimmed.strip_prefix("#=GC RF") {
             record_block_line(
                 &expected_block_order,
                 &mut current_block_order,
                 BlockLineKey::Gc("RF".to_string()),
             )?;
-            let rf_str = trimmed[7..].trim();
+            let rf_str = rest.trim();
             match &mut rf {
                 Some(existing) => existing.extend_from_slice(rf_str.as_bytes()),
                 None => rf = Some(rf_str.as_bytes().to_vec()),
             }
-        } else if trimmed.starts_with("#=GC MM") {
+        } else if let Some(rest) = trimmed.strip_prefix("#=GC MM") {
             record_block_line(
                 &expected_block_order,
                 &mut current_block_order,
                 BlockLineKey::Gc("MM".to_string()),
             )?;
-            let mm_str = trimmed[7..].trim();
+            let mm_str = rest.trim();
             match &mut mm {
                 Some(existing) => existing.extend_from_slice(mm_str.as_bytes()),
                 None => mm = Some(mm_str.as_bytes().to_vec()),
             }
-        } else if trimmed.starts_with("#=GC SS_cons") {
+        } else if let Some(rest) = trimmed.strip_prefix("#=GC SS_cons") {
             record_block_line(
                 &expected_block_order,
                 &mut current_block_order,
                 BlockLineKey::Gc("SS_cons".to_string()),
             )?;
-            let ss_str = trimmed[12..].trim();
+            let ss_str = rest.trim();
             match &mut ss_cons {
                 Some(existing) => existing.extend_from_slice(ss_str.as_bytes()),
                 None => ss_cons = Some(ss_str.as_bytes().to_vec()),
             }
-        } else if trimmed.starts_with("#=GC SA_cons") {
+        } else if let Some(rest) = trimmed.strip_prefix("#=GC SA_cons") {
             record_block_line(
                 &expected_block_order,
                 &mut current_block_order,
                 BlockLineKey::Gc("SA_cons".to_string()),
             )?;
-            let sa_str = trimmed[12..].trim();
+            let sa_str = rest.trim();
             match &mut sa_cons {
                 Some(existing) => existing.extend_from_slice(sa_str.as_bytes()),
                 None => sa_cons = Some(sa_str.as_bytes().to_vec()),
             }
-        } else if trimmed.starts_with("#=GC PP_cons") {
+        } else if let Some(rest) = trimmed.strip_prefix("#=GC PP_cons") {
             record_block_line(
                 &expected_block_order,
                 &mut current_block_order,
                 BlockLineKey::Gc("PP_cons".to_string()),
             )?;
-            let pp_str = trimmed[12..].trim();
+            let pp_str = rest.trim();
             match &mut pp_cons {
                 Some(existing) => existing.extend_from_slice(pp_str.as_bytes()),
                 None => pp_cons = Some(pp_str.as_bytes().to_vec()),
@@ -1248,11 +1267,14 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
                     BlockLineKey::Sequence(sqname.clone()),
                 )?;
 
-                if !seq_data.contains_key(&sqname) {
-                    seq_order.push(sqname.clone());
-                    seq_data.insert(sqname, sqdata.to_vec());
-                } else {
-                    seq_data.get_mut(&sqname).unwrap().extend_from_slice(sqdata);
+                match seq_data.entry(sqname.clone()) {
+                    Entry::Vacant(entry) => {
+                        seq_order.push(sqname);
+                        entry.insert(sqdata.to_vec());
+                    }
+                    Entry::Occupied(mut entry) => {
+                        entry.get_mut().extend_from_slice(sqdata);
+                    }
                 }
             }
         }
@@ -1551,7 +1573,8 @@ impl FullStockholm {
         if let Some(i) = self.gs.iter().position(|(t, _)| t == tag) {
             return i;
         }
-        self.gs.push((tag.to_string(), vec![None; self.sqname.len()]));
+        self.gs
+            .push((tag.to_string(), vec![None; self.sqname.len()]));
         self.gs.len() - 1
     }
 
@@ -1559,7 +1582,8 @@ impl FullStockholm {
         if let Some(i) = self.gr.iter().position(|(t, _)| t == tag) {
             return i;
         }
-        self.gr.push((tag.to_string(), vec![None; self.sqname.len()]));
+        self.gr
+            .push((tag.to_string(), vec![None; self.sqname.len()]));
         self.gr.len() - 1
     }
 
@@ -1895,21 +1919,22 @@ pub fn write_stockholm_full(
     }
 
     // Helper: write a left-justified seqname (with optional uniqizing prefix).
-    let write_name = |out: &mut dyn std::io::Write, i: usize, field: usize| -> std::io::Result<()> {
-        if make_unique {
-            // "%0*d|%-*s" with uniqwidth-1 and field
-            write!(
-                out,
-                "{:0width$}|{:<field$}",
-                i,
-                msa.sqname[i],
-                width = uniqwidth - 1,
-                field = field
-            )
-        } else {
-            write!(out, "{:<field$}", msa.sqname[i], field = field)
-        }
-    };
+    let write_name =
+        |out: &mut dyn std::io::Write, i: usize, field: usize| -> std::io::Result<()> {
+            if make_unique {
+                // "%0*d|%-*s" with uniqwidth-1 and field
+                write!(
+                    out,
+                    "{:0width$}|{:<field$}",
+                    i,
+                    msa.sqname[i],
+                    width = uniqwidth - 1,
+                    field = field
+                )
+            } else {
+                write!(out, "{:<field$}", msa.sqname[i], field = field)
+            }
+        };
 
     writeln!(out, "# STOCKHOLM 1.0")?;
     if make_unique {
@@ -2009,11 +2034,59 @@ pub fn write_stockholm_full(
             out.write_all(&textized[i][currpos..end])?;
             writeln!(out)?;
 
-            write_gr(out, msa, i, "SS", &msa.ss[i], maxname, margin, uniqwidth, currpos, end, make_unique)?;
-            write_gr(out, msa, i, "SA", &msa.sa[i], maxname, margin, uniqwidth, currpos, end, make_unique)?;
-            write_gr(out, msa, i, "PP", &msa.pp[i], maxname, margin, uniqwidth, currpos, end, make_unique)?;
+            write_gr(
+                out,
+                msa,
+                i,
+                "SS",
+                &msa.ss[i],
+                maxname,
+                margin,
+                uniqwidth,
+                currpos,
+                end,
+                make_unique,
+            )?;
+            write_gr(
+                out,
+                msa,
+                i,
+                "SA",
+                &msa.sa[i],
+                maxname,
+                margin,
+                uniqwidth,
+                currpos,
+                end,
+                make_unique,
+            )?;
+            write_gr(
+                out,
+                msa,
+                i,
+                "PP",
+                &msa.pp[i],
+                maxname,
+                margin,
+                uniqwidth,
+                currpos,
+                end,
+                make_unique,
+            )?;
             for (tag, vals) in &msa.gr {
-                write_gr(out, msa, i, tag, &vals[i], maxname, margin, uniqwidth, currpos, end, make_unique)?;
+                write_gr(
+                    out,
+                    msa,
+                    i,
+                    tag,
+                    &vals[i],
+                    maxname,
+                    margin,
+                    uniqwidth,
+                    currpos,
+                    end,
+                    make_unique,
+                )?;
             }
         }
 
@@ -2256,8 +2329,8 @@ pub fn write_psiblast(
         for row in rows {
             let seq = row.aseq.as_bytes();
             let mut buf = Vec::with_capacity(end - pos);
-            for col in pos..end {
-                let sym = seq[col];
+            for (offset, &sym) in seq[pos..end].iter().enumerate() {
+                let col = pos + offset;
                 let is_residue = sym.is_ascii_alphanumeric();
                 let ch = if is_consensus(col) {
                     if is_residue {
@@ -2298,12 +2371,7 @@ pub fn write_selex(
 ) -> std::io::Result<()> {
     let cpl = 60usize;
     let alen = rows.first().map(|r| r.aseq.len()).unwrap_or(0);
-    let maxnamelen = rows
-        .iter()
-        .map(|r| r.name.len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
+    let maxnamelen = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
 
     let mut apos = 0usize;
     while apos < alen {
@@ -2595,8 +2663,7 @@ mod tests {
         // (writer order SS_cons, ..., RF, MM, then arbitrary). Written in text
         // mode (abc=None) so residues pass through verbatim.
         let input = b"# STOCKHOLM 1.0\n#=GF ID meta\n#=GF AC PF1\n#=GF DE a desc\n#=GF XX extra gf\n#=GS s1 DE seq desc\n#=GS s1 OS extra gs\ns1 ACDEFG\n#=GR s1 PP 999999\n#=GR s1 SS HHHHHH\n#=GC RF xxxxxx\n#=GC SS_cons <<<<<<\n#=GC MM ......\n//\n";
-        let msas =
-            read_stockholm_full_from_reader(BufReader::new(&input[..])).unwrap();
+        let msas = read_stockholm_full_from_reader(BufReader::new(&input[..])).unwrap();
         assert_eq!(msas.len(), 1);
         let m = &msas[0];
         assert_eq!(m.name.as_deref(), Some("meta"));
@@ -2660,7 +2727,10 @@ mod tests {
         write_stockholm_full(&mut out, &m, 5, None).unwrap();
         let s = String::from_utf8(out).unwrap();
         // alen=10, cpl=5 -> two blocks separated by a blank line.
-        assert!(s.contains("s1 AAAAC\ns2 AAAAC\n\ns1 CCCGG\ns2 CCCGG\n//\n"), "{s}");
+        assert!(
+            s.contains("s1 AAAAC\ns2 AAAAC\n\ns1 CCCGG\ns2 CCCGG\n//\n"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -2668,5 +2738,12 @@ mod tests {
         let input = b"junk\n# STOCKHOLM 1.0\ns1 AC\n//\n";
         let err = read_stockholm_from_reader(BufReader::new(&input[..])).unwrap_err();
         assert!(err.to_string().contains("Expected Stockholm header"));
+    }
+
+    #[test]
+    fn text_msa_reader_rejects_oversized_input_before_full_allocation() {
+        let input = b"# STOCKHOLM 1.0\ns1 AC\n//\n";
+        let err = read_text_msa_to_string_with_limit(&mut &input[..], 8).unwrap_err();
+        assert!(err.to_string().contains("MSA input exceeds 8 bytes"));
     }
 }

@@ -1,6 +1,8 @@
 //! Generic (non-SIMD) MSV (Multi-Segment Viterbi) algorithm.
 //! Direct port of generic_msv.c.
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::Profile;

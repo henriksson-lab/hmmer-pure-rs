@@ -400,7 +400,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Invalid window length value");
         std::process::exit(1);
     }
-    if args.hmmfile == PathBuf::from("-") {
+    if args.hmmfile == std::path::Path::new("-") {
         eprintln!("Error: hmmbuild cannot write <hmmfile_out> to stdout; use a file path");
         std::process::exit(1);
     }
@@ -425,7 +425,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         }
     }
-    if args.msafile == PathBuf::from("-") && args.informat.is_none() {
+    if args.msafile == std::path::Path::new("-") && args.informat.is_none() {
         println!("Must specify --informat to read <alifile> from stdin ('-')");
         std::process::exit(1);
     }
@@ -1379,14 +1379,18 @@ mod tests {
     #[test]
     fn hmmbuild_rejects_fast_and_hand_together() {
         // C: CONOPTS toggle group -> "Options --fast and --hand conflict".
-        assert!(Args::try_parse_from(["hmmbuild", "--fast", "--hand", "out.hmm", "in.sto"]).is_err());
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--fast", "--hand", "out.hmm", "in.sto"]).is_err()
+        );
     }
 
     #[test]
     fn hmmbuild_rejects_out_of_range_symfrac_and_fragthresh() {
         // C: --symfrac/--fragthresh range "0<=x<=1".
         assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "2", "out.hmm", "in.sto"]).is_err());
-        assert!(Args::try_parse_from(["hmmbuild", "--symfrac", "-0.1", "out.hmm", "in.sto"]).is_err());
+        assert!(
+            Args::try_parse_from(["hmmbuild", "--symfrac", "-0.1", "out.hmm", "in.sto"]).is_err()
+        );
         assert!(
             Args::try_parse_from(["hmmbuild", "--fragthresh", "2", "out.hmm", "in.sto"]).is_err()
         );
@@ -1401,10 +1405,15 @@ mod tests {
     #[test]
     fn hmmbuild_symfrac_requires_fast_not_hand() {
         // C: --symfrac reqs --fast; with --hand (which toggles --fast off) it errors.
-        assert!(
-            Args::try_parse_from(["hmmbuild", "--hand", "--symfrac", "0.6", "out.hmm", "in.sto"])
-                .is_err()
-        );
+        assert!(Args::try_parse_from([
+            "hmmbuild",
+            "--hand",
+            "--symfrac",
+            "0.6",
+            "out.hmm",
+            "in.sto"
+        ])
+        .is_err());
         // --symfrac alone (fast is default-on) is fine.
         assert!(
             Args::try_parse_from(["hmmbuild", "--symfrac", "0.6", "out.hmm", "in.sto"]).is_ok()

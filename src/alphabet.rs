@@ -150,8 +150,8 @@ impl Alphabet {
         }
         // "any" character (Kp-3) includes all canonical residues
         ndegen[kp - 3] = k;
-        for i in 0..k {
-            degen[kp - 3][i] = true;
+        for item in degen[kp - 3].iter_mut().take(k) {
+            *item = true;
         }
 
         Alphabet {
@@ -403,6 +403,7 @@ impl Alphabet {
 
     /// Convert a 1-based digital sequence back to ASCII text.
     /// Counterpart to Easel's `esl_abc_Textize()`.
+    #[allow(clippy::needless_range_loop)]
     pub fn textize(&self, dsq: &[Dsq], l: usize) -> String {
         let mut s = String::with_capacity(l);
         for i in 1..=l {

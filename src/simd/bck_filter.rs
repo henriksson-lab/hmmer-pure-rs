@@ -1,6 +1,7 @@
 //! SSE-optimized Backward parser (float precision, probability space).
 //! Adapted from hmmer-pure-rs bck_engine() which closely follows C HMMER's
 //! backward_engine() in impl_sse/fwdback.c.
+#![allow(clippy::needless_borrow, clippy::too_many_arguments)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -380,7 +381,7 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
 
     use super::probmx::*;
 
-    let q = (om.m + 3) / 4; // nqf
+    let q = crate::simd::oprofile::nqf(om.m);
     let zerov = _mm_setzero_ps();
 
     // Two-row rolling buffer: dpp = previous (i+1), dpc = current (i)
@@ -840,7 +841,7 @@ unsafe fn backward_parser_pmx_offset_direct(
 ) -> f32 {
     use super::probmx::*;
 
-    let q = (om.m + 3) / 4;
+    let q = crate::simd::oprofile::nqf(om.m);
     let row_width = pmx.striped_row_width();
     let zerov = _mm_setzero_ps();
     let dsq_ptr = dsq.as_ptr().add(dsq_offset);
@@ -1157,7 +1158,7 @@ unsafe fn load_tfv(om: &OProfile, qi: usize, tidx: usize) -> __m128 {
 /// Load D->D transition vector for stripe qi
 #[inline(always)]
 unsafe fn load_tfv_dd(om: &OProfile, qi: usize) -> __m128 {
-    let q = (om.m + 3) / 4;
+    let q = crate::simd::oprofile::nqf(om.m);
     let ptr = om.tfv_a.as_ptr().add(7 * q + qi);
     _mm_load_ps((*ptr).as_ptr())
 }

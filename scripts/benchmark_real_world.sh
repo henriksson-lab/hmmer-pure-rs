@@ -15,11 +15,16 @@ case_filter="${CASES:-}"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out_dir="${OUT_DIR:-reports/benchmarks/$stamp}"
-mkdir -p "$out_dir"
-
-if [[ "$skip_build" != "1" ]]; then
-  cargo build --release
-fi
+all_cases=(
+  hmmsearch_human_pkinase
+  hmmsearch_sprot_pkinase
+  phmmer_human_cyh3
+  jackhmmer_human_cyh3_N2
+  hmmscan_gecco_cluster1
+  nhmmer_3box_dna_target
+  nhmmscan_3box_dna_target
+)
+selected_cases=()
 
 require_file() {
   local path="$1"
@@ -33,8 +38,110 @@ require_executable() {
   local path="$1"
   if [[ ! -x "$path" ]]; then
     echo "missing required executable: $path" >&2
+    echo "build bundled C HMMER or set C_HMMER_DIR to a directory containing the C HMMER executables" >&2
     return 1
   fi
+}
+
+file_size_bytes() {
+  wc -c < "$1" | tr -d ' '
+}
+
+file_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+append_path_metadata() {
+  local label="$1"
+  local path="$2"
+
+  echo "${label}_path=$path"
+  if [[ -e "$path" ]]; then
+    echo "${label}_status=present"
+    if [[ -f "$path" ]]; then
+      echo "${label}_bytes=$(file_size_bytes "$path")"
+      echo "${label}_sha256=$(file_sha256 "$path")"
+    fi
+  else
+    echo "${label}_status=missing"
+  fi
+}
+
+record_cargo_config_metadata() {
+  local config=".cargo/config.toml"
+  local artifact="$out_dir/cargo-config.toml"
+
+  if [[ -f "$config" ]]; then
+    cp "$config" "$artifact"
+    echo "cargo_config_status=present"
+    echo "cargo_config_path=$config"
+    echo "cargo_config_bytes=$(file_size_bytes "$config")"
+    echo "cargo_config_sha256=$(file_sha256 "$config")"
+    echo "cargo_config_artifact=$artifact"
+    echo "cargo_config_artifact_sha256=$(file_sha256 "$artifact")"
+  else
+    echo "cargo_config_status=absent"
+    echo "cargo_config_path=$config"
+  fi
+}
+
+contains_case() {
+  local needle="$1"
+  local case_name
+  for case_name in "${all_cases[@]}"; do
+    if [[ "$case_name" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_cases() {
+  local selected
+  if [[ -z "$case_filter" ]]; then
+    selected_cases=("${all_cases[@]}")
+    return 0
+  fi
+
+  for selected in ${case_filter//,/ }; do
+    if ! contains_case "$selected"; then
+      echo "unknown real-world benchmark CASES selector: $selected" >&2
+      echo "known cases: ${all_cases[*]}" >&2
+      return 1
+    fi
+    selected_cases+=("$selected")
+  done
+
+  if [[ "${#selected_cases[@]}" -eq 0 ]]; then
+    echo "CASES selected zero real-world benchmark cases" >&2
+    echo "known cases: ${all_cases[*]}" >&2
+    return 1
+  fi
+}
+
+record_dataset() {
+  local label="$1"
+  local path="$2"
+  local kind="${3:-file}"
+  local status="missing"
+  local bytes=""
+  local sha=""
+  local seqs=""
+  local residues=""
+
+  if [[ -f "$path" ]]; then
+    status="present"
+    bytes="$(file_size_bytes "$path")"
+    sha="$(file_sha256 "$path")"
+    if [[ "$kind" == "fasta" ]]; then
+      local stats
+      stats="$(fasta_stats "$path")"
+      seqs="${stats%%$'\t'*}"
+      residues="${stats#*$'\t'}"
+    fi
+  fi
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$label" "$path" "$status" "$bytes" "$sha" "$seqs" "$residues" >> "$out_dir/datasets.tsv"
 }
 
 prepare_pressed_hmmdb() {
@@ -82,9 +189,21 @@ ensure_query_by_id() {
   local dataset="$1"
   local query_id="$2"
   local output="$3"
-  if [[ -s "$output" ]]; then
+  local source_sha
+  local manifest="${output}.source.tsv"
+  local artifact_name="${output//\//__}.source.tsv"
+  local artifact="$out_dir/$artifact_name"
+  source_sha="$(file_sha256 "$dataset")"
+
+  if [[ -s "$output" && -f "$manifest" ]] && \
+    awk -F '\t' -v dataset="$dataset" -v query_id="$query_id" -v sha="$source_sha" '
+      NR == 2 && $1 == dataset && $2 == query_id && $3 == sha { found = 1 }
+      END { exit found ? 0 : 1 }
+    ' "$manifest"; then
+    cp "$manifest" "$artifact"
     return 0
   fi
+
   mkdir -p "$(dirname "$output")"
   decompress_cat "$dataset" | awk -v id="$query_id" '
     /^>/ {
@@ -98,6 +217,11 @@ ensure_query_by_id() {
     echo "could not extract query id '$query_id' from $dataset" >&2
     return 1
   fi
+  {
+    printf "source\tquery_id\tsource_sha256\tquery_path\tquery_sha256\n"
+    printf "%s\t%s\t%s\t%s\t%s\n" "$dataset" "$query_id" "$source_sha" "$output" "$(file_sha256 "$output")"
+  } > "$manifest"
+  cp "$manifest" "$artifact"
 }
 
 count_rows() {
@@ -351,16 +475,69 @@ elapsed_to_seconds() {
 }
 
 write_metadata() {
+  local status_file="$out_dir/git-status-short.txt"
+  local diff_stat_file="$out_dir/git-diff-stat.txt"
+  local diff_file="$out_dir/git-diff.patch"
+  local c_tree_root c_status_file c_diff_stat_file
+
+  git status --short 2>/dev/null > "$status_file" || true
+  git diff --stat HEAD 2>/dev/null > "$diff_stat_file" || true
+  git diff HEAD 2>/dev/null > "$diff_file" || true
+  c_tree_root="$(git -C "$c_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  c_status_file="$out_dir/c-hmmer-git-status-short.txt"
+  c_diff_stat_file="$out_dir/c-hmmer-git-diff-stat.txt"
+  if [[ -n "$c_tree_root" ]]; then
+    git -C "$c_tree_root" status --short 2>/dev/null > "$c_status_file" || true
+    git -C "$c_tree_root" diff --stat HEAD 2>/dev/null > "$c_diff_stat_file" || true
+  else
+    : > "$c_status_file"
+    : > "$c_diff_stat_file"
+  fi
+
   {
     echo "timestamp_utc=$stamp"
     echo "repo_root=$repo_root"
     echo "git_commit=$(git rev-parse HEAD 2>/dev/null || true)"
-    echo "git_status_short_sha256=$(git status --short 2>/dev/null | sha256sum | awk '{print $1}')"
+    echo "git_status_short_file=$status_file"
+    echo "git_status_short_sha256=$(sha256sum "$status_file" | awk '{print $1}')"
+    echo "git_diff_stat_file=$diff_stat_file"
+    echo "git_diff_stat_sha256=$(sha256sum "$diff_stat_file" | awk '{print $1}')"
+    echo "git_diff_file=$diff_file"
+    echo "git_diff_sha256=$(sha256sum "$diff_file" | awk '{print $1}')"
+    record_cargo_config_metadata
+    echo "cargo=$(cargo --version 2>/dev/null || true)"
+    echo "rustc_verbose<<EOF"
+    rustc -vV 2>/dev/null || true
+    echo "EOF"
+    echo "rustflags=${RUSTFLAGS:-}"
+    echo "cargo_target_dir=${CARGO_TARGET_DIR:-target}"
     echo "rust_bin=$rust_bin"
+    append_path_metadata "rust_bin" "$rust_bin"
     echo "c_hmmer_dir=$c_dir"
+    echo "c_hmmer_tree_root=$c_tree_root"
+    if [[ -n "$c_tree_root" ]]; then
+      echo "c_hmmer_git_commit=$(git -C "$c_tree_root" rev-parse HEAD 2>/dev/null || true)"
+      echo "c_hmmer_git_status_short_file=$c_status_file"
+      echo "c_hmmer_git_status_short_sha256=$(sha256sum "$c_status_file" | awk '{print $1}')"
+      echo "c_hmmer_git_diff_stat_file=$c_diff_stat_file"
+      echo "c_hmmer_git_diff_stat_sha256=$(sha256sum "$c_diff_stat_file" | awk '{print $1}')"
+    fi
+    append_path_metadata "c_hmmsearch" "$c_dir/hmmsearch"
+    append_path_metadata "c_phmmer" "$c_dir/phmmer"
+    append_path_metadata "c_jackhmmer" "$c_dir/jackhmmer"
+    append_path_metadata "c_hmmscan" "$c_dir/hmmscan"
+    append_path_metadata "c_nhmmer" "$c_dir/nhmmer"
+    append_path_metadata "c_nhmmscan" "$c_dir/nhmmscan"
+    append_path_metadata "c_hmmpress" "$c_dir/hmmpress"
     echo "threads=$threads"
     echo "rounds=$rounds"
     echo "top_n=$top_n"
+    echo "allow_mismatch=$allow_mismatch"
+    echo "case_filter=$case_filter"
+    echo "selected_cases=${selected_cases[*]}"
+    echo "compare_mode=strict-table-and-normalized-diff"
+    echo "run_order=odd-rounds-rust-then-c_even-rounds-c-then-rust"
+    echo "skip_build=$skip_build"
     echo "uname=$(uname -a)"
     echo "rustc=$(rustc --version 2>/dev/null || true)"
     if [[ -x "$rust_bin" ]]; then
@@ -388,6 +565,7 @@ append_result() {
   local domtable="$5"
   local time_file="$6"
   local command_file="$7"
+  local run_order="$8"
 
   local elapsed user system rss wall_seconds rows dom_rows
   elapsed="$(parse_time_field "$time_file" "Elapsed (wall clock) time (h:mm:ss or m:ss)")"
@@ -397,13 +575,14 @@ append_result() {
   wall_seconds="$(elapsed_to_seconds "$elapsed")"
   rows="$(count_rows "$table")"
   dom_rows="$(count_rows "$domtable")"
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$case_name" "$impl" "$round" "$threads" "$wall_seconds" "$user" "$system" "$rss" "$rows" "$dom_rows" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$case_name" "$impl" "$round" "$run_order" "$threads" "$wall_seconds" "$user" "$system" "$rss" "$rows" "$dom_rows" \
     >> "$out_dir/results.tsv"
   {
     echo "case=$case_name"
     echo "impl=$impl"
     echo "round=$round"
+    echo "run_order=$run_order"
     echo "command=$(cat "$command_file")"
     echo "tblout_rows=$rows"
     echo "domtblout_rows=$dom_rows"
@@ -473,14 +652,12 @@ run_case() {
   local target="$4"
   local extra="$5"
 
+  record_dataset "$case_name query" "$query" "file"
+  record_dataset "$case_name target" "$target" "fasta"
   require_file "$query"
   require_file "$target"
   require_executable "$rust_bin"
   require_executable "$c_dir/$tool"
-
-  local stats
-  stats="$(fasta_stats "$target")"
-  echo "$case_name target_stats	$target	$stats" >> "$out_dir/datasets.tsv"
 
   local rust_tool_args=()
   if [[ "$tool" == "hmmsearch" ]]; then
@@ -542,25 +719,39 @@ run_case() {
     printf "%q " "$rust_bin" "${rust_args[@]}" > "$rust_cmd"
     printf "%q " "$c_dir/$tool" "${c_args[@]}" > "$c_cmd"
 
-    echo "running $case_name round $round: Rust"
-    run_timed "${case_name}.rust.round${round}" "$rust_bin" "${rust_args[@]}"
-    echo "running $case_name round $round: C"
-    run_timed "${case_name}.c.round${round}" "$c_dir/$tool" "${c_args[@]}"
+    local first_impl="rust"
+    local second_impl="c"
+    local run_order="rust,c"
+    if (( round % 2 == 0 )); then
+      first_impl="c"
+      second_impl="rust"
+      run_order="c,rust"
+    fi
+    printf "%s\t%s\t%s\t%s\n" "$case_name" "$round" "$first_impl" "$second_impl" >> "$out_dir/run_order.tsv"
 
-    append_result "$case_name" "rust" "$round" "$rust_tbl" "$rust_dom" "$out_dir/${case_name}.rust.round${round}.time" "$rust_cmd"
-    append_result "$case_name" "c" "$round" "$c_tbl" "$c_dom" "$out_dir/${case_name}.c.round${round}.time" "$c_cmd"
+    for impl in "$first_impl" "$second_impl"; do
+      case "$impl" in
+        rust)
+          echo "running $case_name round $round: Rust"
+          run_timed "${case_name}.rust.round${round}" "$rust_bin" "${rust_args[@]}"
+          ;;
+        c)
+          echo "running $case_name round $round: C"
+          run_timed "${case_name}.c.round${round}" "$c_dir/$tool" "${c_args[@]}"
+          ;;
+      esac
+    done
+
+    append_result "$case_name" "rust" "$round" "$rust_tbl" "$rust_dom" "$out_dir/${case_name}.rust.round${round}.time" "$rust_cmd" "$run_order"
+    append_result "$case_name" "c" "$round" "$c_tbl" "$c_dom" "$out_dir/${case_name}.c.round${round}.time" "$c_cmd" "$run_order"
     compare_outputs "$case_name" "$round" "$tool" "$rust_stdout" "$c_stdout" "$rust_tbl" "$c_tbl" "$rust_dom" "$c_dom"
   done
 }
 
 should_run_case() {
   local case_name="$1"
-  if [[ -z "$case_filter" ]]; then
-    return 0
-  fi
-  local normalized="${case_filter//,/ }"
   local selected
-  for selected in $normalized; do
+  for selected in "${selected_cases[@]}"; do
     if [[ "$selected" == "$case_name" ]]; then
       return 0
     fi
@@ -568,9 +759,15 @@ should_run_case() {
   return 1
 }
 
+validate_cases
+mkdir -p "$out_dir"
+if [[ "$skip_build" != "1" ]]; then
+  cargo build --release
+fi
 write_metadata
-printf "case\timpl\tround\tthreads\twall_seconds\tuser_seconds\tsystem_seconds\tmax_rss_kb\ttblout_rows\tdomtblout_rows\n" > "$out_dir/results.tsv"
-printf "case_dataset\tpath\tsequences\tresidues\n" > "$out_dir/datasets.tsv"
+printf "case\timpl\tround\trun_order\tthreads\twall_seconds\tuser_seconds\tsystem_seconds\tmax_rss_kb\ttblout_rows\tdomtblout_rows\n" > "$out_dir/results.tsv"
+printf "case\tround\tfirst_impl\tsecond_impl\n" > "$out_dir/run_order.tsv"
+printf "case_dataset\tpath\tstatus\tbytes\tsha256\tsequences\tresidues\n" > "$out_dir/datasets.tsv"
 
 medium_protein="external/protein_medium/uniprot_UP000005640_human.fasta.gz"
 large_protein="external/protein_large/uniprot_sprot.fasta.gz"
@@ -580,6 +777,11 @@ large_query="external/protein_large/queries/sp_O43739_CYH3_HUMAN.fa"
 
 if [[ -f "$medium_protein" ]]; then
   ensure_query_by_id "$medium_protein" "sp|O43739|CYH3_HUMAN" "$medium_query"
+fi
+if [[ "$medium_protein_rewindable" != "$medium_protein" ]]; then
+  if [[ -f "$medium_protein_rewindable" ]]; then
+    ensure_query_by_id "$medium_protein_rewindable" "sp|O43739|CYH3_HUMAN" "$medium_query"
+  fi
 fi
 if [[ -f "$large_protein" ]]; then
   ensure_query_by_id "$large_protein" "sp|O43739|CYH3_HUMAN" "$large_query"

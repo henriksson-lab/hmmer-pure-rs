@@ -105,6 +105,7 @@ fn read_hmms_maybe_stdin(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_stat_row<W: Write>(
     out: &mut W,
     idx: usize,
@@ -182,8 +183,8 @@ fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     }
 
     let mut mre = 0.0_f64;
-    for node in 1..=h.m {
-        mre += (mocc[node] as f64) * rel_entropy(&h.mat[node][..h.abc_k], &bg.f[..h.abc_k]);
+    for (node, &occ) in mocc.iter().enumerate().take(h.m + 1).skip(1) {
+        mre += (occ as f64) * rel_entropy(&h.mat[node][..h.abc_k], &bg.f[..h.abc_k]);
     }
     mre /= occ_sum as f64;
 
@@ -219,9 +220,9 @@ fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
 fn composition_kld(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     let mocc = profile::hmm_calculate_occupancy(h);
     let mut avg = vec![0.0_f32; h.abc_k];
-    for node in 1..=h.m {
-        for x in 0..h.abc_k {
-            avg[x] += h.mat[node][x] * mocc[node];
+    for (node, &occ) in mocc.iter().enumerate().take(h.m + 1).skip(1) {
+        for (x, value) in avg.iter_mut().enumerate().take(h.abc_k) {
+            *value += h.mat[node][x] * occ;
         }
     }
 
@@ -353,9 +354,7 @@ mod tests {
         // (5 digits + 1 pad + the separating space => "10000  "), not the
         // old Rust "{:<4}   " which produced "10000   " (5 + 3 spaces).
         let mut out = Vec::new();
-        write_stat_row(
-            &mut out, 10000, "fn3", "-", 1, 1.0, 1, 0.0, 0.0, 0.0, 0.0,
-        );
+        write_stat_row(&mut out, 10000, "fn3", "-", 1, 1.0, 1, 0.0, 0.0, 0.0, 0.0);
         let s = String::from_utf8(out).unwrap();
         // idx field + name field start: "10000 " (6-wide left-just) + " " sep.
         assert!(

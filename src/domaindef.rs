@@ -25,10 +25,10 @@ const RT3: f32 = 0.20; // threshold for multi-domain region detection
 const NSAMPLES: usize = 200; // stochastic tracebacks for clustering
 
 /// True if every residue in `dsq[dsq_offset+1 ..= dsq_offset+l]` is a canonical
-/// alphabet code (`< abc_kp`), enabling the fast no-degeneracy SIMD paths.
+/// alphabet code (`< abc_k`), enabling the fast no-degeneracy SIMD paths.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> bool {
+fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_k: usize) -> bool {
     let Some(end) = dsq_offset.checked_add(l) else {
         return false;
     };
@@ -38,7 +38,7 @@ fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) 
     unsafe {
         let ptr = dsq.as_ptr().add(dsq_offset);
         for i in 1..=l {
-            if *ptr.add(i) as usize >= abc_kp {
+            if *ptr.add(i) as usize >= abc_k {
                 return false;
             }
         }
@@ -175,9 +175,7 @@ fn find_domain_regions(btot: &[f32], etot: &[f32], mocc: &[f32], l: usize) -> Ve
         if !triggered {
             // Looking for the START of a domain region.
             // Reset i when mocc (minus local B contribution) drops below rt2.
-            if mocc[j] - (btot[j] - btot[j - 1]) < RT2 {
-                i = j as i64;
-            } else if i == -1 {
+            if mocc[j] - (btot[j] - btot[j - 1]) < RT2 || i == -1 {
                 i = j as i64;
             }
             // Trigger when mocc rises above rt1
@@ -291,7 +289,7 @@ fn trace_domain_envelope_candidate(
 /// length-`om.abc_k` odds vector f'(x)/f(x) used to bias-correct the domain
 /// envelope. The model configuration is irrelevant; only emission odds are
 /// used. Returns an all-ones vector if the segment emits no residues.
-#[cfg(all(target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn null2_by_trace_optimized(
     om: &crate::simd::oprofile::OProfile,
     tr: &Trace,
@@ -339,7 +337,7 @@ fn null2_by_trace_optimized(
     let xfactor = exp_n + exp_c + exp_j;
 
     let mut null2 = vec![0.0_f32; om.abc_k];
-    for x in 0..om.abc_k {
+    for (x, null2_x) in null2.iter_mut().enumerate().take(om.abc_k) {
         let mut lanes = [0.0_f32; 4];
         for qi in 0..q {
             let odds = om.rfv[x][qi];
@@ -350,7 +348,7 @@ fn null2_by_trace_optimized(
         }
         let h01 = lanes[0] + lanes[1];
         let h23 = lanes[2] + lanes[3];
-        null2[x] = (h01 + h23) + xfactor;
+        *null2_x = (h01 + h23) + xfactor;
     }
     null2
 }
@@ -1633,9 +1631,9 @@ fn null2_odds_for_code(null2_arr: &[f32], log_null2: &[f32; 256], abc: &Alphabet
         return 0.0;
     }
     let mut odds = 0.0_f32;
-    for a in 0..abc.k {
+    for (a, &null2) in null2_arr.iter().enumerate().take(abc.k) {
         if abc.degen[x][a] {
-            odds += null2_arr[a];
+            odds += null2;
         }
     }
     c_logf_to_f32(odds / n as f32)
@@ -1656,15 +1654,67 @@ fn null2_ratio_for_code(null2_arr: &[f32], abc: &Alphabet, x: usize) -> f32 {
         return 1.0;
     }
     let mut odds = 0.0_f32;
-    for a in 0..abc.k {
+    for (a, &null2) in null2_arr.iter().enumerate().take(abc.k) {
         if abc.degen[x][a] {
-            odds += null2_arr[a];
+            odds += null2;
         }
     }
     odds / n as f32
 }
 
 /// Score and align a single isolated domain envelope. Port of C
+fn long_target_local_bg(
+    dsq: &[Dsq],
+    start: usize,
+    end: usize,
+    bg: &Bg,
+    abc: &Alphabet,
+    seq_len: usize,
+) -> Bg {
+    let k = abc.k;
+    let mut counts = vec![0.0_f32; k];
+    let mut total = 0.0_f32;
+
+    for &x in dsq.iter().take(end + 1).skip(start) {
+        let xu = x as usize;
+        if xu < k {
+            counts[xu] += 1.0;
+            total += 1.0;
+        } else if xu < abc.kp && abc.ndegen[xu] > 0 {
+            let w = 1.0_f32 / abc.ndegen[xu] as f32;
+            for (a, count) in counts.iter_mut().enumerate() {
+                if abc.degen[xu][a] {
+                    *count += w;
+                }
+            }
+            total += 1.0;
+        }
+    }
+
+    if total <= 0.0 {
+        return bg.clone();
+    }
+
+    for c in &mut counts {
+        *c /= total;
+    }
+
+    let clamped_n = seq_len.clamp(50, 100) as f32;
+    let bg_smooth = 25.0_f32 / clamped_n;
+    let mut local_bg = bg.clone();
+    let mut sum = 0.0_f32;
+    for (i, f) in local_bg.f.iter_mut().enumerate().take(k) {
+        *f = bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
+        sum += *f;
+    }
+    if sum > 0.0 {
+        for f in local_bg.f.iter_mut().take(k) {
+            *f /= sum;
+        }
+    }
+    local_bg
+}
+
 /// `rescore_isolated_domain` from `p7_domaindef.c`.
 ///
 /// Given the envelope coordinates `ienv..=jenv` of `dsq` and a unilocal
@@ -1682,6 +1732,7 @@ fn null2_ratio_for_code(null2_arr: &[f32], abc: &Alphabet, x: usize) -> f32 {
 ///
 /// `seq_len` is the full sequence length (drives the null-model length
 /// correction); `null_sc` is the per-sequence null log score from `p7_bg`.
+#[allow(clippy::too_many_arguments)]
 fn score_domain_envelope(
     dsq: &[Dsq],
     seq_len: usize,
@@ -1701,6 +1752,7 @@ fn score_domain_envelope(
     make_alignment: bool,
     make_alignment_display: bool,
     long_target: bool,
+    do_null2: bool,
 ) -> Domain {
     debug_assert!(ienv >= 1 && jenv <= seq_len);
     debug_assert!(null_sc.is_finite());
@@ -1712,6 +1764,8 @@ fn score_domain_envelope(
             seq_len, ienv, jenv, env_len, long_target
         );
     }
+    let null2_is_done = null2_is_done || !do_null2;
+    let do_longtarget_reparam = long_target && do_null2;
 
     // Forward score for the envelope.
     let env_fwd_sc;
@@ -1760,28 +1814,9 @@ fn score_domain_envelope(
             // reparameterized against envelope-local residue frequency.
             // Matches C p7_domaindef.c:2108 `ReconfigRestLength(om, j-i+1)` and
             // p7_domaindef.c:2115 `reparameterize_model(bg, om, sq, i, j-i+1, ...)`.
-            let (env_om, pre_trim_local_bg_f_inner) = if long_target {
+            let (env_om, pre_trim_local_bg_f_inner) = if do_longtarget_reparam {
                 let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
-                let k = abc_lt.k;
-                let mut counts = vec![0.0_f32; k];
-                for p in ienv..=jenv {
-                    let x = dsq[p] as usize;
-                    if x < k {
-                        counts[x] += 1.0;
-                    }
-                }
-                let total: f32 = counts.iter().sum();
-                if total > 0.0 {
-                    for c in &mut counts {
-                        *c /= total;
-                    }
-                }
-                let clamped_n = seq_len.max(50).min(100) as f32;
-                let bg_smooth = 25.0_f32 / clamped_n;
-                let mut local_bg = bg.clone();
-                for i in 0..k {
-                    local_bg.f[i] = bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
-                }
+                let local_bg = long_target_local_bg(dsq, ienv, jenv, bg, &abc_lt, seq_len);
                 let fwd_emissions = env_om.get_fwd_emissions(bg, &abc_lt);
                 let mut clone = env_om.clone();
                 clone.reconfig_length(env_len as i32);
@@ -1801,8 +1836,7 @@ fn score_domain_envelope(
 
                 {
                     let scratch = &mut *simd_scratch;
-                    let canonical_env =
-                        is_canonical_window(dsq, dsq_offset, env_len, env_om.abc_kp);
+                    let canonical_env = is_canonical_window(dsq, dsq_offset, env_len, env_om.abc_k);
                     scratch.fwd_pmx.resize_full(gm.m, env_len);
                     env_fwd_sc = unsafe {
                         if canonical_env {
@@ -1810,7 +1844,7 @@ fn score_domain_envelope(
                                 dsq,
                                 dsq_offset,
                                 env_len,
-                                &env_om,
+                                env_om,
                                 &mut scratch.fwd_pmx,
                             )
                         } else {
@@ -1818,7 +1852,7 @@ fn score_domain_envelope(
                                 dsq,
                                 dsq_offset,
                                 env_len,
-                                &env_om,
+                                env_om,
                                 &mut scratch.fwd_pmx,
                                 &mut scratch.fwd_dp,
                             )
@@ -1843,7 +1877,7 @@ fn score_domain_envelope(
                                 dsq,
                                 dsq_offset,
                                 env_len,
-                                &env_om,
+                                env_om,
                                 &mut scratch.bck_pmx,
                                 Some(&scratch.fwd_pmx.row_scale),
                             );
@@ -1852,7 +1886,7 @@ fn score_domain_envelope(
                                 dsq,
                                 dsq_offset,
                                 env_len,
-                                &env_om,
+                                env_om,
                                 env_fwd_sc,
                                 &mut scratch.bck_pmx,
                                 Some(&scratch.fwd_pmx.row_scale),
@@ -1944,7 +1978,7 @@ fn score_domain_envelope(
                             dsq,
                             dsq_offset,
                             env_len,
-                            &env_om,
+                            env_om,
                             &mut scratch.fwd_pmx,
                             &mut scratch.fwd_dp,
                         )
@@ -2033,15 +2067,7 @@ fn score_domain_envelope(
         } else {
             let null2_arr =
                 generic_null2::null2_by_expectation(env_gm, unsafe { &*env_pp_ptr }, 1, env_len);
-            add_null2_correction(
-                &null2_arr,
-                &abc,
-                dsq,
-                ienv,
-                jenv,
-                n2sc.as_deref_mut(),
-                &mut dom_correction,
-            );
+            add_null2_correction(&null2_arr, &abc, dsq, ienv, jenv, n2sc, &mut dom_correction);
         }
     }
 
@@ -2193,7 +2219,7 @@ fn score_domain_envelope(
     // domcorrection (nats) = default - envsc.
     #[cfg(target_arch = "x86_64")]
     let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) =
-        if long_target {
+        if do_longtarget_reparam {
             if let Some(base_om) = env_om {
                 const MAX_ENV_EXTRA: i64 = 20;
                 let mut new_ienv = ienv;
@@ -2217,26 +2243,8 @@ fn score_domain_envelope(
                         // Reparameterize env_om for the trimmed region and re-run
                         // Forward (mirrors p7_domaindef.c:2168-2176).
                         let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
-                        let k = abc_lt.k;
-                        let mut counts = vec![0.0_f32; k];
-                        for p in new_ienv..=new_jenv {
-                            let x = dsq[p] as usize;
-                            if x < k {
-                                counts[x] += 1.0;
-                            }
-                        }
-                        let total: f32 = counts.iter().sum();
-                        if total > 0.0 {
-                            for c in &mut counts {
-                                *c /= total;
-                            }
-                        }
-                        let clamped_n = seq_len.max(50).min(100) as f32;
-                        let bg_smooth = 25.0_f32 / clamped_n;
-                        let mut local_bg = bg.clone();
-                        for i in 0..k {
-                            local_bg.f[i] = bg_smooth * bg.f[i] + (1.0 - bg_smooth) * counts[i];
-                        }
+                        let local_bg =
+                            long_target_local_bg(dsq, new_ienv, new_jenv, bg, &abc_lt, seq_len);
                         let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
                         let mut trim_om = base_om.clone();
                         trim_om.reconfig_length(new_env_len as i32);
@@ -2246,28 +2254,55 @@ fn score_domain_envelope(
                         // re-run Backward, Decoding, OA, OATrace and REBUILD the
                         // AliDisplay. Without this, Rust keeps the pre-trim ad with
                         // stale hmmto/sqto that diverge from C by 1 residue.
+                        let canonical_trim =
+                            is_canonical_window(dsq, new_dsq_offset, new_env_len, trim_om.abc_k);
                         if make_alignment {
                             let scratch = &mut *simd_scratch;
                             scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
                             env_fwd_sc_current = unsafe {
-                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                                    dsq,
-                                    new_dsq_offset,
-                                    new_env_len,
-                                    &trim_om,
-                                    &mut scratch.trim_fwd_pmx,
-                                )
+                                if canonical_trim {
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        &mut scratch.trim_fwd_pmx,
+                                    )
+                                } else {
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_dp,
+                                    )
+                                }
                             };
                             scratch.trim_bck_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
-                                crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
-                                    dsq,
-                                    new_dsq_offset,
-                                    new_env_len,
-                                    &trim_om,
-                                    &mut scratch.trim_bck_pmx,
-                                    Some(&scratch.trim_fwd_pmx.row_scale),
-                                );
+                                if canonical_trim {
+                                    crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        &mut scratch.trim_bck_pmx,
+                                        Some(&scratch.trim_fwd_pmx.row_scale),
+                                    );
+                                } else {
+                                    crate::simd::bck_filter::backward_parser_pmx_offset_with_scratch(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        env_fwd_sc_current,
+                                        &mut scratch.trim_bck_pmx,
+                                        Some(&scratch.trim_fwd_pmx.row_scale),
+                                        &mut scratch.bck_prev,
+                                        &mut scratch.bck_cur,
+                                    );
+                                }
                             }
                             scratch.trim_pp_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
@@ -2337,13 +2372,24 @@ fn score_domain_envelope(
                             let scratch = &mut *simd_scratch;
                             scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
                             env_fwd_sc_current = unsafe {
-                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                                    dsq,
-                                    new_dsq_offset,
-                                    new_env_len,
-                                    &trim_om,
-                                    &mut scratch.trim_fwd_pmx,
-                                )
+                                if canonical_trim {
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        &mut scratch.trim_fwd_pmx,
+                                    )
+                                } else {
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
+                                        dsq,
+                                        new_dsq_offset,
+                                        new_env_len,
+                                        &trim_om,
+                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_dp,
+                                    )
+                                }
                             };
                         }
                     }
@@ -2355,14 +2401,27 @@ fn score_domain_envelope(
                 let default_fwd_sc = {
                     let scratch = &mut *simd_scratch;
                     scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                    let canonical_default =
+                        is_canonical_window(dsq, new_dsq_offset, new_env_len, default_om.abc_k);
                     unsafe {
-                        crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                            dsq,
-                            new_dsq_offset,
-                            new_env_len,
-                            &default_om,
-                            &mut scratch.trim_fwd_pmx,
-                        )
+                        if canonical_default {
+                            crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                dsq,
+                                new_dsq_offset,
+                                new_env_len,
+                                &default_om,
+                                &mut scratch.trim_fwd_pmx,
+                            )
+                        } else {
+                            crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
+                                dsq,
+                                new_dsq_offset,
+                                new_env_len,
+                                &default_om,
+                                &mut scratch.trim_fwd_pmx,
+                                &mut scratch.fwd_dp,
+                            )
+                        }
                     }
                 };
                 let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
@@ -2452,7 +2511,7 @@ fn score_domain_envelope(
         // ensures ali_len >= 8 by the time it reaches this rescaling.
         let ali_len_i = (jali - iali + 1) as i32;
         let max_length_i = if hmm.max_length > 0 {
-            hmm.max_length as i32
+            hmm.max_length
         } else {
             env_len_i
         };
@@ -2602,6 +2661,7 @@ fn trace_define_domains_summary(
 /// seq_bias_pipeline_nats, stats)`; the two seq-bias values use the
 /// C-equivalent sequential sum and Easel's Kahan-compensated sum
 /// respectively.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn define_domains(
     dsq: &[Dsq],
     l: usize,
@@ -2617,6 +2677,7 @@ pub(crate) fn define_domains(
     make_alignment: bool,
     make_alignment_display: bool,
     long_target: bool,
+    do_null2: bool,
 ) -> (Vec<Domain>, f32, f32, f32, DomainDefinitionStats) {
     crate::logsum::p7_flogsuminit();
     #[cfg(not(target_arch = "x86_64"))]
@@ -2780,7 +2841,7 @@ pub(crate) fn define_domains(
             mocc = std::mem::take(&mut simd_scratch.mocc);
             p_domain_decoding_reuse(
                 fwd_pmx_ref,
-                &bck_pmx,
+                bck_pmx,
                 gm.m,
                 l,
                 njc_loop,
@@ -2871,10 +2932,12 @@ pub(crate) fn define_domains(
 
     let mut domains = Vec::new();
 
-    for (_region_idx, (&(ri, rj), &is_multi)) in regions.iter().zip(region_multi.iter()).enumerate()
+    for (region_idx, (&(ri, rj), &is_multi)) in regions.iter().zip(region_multi.iter()).enumerate()
     {
         #[cfg(feature = "tracehash")]
-        trace_domain_region(l, gm.m, _region_idx, ri, rj, is_multi);
+        trace_domain_region(l, gm.m, region_idx, ri, rj, is_multi);
+        #[cfg(not(feature = "tracehash"))]
+        let _ = region_idx;
         if is_multi {
             stats.nclustered += 1;
             // Multi-domain region: resolve by stochastic traceback clustering
@@ -2916,8 +2979,8 @@ pub(crate) fn define_domains(
             let mut segments = Vec::new();
             #[cfg(target_arch = "x86_64")]
             let mut trace_pmx_scratch = Trace::new();
-            for pos in ri..=rj {
-                n2sc[pos] = 0.0;
+            for value in n2sc.iter_mut().take(rj + 1).skip(ri) {
+                *value = 0.0;
             }
 
             for trace_idx in 0..NSAMPLES {
@@ -3026,28 +3089,21 @@ pub(crate) fn define_domains(
                 }
 
                 let mut pos = 1usize;
-                for (_domain_idx, &(sqfrom, sqto, tfrom, tto)) in trace_domains.iter().enumerate() {
+                for (domain_idx, &(sqfrom, sqto, tfrom, tto)) in trace_domains.iter().enumerate() {
                     #[cfg(feature = "tracehash")]
                     trace_region_null2_segment(
-                        gm.m,
-                        ri,
-                        rj,
-                        trace_idx,
-                        _domain_idx,
-                        sqfrom,
-                        sqto,
-                        tfrom,
-                        tto,
-                        &tr,
+                        gm.m, ri, rj, trace_idx, domain_idx, sqfrom, sqto, tfrom, tto, &tr,
                     );
+                    #[cfg(not(feature = "tracehash"))]
+                    let _ = domain_idx;
                     #[cfg(target_arch = "x86_64")]
                     let null2 = if let Some((ref region_om, _)) = region_trace_pmx {
-                        null2_by_trace_optimized(region_om, &tr, tfrom, tto)
+                        null2_by_trace_optimized(region_om, tr, tfrom, tto)
                     } else {
-                        generic_null2::null2_by_trace(&region_gm, &tr, tfrom, tto)
+                        generic_null2::null2_by_trace(&region_gm, tr, tfrom, tto)
                     };
                     #[cfg(not(target_arch = "x86_64"))]
-                    let null2 = generic_null2::null2_by_trace(&region_gm, &tr, tfrom, tto);
+                    let null2 = generic_null2::null2_by_trace(&region_gm, tr, tfrom, tto);
                     while pos <= sqfrom && pos <= region_len {
                         n2sc[ri + pos - 1] += 1.0;
                         pos += 1;
@@ -3064,8 +3120,8 @@ pub(crate) fn define_domains(
                 }
             }
 
-            for pos in ri..=rj {
-                n2sc[pos] = c_logf_to_f32(n2sc[pos] / NSAMPLES as f32);
+            for value in n2sc.iter_mut().take(rj + 1).skip(ri) {
+                *value = c_logf_to_f32(*value / NSAMPLES as f32);
             }
 
             if !segments.is_empty() {
@@ -3074,14 +3130,14 @@ pub(crate) fn define_domains(
                 #[cfg(feature = "tracehash")]
                 trace_domain_cluster_summary(l, gm.m, ri, rj, segments.len(), envelopes.len());
                 let mut last_jenv = 0usize;
-                for (_env_idx, env) in envelopes.iter().enumerate() {
+                for (env_idx, env) in envelopes.iter().enumerate() {
                     let ienv = env.ienv.max(1).min(l);
                     let jenv = env.jenv.max(1).min(l);
                     if jenv >= ienv {
                         #[cfg(feature = "tracehash")]
-                        trace_domain_envelope_candidate(
-                            l, gm.m, ri, rj, _env_idx, ienv, jenv, true,
-                        );
+                        trace_domain_envelope_candidate(l, gm.m, ri, rj, env_idx, ienv, jenv, true);
+                        #[cfg(not(feature = "tracehash"))]
+                        let _ = env_idx;
                         if ienv <= last_jenv {
                             stats.noverlaps += 1;
                         }
@@ -3105,6 +3161,7 @@ pub(crate) fn define_domains(
                             make_alignment,
                             make_alignment_display,
                             long_target,
+                            do_null2,
                         ));
                         last_jenv = jenv;
                     }
@@ -3135,6 +3192,7 @@ pub(crate) fn define_domains(
                     make_alignment,
                     make_alignment_display,
                     long_target,
+                    do_null2,
                 ));
             }
         } else {
@@ -3161,6 +3219,7 @@ pub(crate) fn define_domains(
                 make_alignment,
                 make_alignment_display,
                 long_target,
+                do_null2,
             ));
         }
     }
@@ -3173,4 +3232,38 @@ pub(crate) fn define_domains(
     #[cfg(feature = "tracehash")]
     trace_define_domains_summary(l, gm.m, domains.len(), nexpected, seq_bias, stats);
     (domains, nexpected, seq_bias, seq_bias_fsum, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::AlphabetType;
+
+    #[test]
+    fn long_target_local_bg_distributes_degenerates_and_normalizes() {
+        let abc = Alphabet::new(AlphabetType::Dna);
+        let bg = Bg::new(&abc);
+        let dsq = abc.digitize(b"NNNN");
+
+        let local_bg = long_target_local_bg(&dsq, 1, 4, &bg, &abc, 4);
+        let sum: f32 = local_bg.f.iter().take(abc.k).sum();
+
+        assert!((sum - 1.0).abs() < 1e-6);
+        for f in local_bg.f.iter().take(abc.k) {
+            assert!(*f > 0.0);
+        }
+    }
+
+    #[test]
+    fn long_target_local_bg_falls_back_when_window_has_no_residue_evidence() {
+        let abc = Alphabet::new(AlphabetType::Dna);
+        let bg = Bg::new(&abc);
+        let dsq = vec![crate::alphabet::DSQ_SENTINEL; 4];
+
+        let local_bg = long_target_local_bg(&dsq, 1, 2, &bg, &abc, 2);
+
+        for i in 0..abc.k {
+            assert_eq!(local_bg.f[i].to_bits(), bg.f[i].to_bits());
+        }
+    }
 }

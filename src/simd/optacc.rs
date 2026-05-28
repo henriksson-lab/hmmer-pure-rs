@@ -499,7 +499,7 @@ unsafe fn tfv_lane(om: &OProfile, q: usize, tidx: usize, lane: usize) -> f32 {
 /// the 7 standard transitions in `om.tfv`).
 #[inline(always)]
 unsafe fn tdd_lane(om: &OProfile, q: usize, lane: usize) -> f32 {
-    let q_count = om.m.div_ceil(4);
+    let q_count = crate::simd::oprofile::nqf(om.m);
     om.tfv[7 * q_count + q][lane]
 }
 

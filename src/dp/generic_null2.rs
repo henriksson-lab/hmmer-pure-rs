@@ -54,22 +54,19 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
     exp_j = c_logf_to_f32(exp_j) + neg_log_ld;
 
     // xfactor = FLogsum(N, C, J) over the log frequencies (generic_null2.c:102-104).
-    let xfactor = crate::logsum::p7_flogsum(
-        crate::logsum::p7_flogsum(exp_n, exp_c),
-        exp_j,
-    );
+    let xfactor = crate::logsum::p7_flogsum(crate::logsum::p7_flogsum(exp_n, exp_c), exp_j);
 
     // C generic_null2.c forms the weighted emission odds in log-space,
     // then exponentiates. Keep the order and state ranges aligned with C.
     let mut null2 = vec![f32::NEG_INFINITY; k];
-    for x in 0..k {
+    for (x, null2_x) in null2.iter_mut().enumerate().take(k) {
         for node in 1..m {
-            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[node] + gm.msc(node, x));
-            null2[x] = crate::logsum::p7_flogsum(null2[x], exp_i[node] + gm.isc(node, x));
+            *null2_x = crate::logsum::p7_flogsum(*null2_x, exp_m[node] + gm.msc(node, x));
+            *null2_x = crate::logsum::p7_flogsum(*null2_x, exp_i[node] + gm.isc(node, x));
         }
-        null2[x] = crate::logsum::p7_flogsum(null2[x], exp_m[m] + gm.msc(m, x));
-        null2[x] = crate::logsum::p7_flogsum(null2[x], xfactor);
-        null2[x] = c_expf_to_f32(null2[x]);
+        *null2_x = crate::logsum::p7_flogsum(*null2_x, exp_m[m] + gm.msc(m, x));
+        *null2_x = crate::logsum::p7_flogsum(*null2_x, xfactor);
+        *null2_x = c_expf_to_f32(*null2_x);
     }
 
     null2
@@ -81,8 +78,8 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
 /// The caller subtracts this from the raw domain score.
 pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
     let mut score = 0.0_f32;
-    for i in ienv..=jenv {
-        let x = dsq[i] as usize;
+    for &sym in dsq.iter().take(jenv + 1).skip(ienv) {
+        let x = sym as usize;
         if x < null2.len() && null2[x] > 0.0 {
             score += c_logf_to_f32(null2[x]);
         }
@@ -148,13 +145,13 @@ pub fn null2_by_trace(gm: &Profile, tr: &Trace, zstart: usize, zend: usize) -> V
     let xfactor = exp_n + exp_c + exp_j;
 
     let mut null2 = vec![0.0_f32; k];
-    for x in 0..k {
+    for (x, null2_x) in null2.iter_mut().enumerate().take(k) {
         for node in 1..m {
-            null2[x] += exp_m[node] * c_expf_to_f32(gm.msc(node, x));
-            null2[x] += exp_i[node] * c_expf_to_f32(gm.isc(node, x));
+            *null2_x += exp_m[node] * c_expf_to_f32(gm.msc(node, x));
+            *null2_x += exp_i[node] * c_expf_to_f32(gm.isc(node, x));
         }
-        null2[x] += exp_m[m] * c_expf_to_f32(gm.msc(m, x));
-        null2[x] += xfactor;
+        *null2_x += exp_m[m] * c_expf_to_f32(gm.msc(m, x));
+        *null2_x += xfactor;
     }
 
     null2
@@ -202,19 +199,9 @@ mod tests {
         let null2 = null2_by_expectation(&gm, &pp, 1, l);
 
         // Null2 odds ratios should be positive and near 1.0
-        for x in 0..abc.k {
-            assert!(
-                null2[x] > 0.0,
-                "null2[{}] should be positive, got {}",
-                x,
-                null2[x]
-            );
-            assert!(
-                null2[x] < 10.0,
-                "null2[{}] should be < 10, got {}",
-                x,
-                null2[x]
-            );
+        for (x, &odds) in null2.iter().enumerate().take(abc.k) {
+            assert!(odds > 0.0, "null2[{}] should be positive, got {}", x, odds);
+            assert!(odds < 10.0, "null2[{}] should be < 10, got {}", x, odds);
         }
 
         // Correction should be finite

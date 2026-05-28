@@ -1,5 +1,6 @@
 //! Binary HMM file I/O — reading C HMMER's .h3m format.
 //! Enables interoperability with C hmmpress output.
+#![allow(clippy::while_let_loop)]
 
 use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
@@ -16,6 +17,8 @@ const MAGIC_3C: u32 = 0xe8ededb8;
 const MAGIC_3D: u32 = 0xe8ededb9;
 const MAGIC_3E: u32 = 0xe8ededb0;
 const MAGIC_3F: u32 = 0xe8ededba;
+const MAX_BINARY_HMM_MODEL_LENGTH: i32 = 1_000_000;
+const MAX_BINARY_HMM_STRING_LEN: usize = 1 << 20;
 
 /// Return true if `magic` is one of the supported native-endian HMMER3 binary
 /// HMM magic numbers.
@@ -70,6 +73,11 @@ fn read_string<R: Read>(r: &mut R) -> HmmerResult<String> {
         return Ok(String::new()); // len <= 0 = NULL/empty (C: s = NULL)
     }
     let len = len as usize;
+    if len > MAX_BINARY_HMM_STRING_LEN {
+        return Err(HmmerError::Format(format!(
+            "Binary HMM string length is too large: {len}"
+        )));
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
     if buf.last() != Some(&0) {
@@ -113,11 +121,7 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
         Err(e) => return Err(HmmerError::Io(e)),
     }
     if let Err(e) = r.read_exact(&mut magic_buf[1..]) {
-        return if e.kind() == ErrorKind::UnexpectedEof {
-            Err(HmmerError::Io(e))
-        } else {
-            Err(HmmerError::Io(e))
-        };
+        return Err(HmmerError::Io(e));
     }
     let magic = u32::from_ne_bytes(magic_buf);
 
@@ -135,7 +139,7 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
 
     let flags = read_i32(r)? as u32;
     let m_i32 = read_i32(r)?;
-    if m_i32 <= 0 {
+    if !(1..=MAX_BINARY_HMM_MODEL_LENGTH).contains(&m_i32) {
         return Err(HmmerError::Format(format!(
             "Invalid binary HMM model length: {m_i32}"
         )));
@@ -232,8 +236,8 @@ pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     // Map
     if flags & P7H_MAP != 0 {
         let mut map = vec![0i32; m + 1];
-        for node in 0..=m {
-            map[node] = read_i32(r)?;
+        for item in map.iter_mut().take(m + 1) {
+            *item = read_i32(r)?;
         }
         hmm.map = Some(map);
     }
@@ -359,7 +363,7 @@ pub fn write_binary_hmm_with_format<W: std::io::Write>(
         .map_err(HmmerError::Io)?;
 
     // M
-    w.write_all(&(hmm.m as i32).to_ne_bytes())
+    w.write_all(&checked_i32_usize(hmm.m, "Binary HMM model length")?.to_ne_bytes())
         .map_err(HmmerError::Io)?;
 
     // Alphabet type
@@ -518,11 +522,25 @@ fn write_annotation<W: std::io::Write>(
 /// terminating NUL. Mirrors C `write_bin_string` for a non-NULL `s`.
 fn write_string<W: std::io::Write>(w: &mut W, s: &str) -> HmmerResult<()> {
     let bytes = s.as_bytes();
-    let len = (bytes.len() + 1) as i32; // include null terminator
+    if bytes.contains(&0) {
+        return Err(HmmerError::Format(
+            "Binary HMM string contains embedded NUL byte".to_string(),
+        ));
+    }
+    let stored_len = bytes
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| HmmerError::Format("Binary HMM string length overflows usize".into()))?;
+    let len = checked_i32_usize(stored_len, "Binary HMM string length")?;
     w.write_all(&len.to_ne_bytes()).map_err(HmmerError::Io)?;
     w.write_all(bytes).map_err(HmmerError::Io)?;
     w.write_all(&[0u8]).map_err(HmmerError::Io)?; // null terminator
     Ok(())
+}
+
+fn checked_i32_usize(value: usize, field: &str) -> HmmerResult<i32> {
+    i32::try_from(value)
+        .map_err(|_| HmmerError::Format(format!("{field} exceeds i32 range: {value}")))
 }
 
 /// Write an optional length-prefixed C-string, matching C `write_bin_string`:
@@ -596,6 +614,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_excessive_binary_model_length_before_allocating() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC_3F.to_ne_bytes());
+        buf.extend_from_slice(&0i32.to_ne_bytes()); // flags
+        buf.extend_from_slice(&(MAX_BINARY_HMM_MODEL_LENGTH + 1).to_ne_bytes()); // invalid M
+        buf.extend_from_slice(&3i32.to_ne_bytes()); // amino
+
+        let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
+        assert!(
+            matches!(err, HmmerError::Format(msg) if msg.contains("Invalid binary HMM model length"))
+        );
+    }
+
+    #[test]
     fn rejects_invalid_binary_string_length() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&MAGIC_3F.to_ne_bytes());
@@ -616,9 +648,7 @@ mod tests {
         // C treats any len<=0 as a NULL string (no error at the string level), then
         // rejects the record because the required NAME is absent (p7_hmmfile.c:1565,1654).
         let err = read_binary_hmm(&mut Cursor::new(buf)).unwrap_err();
-        assert!(
-            matches!(err, HmmerError::Format(msg) if msg.contains("empty required NAME"))
-        );
+        assert!(matches!(err, HmmerError::Format(msg) if msg.contains("empty required NAME")));
     }
 
     #[test]
@@ -635,6 +665,28 @@ mod tests {
 
         let err = read_string(&mut buf).unwrap_err();
         assert!(err.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
+    fn writer_rejects_binary_string_with_embedded_nul() {
+        let mut hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/hmmer/testsuite/20aa.hmm"
+        )))
+        .unwrap()
+        .remove(0);
+        hmm.name = "bad\0name".to_string();
+
+        let err = write_binary_hmm(&mut Vec::new(), &hmm).unwrap_err();
+        assert!(err.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
+    fn rejects_excessive_binary_string_length_before_allocation() {
+        let mut buf = Cursor::new(((MAX_BINARY_HMM_STRING_LEN + 1) as i32).to_ne_bytes());
+
+        let err = read_string(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 
     #[test]

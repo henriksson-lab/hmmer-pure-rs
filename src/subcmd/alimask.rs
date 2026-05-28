@@ -184,7 +184,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("alimask --alirange requires <postmsafile>");
         std::process::exit(1);
     }
-    if args.msafile == PathBuf::from("-") && args.informat.is_none() {
+    if args.msafile == std::path::Path::new("-") && args.informat.is_none() {
         println!("Must specify --informat to read <alifile> from stdin ('-')");
         std::process::exit(1);
     }
@@ -237,8 +237,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
     } else if args.wgiven {
         RelativeWeighting::Given
-    } else if args.wpb {
-        RelativeWeighting::PositionBased
     } else {
         RelativeWeighting::PositionBased
     };
@@ -820,8 +818,7 @@ fn read_stockholm_maybe_stdin(
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
             .map_err(hmmer_pure_rs::errors::HmmerError::Io)?;
-        let preserved =
-            msa::read_stockholm_preserved_from_reader(BufReader::new(&bytes[..]))?;
+        let preserved = msa::read_stockholm_preserved_from_reader(BufReader::new(&bytes[..]))?;
         let full = msa::read_stockholm_full_from_reader(BufReader::new(&bytes[..]))?;
         Ok((preserved, full))
     } else {

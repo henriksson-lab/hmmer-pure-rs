@@ -188,6 +188,7 @@ fn read_first_fasta_seq(path: &Path) -> Vec<u8> {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn perf_p7_pipeline_10kb() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -223,6 +224,7 @@ fn perf_p7_pipeline_10kb() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn perf_ssv_longtarget_100kb() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -259,16 +261,18 @@ fn perf_ssv_longtarget_100kb() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite/tutorial fixtures"]
 fn perf_ssv_longtarget_genome() {
     let testsuite = infernal_testsuite();
     let tutorial = infernal_tutorial();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     let genome_path = tutorial.join("mrum-genome.fa");
-    if !genome_path.exists() {
-        println!("Skipping genome test: {} not found", genome_path.display());
-        return;
-    }
+    assert!(
+        genome_path.exists(),
+        "required Infernal tutorial fixture is absent: {}",
+        genome_path.display()
+    );
 
     let seq = read_first_fasta_seq(&genome_path);
     println!("Genome: {} bp", seq.len());
@@ -310,6 +314,7 @@ fn perf_ssv_longtarget_genome() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn perf_p7_pipeline_scaling() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));

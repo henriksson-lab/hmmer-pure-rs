@@ -106,7 +106,7 @@ fn ssv_finds_high_scoring_ecoli_trnas() {
 
     for (pos, desc) in &high_scoring_positions {
         let covered = windows.iter().any(|w| {
-            let wstart = if w.n > 500 { w.n - 500 } else { 0 };
+            let wstart = w.n.saturating_sub(500);
             let wend = w.n + 500;
             *pos >= wstart && *pos <= wend
         });
@@ -129,7 +129,7 @@ fn ssv_finds_high_scoring_ecoli_trnas() {
         .iter()
         .filter(|(pos, _)| {
             windows.iter().any(|w| {
-                let wstart = if w.n > 500 { w.n - 500 } else { 0 };
+                let wstart = w.n.saturating_sub(500);
                 *pos >= wstart && *pos <= w.n + 500
             })
         })

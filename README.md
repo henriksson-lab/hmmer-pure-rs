@@ -39,11 +39,16 @@ Do not treat static README timing numbers as portable evidence. Benchmarks are
 faithful only when they are rerun against realistic fixtures, compared with the
 bundled C HMMER snapshot, and checked for output agreement.
 
-The reproducible benchmark entry point is:
+The reproducible search benchmark entry point is:
 
 ```bash
 scripts/benchmark_real_world.sh
 ```
+
+These harnesses are intended for a source checkout. Release packages include
+them for provenance, but the realistic external fixtures must still be prepared
+locally, and `C_HMMER_DIR` must point at a built C HMMER tree when `hmmer/src`
+is not present.
 
 The script:
 
@@ -53,84 +58,53 @@ The script:
 - benchmarks representative `hmmsearch`, `phmmer`, `jackhmmer`, `hmmscan`,
   `nhmmer`, and `nhmmscan` workloads
 - records command lines, dataset sizes, wall/user/system time, max RSS, table
-  row counts, top-hit ordering, git commit, and host metadata
+  row counts, top-hit ordering, selected cases, run order, generated-query
+  source checksums, git commit, git status/diff audit files, `.cargo/config.toml`
+  content/checksum or absence, Rust/C executable metadata, and host metadata
+- validates `CASES` selectors and fails on unknown or zero selected cases
+- alternates Rust/C execution order by round to reduce one-sided warm-cache
+  effects, and records the order in `run_order.tsv`
 - fails by default if Rust and C disagree on `tblout`/`domtblout` row counts,
   normalized core table rows, normalized full outputs, or top `tblout` target
   ordering
 - writes artifacts to `reports/benchmarks/<timestamp>/`
+
+Utility timing claims use a separate checked harness:
+
+```bash
+scripts/benchmark_utilities.sh
+```
+
+That script runs the README utility cases (`hmmbuild`, `hmmalign`, `hmmstat`,
+`hmmconvert`, `hmmlogo`, `hmmemit`, `hmmsim`, `alimask`, `makehmmerdb`,
+`hmmpress`, and `hmmfetch`) against bundled C HMMER. It records the same basic
+timing/host metadata plus input sizes and SHA-256 checksums, and it compares
+normalized outputs for cases where C-equivalent text output is expected.
+`hmmsim` and `makehmmerdb` are timed/status-checked but not normalized-output
+compared because their remaining formatting/container differences are listed
+under Remaining Gaps.
 
 Useful controls:
 
 ```bash
 THREADS=4 ROUNDS=3 scripts/benchmark_real_world.sh
 CASES=hmmsearch_human_pkinase SKIP_BUILD=1 scripts/benchmark_real_world.sh
+CASES=hmmsearch_human_pkinase,phmmer_human_cyh3 ALLOW_MISMATCH=1 scripts/benchmark_real_world.sh
 SKIP_BUILD=1 OUT_DIR=reports/benchmarks/manual scripts/benchmark_real_world.sh
+CASES=hmmstat_gecco_cluster1,hmmfetch_gecco_cluster1_valid scripts/benchmark_utilities.sh
 ```
 
 See `REAL_WORLD_FIXTURES.md` for dataset sources and fixture layout. Small
 checked-in fixtures remain useful for parity tests and smoke tests, but they
 are not representative performance evidence.
 
-### Fresh Local Benchmark Run
+### Benchmark Results
 
-These numbers are from one local run on one dirty worktree. Treat them as
-current evidence for this checkout and machine only; rerun the benchmark
-harnesses before relying on them elsewhere.
-
-- Date: 2026-05-28
-- Search artifacts: `reports/benchmarks/20260528T090834Z/`
-- Utility artifacts: `reports/benchmarks/all-subtools-20260528T091518Z/`
-- Rust: `target/release/hmmer`, `hmmer-pure-rs 0.7.2`
-- C: bundled `hmmer/src`, HMMER 3.4
-- Host: `Linux beagle 6.8.0-58-generic`, `x86_64`
-- Rust commit: `cb47c3b68225ec67143152ea13a78c69aa96d270`
-- Rounds: 3 per implementation
-- Threads: `--cpu 1` where supported
-
-Speedup is `C wall / Rust wall`, so values above `1.0x` mean Rust was faster.
-RSS ratio is `Rust max RSS / C max RSS`, so values below `1.0x` mean Rust used
-less memory.
-
-#### Search Tools
-
-| Case | Rust wall s | C wall s | Speedup | Rust RSS KB | C RSS KB | RSS ratio |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `hmmsearch_human_pkinase` | 1.637 | 6.003 | 3.67x | 14,641 | 15,387 | 0.95x |
-| `hmmsearch_sprot_pkinase` | 17.350 | 61.467 | 3.54x | 22,820 | 39,227 | 0.58x |
-| `phmmer_human_cyh3` | 1.050 | 3.437 | 3.27x | 18,520 | 12,587 | 1.47x |
-| `jackhmmer_human_cyh3_N2` | 3.290 | 7.760 | 2.36x | 20,401 | 14,988 | 1.36x |
-| `hmmscan_gecco_cluster1` | 0.143 | 0.313 | 2.19x | 22,955 | 9,863 | 2.33x |
-| `nhmmer_3box_dna_target` | 0.040 | 0.053 | 1.33x | 6,080 | 5,867 | 1.04x |
-| `nhmmscan_3box_dna_target` | 0.027 | 0.053 | 2.00x | 5,973 | 4,160 | 1.44x |
-
-The search benchmark used realistic protein data where available: human
-proteome for `hmmsearch`, `phmmer`, and `jackhmmer`, and Swiss-Prot for the
-large `hmmsearch` case. All search cases had matching `tblout`/`domtblout`
-row counts. The `jackhmmer` case uses the uncompressed human proteome because
-bundled C `jackhmmer -N 2` requires a rewindable target database.
-
-#### Utility Tools
-
-| Case | Tool | Rust wall s | C wall s | Speedup | Rust RSS KB | C RSS KB | RSS ratio |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `hmmbuild_20aa` | `hmmbuild` | 0.033 | 0.053 | 1.60x | 5,013 | 3,200 | 1.57x |
-| `hmmalign_20aa` | `hmmalign` | 0.000 | 0.000 | n/a | 4,480 | 2,987 | 1.50x |
-| `hmmstat_gecco_cluster1` | `hmmstat` | 0.037 | 0.060 | 1.64x | 5,120 | 2,560 | 2.00x |
-| `hmmconvert_gecco_cluster1` | `hmmconvert` | 0.123 | 0.103 | 0.84x | 4,907 | 2,560 | 1.92x |
-| `hmmlogo_pkinase` | `hmmlogo` | 0.007 | 0.010 | 1.50x | 4,053 | 2,560 | 1.58x |
-| `hmmemit_pkinase_N100` | `hmmemit` | 0.017 | 0.020 | 1.20x | 4,160 | 2,773 | 1.50x |
-| `hmmsim_pkinase_N10000` | `hmmsim` | 7.363 | 25.113 | 3.41x | 5,361 | 3,520 | 1.52x |
-| `alimask_20aa_modelrange` | `alimask` | 0.000 | 0.000 | n/a | 3,840 | 2,560 | 1.50x |
-| `makehmmerdb_dna_target` | `makehmmerdb` | 0.083 | 0.200 | 2.40x | 7,415 | 80,640 | 0.09x |
-| `hmmpress_gecco_cluster1` | `hmmpress` | 0.033 | 0.067 | 2.00x | 5,760 | 2,880 | 2.00x |
-| `hmmfetch_gecco_cluster1_valid` | `hmmfetch` | 0.020 | 0.020 | 1.00x | 4,160 | 2,560 | 1.62x |
-
-`hmmalign` and `alimask` completed below `/usr/bin/time` wall-time resolution,
-so only RSS is meaningful for those cases. The documented large DNA fixture
-was not present locally, so nucleotide and `makehmmerdb` workloads used the
-available in-tree DNA target instead of a large external dataset. `hmmpgmd`
-was not benchmarked because it is a daemon rather than a finite single-run
-command.
+This README intentionally does not publish static timing tables. Benchmark
+reports are ignored/generated artifacts and are only auditable together with
+their `metadata.txt`, `results.tsv`, `datasets.tsv`, `run_order.tsv`, command
+files, checksums, and git audit files. Regenerate local search and utility
+tables with the harnesses above when you need current speed/RSS evidence.
 
 ## Features
 
@@ -202,8 +176,9 @@ hmmer pgmd --hmmdb database.hmm --port 51371
 hmmer pgmd --seqdb proteins.fa --port 51371
 ```
 
-`hmmer convert` reads and writes HMMER3 ASCII/binary profiles. HMMER2 ASCII
-output (`hmmconvert -2` in C HMMER) is intentionally unsupported.
+`hmmer convert` reads and writes HMMER3 ASCII/binary profiles, and can write
+HMMER2 ASCII output with `-2` for C `hmmconvert` compatibility. Reading HMMER2
+input remains unsupported.
 
 ### hmmsearch flags
 
@@ -264,9 +239,13 @@ for hit in &th.hits {
 
 The test suite mixes exact small-fixture parity checks, real-world regression
 tests, and broader equivalence sweeps against bundled C outputs.
+Source checkouts need the ignored upstream `hmmer/` snapshot prepared locally;
+crate packages include only the small upstream tutorial/testsuite data needed
+by packaged tests.
 
 ```bash
-cargo test --release                  # all tests
+cargo test --release                  # non-ignored tests
+cargo test --release -- --ignored     # fixture-heavy tests; requires external data/C HMMER
 cargo test --test real_world_regression_tests
 cargo test --test pfam_equivalence_tests
 cargo test --test jackhmmer_integration_tests
@@ -274,10 +253,27 @@ cargo test --test jackhmmer_integration_tests
 
 Current real-data coverage includes:
 
-- committed Pfam golden fixtures against `test_data/human_swissprot_2k.fasta`
+- local/generated Pfam golden fixtures against `test_data/human_swissprot_2k.fasta`
 - exact and regression-style `jackhmmer` tests on real protein data
 - exact `nhmmer` goldens including a no-hit ECORI control
 - larger out-of-tree benchmark fixtures documented in `REAL_WORLD_FIXTURES.md`
+
+Benchmark/test policy:
+
+- README performance claims must come from `scripts/benchmark_real_world.sh`
+  for search workloads or `scripts/benchmark_utilities.sh` for utility
+  workloads.
+- Benchmark artifact directories must keep `metadata.txt`, `results.tsv`,
+  `run_order.tsv`, command files, git status/diff audit files,
+  `.cargo/config.toml` metadata/content or absence, generated-query source
+  checksum manifests, and dataset checksum/size manifests with the reported
+  numbers.
+- Use `ALLOW_MISMATCH=1` only for exploratory timing; do not cite those results
+  as parity-checked evidence.
+- Fixture-heavy, bundled-C parity, and large Swiss-Prot integration tests are
+  excluded from crate packages when their required fixtures or C executables are
+  not packaged. Run them from a source checkout after preparing the named
+  fixtures and bundled C tools.
 
 ## Architecture
 

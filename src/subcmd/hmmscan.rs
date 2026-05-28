@@ -1,6 +1,8 @@
 //! hmmscan — search sequence(s) against an HMM database.
 //! Reverses hmmsearch: query=sequences, targets=HMMs.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -87,7 +89,11 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
+    #[arg(
+        long = "incdomT",
+        conflicts_with = "inc_dome",
+        allow_hyphen_values = true
+    )]
     inc_dom_t: Option<f64>,
 
     /// Use model's GA gathering cutoffs to set all thresholding
@@ -449,6 +455,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         &sq,
                         &args,
                         bit_cutoff,
+                        idx,
                     )
                 })
                 .collect()
@@ -465,6 +472,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         &sq,
                         &args,
                         bit_cutoff,
+                        idx,
                     )
                 })
                 .collect()
@@ -486,6 +494,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         th.sort_by_sortkey();
         let mut output_pli = Pipeline::new();
         configure_thresholds(&mut output_pli, &args);
+        configure_acceleration(&mut output_pli, &args);
         if let Some(cutoff) = bit_cutoff {
             output_pli.use_bit_cutoffs = cutoff;
         }
@@ -539,7 +548,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         };
         write_hmmscan_score_table(out, &th, z, args.acc, textw);
         write_hmmscan_domain_annotation(
-            out, &th, z, domz, &sq.name, sq.n, &hmms, args.acc, args.noali, textw,
+            out, &th, z, domz, &sq.name, &sq.acc, sq.n, &hmms, args.acc, args.noali, textw,
         );
         write_scan_pipeline_stats(
             out,
@@ -551,9 +560,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             args.z_value.is_some(),
             args.domz_value.is_some(),
             &stats,
-            args.f1,
-            args.f2,
-            args.f3,
+            if args.max { 1.0 } else { args.f1 },
+            if args.max { 1.0 } else { args.f2 },
+            if args.max { 1.0 } else { args.f3 },
         );
         writeln!(out, "//").unwrap();
 
@@ -642,7 +651,7 @@ fn write_hmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) 
         writeln!(
             out,
             "# profile reporting threshold:     score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -658,7 +667,7 @@ fn write_hmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) 
         writeln!(
             out,
             "# domain reporting threshold:      score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -674,7 +683,7 @@ fn write_hmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) 
         writeln!(
             out,
             "# profile inclusion threshold:     score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -690,7 +699,7 @@ fn write_hmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) 
         writeln!(
             out,
             "# domain inclusion threshold:      score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -872,7 +881,7 @@ fn write_hmmscan_score_table<W: Write + ?Sized>(
     if !any_reported {
         writeln!(
             out,
-            "\n   [No targets detected that satisfy reporting thresholds]"
+            "\n   [No hits detected that satisfy reporting thresholds]"
         )
         .unwrap();
     }
@@ -884,6 +893,7 @@ fn write_hmmscan_domain_annotation(
     z: f64,
     domz: f64,
     qname: &str,
+    qacc: &str,
     qlen: usize,
     hmms: &[hmmer_pure_rs::Hmm],
     prefer_acc: bool,
@@ -898,6 +908,15 @@ fn write_hmmscan_domain_annotation(
         writeln!(out, "Domain annotation for each model:").unwrap();
     } else {
         writeln!(out, "Domain annotation for each model (and alignments):").unwrap();
+    }
+
+    if !th.hits.iter().any(|hit| hit.flags & P7_IS_REPORTED != 0) {
+        writeln!(
+            out,
+            "\n   [No targets detected that satisfy reporting thresholds]"
+        )
+        .unwrap();
+        return;
     }
 
     for hit in &th.hits {
@@ -995,13 +1014,16 @@ fn write_hmmscan_domain_annotation(
                         }
                         s
                     });
-                    hmmer_pure_rs::tophits::print_alidisplay_blocks(
+                    hmmer_pure_rs::tophits::print_alidisplay_blocks_acc(
                         out,
-                        display_name(hit, prefer_acc),
+                        &hit.name,
+                        &hit.acc,
                         qname,
+                        qacc,
                         ad,
                         cs_line.as_deref(),
                         textw,
+                        prefer_acc,
                     );
                 }
                 writeln!(out).unwrap();
@@ -1034,6 +1056,7 @@ fn score_hmmscan_model(
     sq: &Sequence,
     args: &Args,
     bit_cutoff: Option<BitCutoff>,
+    model_idx: usize,
 ) -> (Option<hmmer_pure_rs::tophits::Hit>, PipelineStats) {
     let mut local_bg = bg.clone();
     local_bg.set_filter(hmm.m, &hmm.compo);
@@ -1063,6 +1086,7 @@ fn score_hmmscan_model(
     }
     pli.do_alignment = true;
     pli.do_alignment_display = !args.noali;
+    pli.n_targets = model_idx as u64;
 
     let mut th = TopHits::new();
     let hit = if pli.run(&mut gm, &mut om, &local_bg, hmm, sq, &mut th) {
@@ -1095,6 +1119,7 @@ struct PipelineStats {
     n_past_fwd: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_scan_pipeline_stats<W: Write + ?Sized>(
     out: &mut W,
     n_targets: u64,
@@ -1240,10 +1265,10 @@ fn configure_thresholds(pli: &mut Pipeline, args: &Args) {
 
 fn configure_acceleration(pli: &mut Pipeline, args: &Args) {
     pli.do_max = args.max;
-    pli.f1 = args.f1;
-    pli.f2 = args.f2;
-    pli.f3 = args.f3;
-    pli.do_biasfilter = !args.nobias;
+    pli.f1 = if args.max { 1.0 } else { args.f1 };
+    pli.f2 = if args.max { 1.0 } else { args.f2 };
+    pli.f3 = if args.max { 1.0 } else { args.f3 };
+    pli.do_biasfilter = !(args.max || args.nobias);
     pli.do_null2 = !args.nonull2;
     pli.seed = args.seed;
 }
@@ -1380,7 +1405,15 @@ mod tests {
         // allow_hyphen_values lets clap match C instead of treating "-0.5" as
         // an unknown flag.
         let args = Args::try_parse_from([
-            "hmmscan", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "models.hmm", "queries.fa",
+            "hmmscan",
+            "--F1",
+            "-0.5",
+            "--F2",
+            "-1e-3",
+            "--F3",
+            "-2",
+            "models.hmm",
+            "queries.fa",
         ])
         .unwrap();
         assert_eq!(args.f1, -0.5);

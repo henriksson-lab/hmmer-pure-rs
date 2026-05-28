@@ -1,6 +1,8 @@
 //! hmmlogo — generate data for HMM sequence logo visualization.
 //! Outputs C-style residue-height and indel-value tables.
 
+#![allow(clippy::needless_range_loop)]
+
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
 

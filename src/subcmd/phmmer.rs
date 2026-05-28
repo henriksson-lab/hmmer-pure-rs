@@ -2,7 +2,7 @@
 //! Builds a single-sequence HMM and searches with the hmmsearch pipeline.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
@@ -94,7 +94,11 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
+    #[arg(
+        long = "incdomT",
+        conflicts_with = "inc_dome",
+        allow_hyphen_values = true
+    )]
     inc_dom_t: Option<f64>,
 
     /// Hidden C-compatible model gathering cutoff flag
@@ -423,11 +427,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
-    if args.seqfile == PathBuf::from("-") && args.seqdb == PathBuf::from("-") {
+    if args.seqfile.as_path() == Path::new("-") && args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: Either <seqfile> or <seqdb> may be '-' but not both");
         std::process::exit(1);
     }
-    if args.seqdb == PathBuf::from("-") && count_query_sequences(&args.seqfile, &abc) > 1 {
+    if args.seqdb.as_path() == Path::new("-") && count_query_sequences(&args.seqfile, &abc) > 1 {
         eprintln!(
             "Error: target sequence file - isn't rewindable; can't search it with multiple queries"
         );
@@ -708,11 +712,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut total_residues: u64 = 0;
         let mut n_targets: u64 = 0;
         let wants_alignment_file = args.ali_outfile.is_some();
-        let do_alignment = !args.noali
-            || args.domtblout.is_some()
-            || args.pfamtblout.is_some()
-            || wants_alignment_file;
+        let do_alignment = true;
         let do_alignment_display = !args.noali || wants_alignment_file;
+        let effective_f1 = if args.max { 1.0 } else { args.f1 };
+        let effective_f2 = if args.max { 1.0 } else { args.f2 };
+        let effective_f3 = if args.max { 1.0 } else { args.f3 };
+        let effective_biasfilter = !(args.max || args.nobias);
         {
             let mut sqf = open_sequence_file(&args.seqdb, &abc, args.tformat.as_deref())
                 .unwrap_or_else(|e| {
@@ -746,17 +751,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 let mut lgm = gm.clone();
                 let mut lom = om.clone();
                 let mut lpli = Pipeline::new();
-                lpli.f1 = args.f1;
-                lpli.f2 = args.f2;
-                lpli.f3 = args.f3;
+                lpli.f1 = effective_f1;
+                lpli.f2 = effective_f2;
+                lpli.f3 = effective_f3;
                 lpli.do_max = args.max;
-                lpli.do_biasfilter = !args.nobias;
+                lpli.do_biasfilter = effective_biasfilter;
                 lpli.do_null2 = !args.nonull2;
                 lpli.do_alignment = do_alignment;
                 lpli.do_alignment_display = do_alignment_display;
                 lpli.seed = args.seed;
                 lpli.new_model(&lgm);
                 configure_thresholds(&mut lpli, &args);
+                configure_search_spaces(&mut lpli, &args);
 
                 let mut sq = Sequence::new();
                 while sqf.read(&mut sq).unwrap_or_else(|e| {
@@ -787,7 +793,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
                     // Reset per-target pipeline counters; the scratch matrices
                     // inside `lpli` are kept and grown as needed.
-                    lpli.n_targets = 0;
+                    lpli.n_targets = n_targets.saturating_sub(1);
                     lpli.n_past_msv = 0;
                     lpli.n_past_bias = 0;
                     lpli.n_past_vit = 0;
@@ -818,17 +824,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 let shared_om = Arc::new(om.clone());
                 let shared_bg = Arc::new(local_bg.clone());
 
-                let f1 = args.f1;
-                let f2 = args.f2;
-                let f3 = args.f3;
+                let f1 = effective_f1;
+                let f2 = effective_f2;
+                let f3 = effective_f3;
                 let do_max = args.max;
-                let do_biasfilter = !args.nobias;
+                let do_biasfilter = effective_biasfilter;
                 let do_null2 = !args.nonull2;
                 let seed = args.seed;
                 let cli_args = &args;
 
                 let mut sq = Sequence::new();
-                let mut batch: Vec<Sequence> = Vec::with_capacity(TARGET_BATCH_SIZE);
+                let mut batch: Vec<(u64, Sequence)> = Vec::with_capacity(TARGET_BATCH_SIZE);
 
                 loop {
                     while batch.len() < TARGET_BATCH_SIZE {
@@ -856,7 +862,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                                 restrict_seen += 1;
                                 total_residues += sq.n as u64;
                                 n_targets += 1;
-                                batch.push(sq.clone());
+                                batch.push((n_targets, sq.clone()));
                                 sq.reuse();
                             }
                             Ok(false) => break,
@@ -891,13 +897,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                                 local_pli.seed = seed;
                                 local_pli.new_model(&local_gm);
                                 configure_thresholds(&mut local_pli, cli_args);
+                                configure_search_spaces(&mut local_pli, cli_args);
                                 (local_bg, local_gm, local_om, local_pli)
                             },
-                            |(local_bg, local_gm, local_om, local_pli), sq| {
+                            |(local_bg, local_gm, local_om, local_pli), (target_idx, sq)| {
                                 // Reset per-target pipeline counters; the
                                 // scratch matrices inside `local_pli` are
                                 // kept and grown as needed.
-                                local_pli.n_targets = 0;
+                                local_pli.n_targets = target_idx.saturating_sub(1);
                                 local_pli.n_past_msv = 0;
                                 local_pli.n_past_bias = 0;
                                 local_pli.n_past_vit = 0;
@@ -906,7 +913,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
                                 let mut local_th = TopHits::new();
                                 let hit = if local_pli.run(
-                                    local_gm, local_om, local_bg, &hmm, sq, &mut local_th,
+                                    local_gm,
+                                    local_om,
+                                    local_bg,
+                                    &hmm,
+                                    sq,
+                                    &mut local_th,
                                 ) {
                                     local_th.hits.into_iter().next()
                                 } else {
@@ -948,10 +960,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let z = args.z_value.unwrap_or(n_targets as f64);
         th.sort_by_sortkey();
         {
-            let mut tmp_pli = Pipeline::new();
-            configure_thresholds(&mut tmp_pli, &args);
-            tmp_pli.do_biasfilter = !args.nobias;
-            tmp_pli.do_null2 = !args.nonull2;
+            let tmp_pli = threshold_pipeline_for_output(
+                &args,
+                effective_f1,
+                effective_f2,
+                effective_f3,
+                effective_biasfilter,
+            );
             th.threshold(&tmp_pli, z, z);
             let domz = args.domz_value.unwrap_or(th.nreported as f64);
             if domz != z {
@@ -959,6 +974,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             }
         }
         let domz = args.domz_value.unwrap_or(th.nreported as f64);
+        let output_pli = threshold_pipeline_for_output(
+            &args,
+            effective_f1,
+            effective_f2,
+            effective_f3,
+            effective_biasfilter,
+        );
 
         crate::subcmd::hmmsearch::write_standard_stdout_tables(
             &mut out,
@@ -985,9 +1007,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             args.z_value.is_some(),
             args.domz_value.is_some(),
             &stats,
-            args.f1,
-            args.f2,
-            args.f3,
+            effective_f1,
+            effective_f2,
+            effective_f3,
         );
         writeln!(out, "//").unwrap();
 
@@ -1014,12 +1036,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             );
         }
         if let Some(ref mut f) = pfamtblout_file {
-            crate::subcmd::hmmsearch::write_pfamtblout(
+            crate::subcmd::hmmsearch::write_pfamtblout_with_pipeline(
                 f,
                 &query_sq.name,
                 Some(&query_sq.acc),
                 query_sq.n,
                 &th,
+                &output_pli,
                 z,
                 domz,
             );
@@ -1121,7 +1144,7 @@ fn write_phmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# sequence reporting threshold:    score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1137,7 +1160,7 @@ fn write_phmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# domain reporting threshold:      score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1153,7 +1176,7 @@ fn write_phmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# sequence inclusion threshold:    score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1169,7 +1192,7 @@ fn write_phmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# domain inclusion threshold:      score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1335,6 +1358,36 @@ fn configure_thresholds(pli: &mut Pipeline, args: &Args) {
     }
 }
 
+fn configure_search_spaces(pli: &mut Pipeline, args: &Args) {
+    if let Some(z) = args.z_value {
+        pli.z = z;
+        pli.z_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+    }
+    if let Some(domz) = args.domz_value {
+        pli.domz = domz;
+        pli.domz_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+    }
+}
+
+fn threshold_pipeline_for_output(
+    args: &Args,
+    effective_f1: f64,
+    effective_f2: f64,
+    effective_f3: f64,
+    effective_biasfilter: bool,
+) -> Pipeline {
+    let mut pli = Pipeline::new();
+    configure_thresholds(&mut pli, args);
+    configure_search_spaces(&mut pli, args);
+    pli.f1 = effective_f1;
+    pli.f2 = effective_f2;
+    pli.f3 = effective_f3;
+    pli.do_max = args.max;
+    pli.do_biasfilter = effective_biasfilter;
+    pli.do_null2 = !args.nonull2;
+    pli
+}
+
 fn validate_sequence_format(label: &str, format: Option<&str>) {
     if let Some(format) = format {
         if SequenceFormat::from_name(format).is_none() {
@@ -1364,6 +1417,7 @@ struct PipelineStats {
     n_past_fwd: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_pipeline_stats<W: Write>(
     out: &mut W,
     model_len: usize,
@@ -1508,7 +1562,15 @@ mod tests {
         // C --F1/--F2/--F3 have no range; C accepts the space-separated
         // negative form. allow_hyphen_values matches that.
         let args = Args::try_parse_from([
-            "phmmer", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "query.fa", "targets.fa",
+            "phmmer",
+            "--F1",
+            "-0.5",
+            "--F2",
+            "-1e-3",
+            "--F3",
+            "-2",
+            "query.fa",
+            "targets.fa",
         ])
         .unwrap();
         assert_eq!(args.f1, -0.5);

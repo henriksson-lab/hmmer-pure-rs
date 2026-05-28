@@ -2,7 +2,7 @@ hmmer
 target
 test_data/*.fasta
 test_data/*.fasta.gz
-tests/golden/pfam_*.tblout
+test_data/gecco_full_pfam_selected_hmms.h3m
 
 # Local agent/editor state
 .cargo/
@@ -16,6 +16,7 @@ perf.data.old
 tracehash
 external/
 reports/benchmarks/
+reports/audit-*/
 
 # Superseded duplicate mapping filename
 mapping.toml

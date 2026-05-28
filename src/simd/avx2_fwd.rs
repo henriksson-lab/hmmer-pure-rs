@@ -1,4 +1,5 @@
 //! AVX2-optimized Forward parser (8x float vectors).
+#![allow(clippy::missing_safety_doc, clippy::needless_range_loop)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

@@ -80,7 +80,7 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
 ///
 /// Port of Easel `esl_gumbel_invcdf`.
 pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
-    mu - (c_log_f64(-1.0 * c_log_f64(p)) / lambda)
+    mu - (c_log_f64(-c_log_f64(p)) / lambda)
 }
 
 /// Inverse survivor: return quantile x at which the right tail mass equals `p`.
@@ -91,7 +91,7 @@ pub fn invsurv(p: f64, mu: f64, lambda: f64) -> f64 {
     let log_part = if p < SMALLX1 {
         (c_pow_f64(p, p) - 1.0) / p
     } else {
-        c_log_f64(-1.0 * c_log_f64(1.0 - p))
+        c_log_f64(-c_log_f64(1.0 - p))
     };
     mu - (log_part / lambda)
 }

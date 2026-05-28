@@ -4,7 +4,7 @@
 //! Easel SSI v3 files compatible with C HMMER's `hmmfetch --index`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::errors::{HmmerError, HmmerResult};
@@ -14,6 +14,7 @@ use crate::hmmfile_binary;
 const SSI_V30_MAGIC: u32 = 0xd3d3c9b3;
 const SSI_OFFSZ: u32 = 8;
 const SSI_OFFSZ_32: u32 = 4;
+const MAX_SSI_FIELD_LEN: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 struct PrimaryKey {
@@ -128,6 +129,10 @@ impl Index {
         self.name_to_offset.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.name_to_offset.is_empty()
+    }
+
     pub fn accession_len(&self) -> usize {
         self.acc_to_offset.len()
     }
@@ -150,17 +155,16 @@ fn scan_ascii_hmm_records(path: &Path) -> HmmerResult<Vec<HmmRecord>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
     let mut records = Vec::new();
-    let mut line = String::new();
     let mut record_offset: Option<u64> = None;
     let mut record_text = String::new();
 
     loop {
         let offset = reader.stream_position().map_err(HmmerError::Io)?;
-        line.clear();
-        let n = reader.read_line(&mut line).map_err(HmmerError::Io)?;
-        if n == 0 {
+        let Some(line) =
+            hmmfile::read_capped_text_line(&mut reader, hmmfile::MAX_ASCII_HMM_LINE_LEN)?
+        else {
             break;
-        }
+        };
 
         let trimmed = line.trim();
         if trimmed.starts_with("HMMER3/") {
@@ -277,11 +281,21 @@ pub fn read_hmm_ssi(hmm_path: &Path) -> HmmerResult<Option<OnDiskIndex>> {
     if !ssi_path.exists() {
         return Ok(None);
     }
-    read_hmm_ssi_path(&ssi_path).map(Some)
+    let on_disk = read_ssi_path(&ssi_path)?;
+    if on_disk.indexed_path.file_name() != hmm_path.file_name() {
+        return Err(HmmerError::Format(format!(
+            "SSI index {} was built for {} not {}",
+            ssi_path.display(),
+            on_disk.indexed_path.display(),
+            hmm_path.display()
+        )));
+    }
+    Ok(Some(on_disk))
 }
 
-fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
+pub fn read_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
     let mut file = std::fs::File::open(ssi_path).map_err(HmmerError::Io)?;
+    let file_len = file.metadata().map_err(HmmerError::Io)?.len();
     let magic = read_u32(&mut file)?;
     if magic != SSI_V30_MAGIC {
         return Err(HmmerError::Format(format!(
@@ -310,6 +324,18 @@ fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
             ssi_path.display()
         )));
     }
+    if flen > MAX_SSI_FIELD_LEN || plen > MAX_SSI_FIELD_LEN || slen > MAX_SSI_FIELD_LEN {
+        return Err(HmmerError::Format(format!(
+            "SSI index {} has excessive fixed field length",
+            ssi_path.display()
+        )));
+    }
+    if flen == 0 || plen == 0 || (nsecondary > 0 && slen == 0) {
+        return Err(HmmerError::Format(format!(
+            "SSI index {} has zero-length fixed key field",
+            ssi_path.display()
+        )));
+    }
     let expected_frecsize = flen + 4 * std::mem::size_of::<u32>();
     let expected_precsize = plen + std::mem::size_of::<u16>() + 2 * offsz as usize + 8;
     let expected_srecsize = slen + plen;
@@ -322,6 +348,37 @@ fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
             ssi_path.display()
         )));
     }
+    validate_ssi_extent(
+        ssi_path,
+        "file table",
+        foffset,
+        frecsize as u64,
+        nfiles as u64,
+        file_len,
+    )?;
+    let header_len = file.stream_position().map_err(HmmerError::Io)?;
+    if foffset < header_len || poffset < header_len || (nsecondary > 0 && soffset < header_len) {
+        return Err(HmmerError::Format(format!(
+            "SSI index {} table offset points into header",
+            ssi_path.display()
+        )));
+    }
+    validate_ssi_extent(
+        ssi_path,
+        "primary table",
+        poffset,
+        precsize as u64,
+        nprimary,
+        file_len,
+    )?;
+    validate_ssi_extent(
+        ssi_path,
+        "secondary table",
+        soffset,
+        srecsize as u64,
+        nsecondary,
+        file_len,
+    )?;
 
     file.seek(SeekFrom::Start(foffset))
         .map_err(HmmerError::Io)?;
@@ -333,6 +390,12 @@ fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
         .map_err(HmmerError::Io)?;
     for _ in 0..nprimary {
         let key = read_fixed_string(&mut file, plen)?;
+        if key.is_empty() {
+            return Err(HmmerError::Format(format!(
+                "SSI index {} contains empty primary key",
+                ssi_path.display()
+            )));
+        }
         let file_idx = read_u16(&mut file)?;
         let offset = read_offset(&mut file, offsz)?;
         let data_offset = read_offset(&mut file, offsz)?;
@@ -357,6 +420,12 @@ fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
     for _ in 0..nsecondary {
         let key = read_fixed_string(&mut file, slen)?;
         let primary = read_fixed_string(&mut file, plen)?;
+        if key.is_empty() || primary.is_empty() {
+            return Err(HmmerError::Format(format!(
+                "SSI index {} contains empty secondary key",
+                ssi_path.display()
+            )));
+        }
         if !primary_offsets.contains_key(&primary) {
             return Err(HmmerError::Format(format!(
                 "SSI index {} secondary key {key} references missing primary {primary}",
@@ -376,6 +445,35 @@ fn read_hmm_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
         primary_offsets,
         secondary_to_primary,
     })
+}
+
+fn validate_ssi_extent(
+    ssi_path: &Path,
+    label: &str,
+    offset: u64,
+    record_size: u64,
+    count: u64,
+    file_len: u64,
+) -> HmmerResult<()> {
+    let byte_len = record_size.checked_mul(count).ok_or_else(|| {
+        HmmerError::Format(format!(
+            "SSI index {} {label} extent overflows",
+            ssi_path.display()
+        ))
+    })?;
+    let end = offset.checked_add(byte_len).ok_or_else(|| {
+        HmmerError::Format(format!(
+            "SSI index {} {label} extent overflows",
+            ssi_path.display()
+        ))
+    })?;
+    if end > file_len {
+        return Err(HmmerError::Format(format!(
+            "SSI index {} {label} extent exceeds file length",
+            ssi_path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Write an Easel SSI v3 index from already-known HMM record offsets.
@@ -442,32 +540,76 @@ where
         .max()
         .unwrap_or(0);
 
-    let frecsize = flen + 4 * std::mem::size_of::<u32>();
-    let precsize = plen + std::mem::size_of::<u16>() + 2 * SSI_OFFSZ as usize + 8;
-    let srecsize = slen + plen;
-    let foffset = 9 * std::mem::size_of::<u32>()
-        + 2 * std::mem::size_of::<u64>()
-        + std::mem::size_of::<u16>()
-        + 3 * SSI_OFFSZ as usize;
-    let poffset = foffset + frecsize;
-    let soffset = poffset + precsize * primary.len();
+    let frecsize = checked_add_usize(flen, 4 * std::mem::size_of::<u32>(), "SSI file record")?;
+    let precsize = checked_add_usize(
+        checked_add_usize(plen, std::mem::size_of::<u16>(), "SSI primary record")?,
+        2 * SSI_OFFSZ as usize + 8,
+        "SSI primary record",
+    )?;
+    let srecsize = checked_add_usize(slen, plen, "SSI secondary record")?;
+    let foffset = checked_add_usize(
+        checked_add_usize(
+            checked_add_usize(
+                9 * std::mem::size_of::<u32>(),
+                2 * std::mem::size_of::<u64>(),
+                "SSI header",
+            )?,
+            std::mem::size_of::<u16>(),
+            "SSI header",
+        )?,
+        3 * SSI_OFFSZ as usize,
+        "SSI header",
+    )?;
+    let poffset = checked_add_usize(foffset, frecsize, "SSI primary offset")?;
+    let soffset = checked_add_usize(
+        poffset,
+        checked_mul_usize(precsize, primary.len(), "SSI secondary offset")?,
+        "SSI secondary offset",
+    )?;
 
     let mut out = std::fs::File::create(ssi_path).map_err(HmmerError::Io)?;
     write_u32(&mut out, SSI_V30_MAGIC)?;
     write_u32(&mut out, 0)?;
     write_u32(&mut out, SSI_OFFSZ)?;
     write_u16(&mut out, 1)?;
-    write_u64(&mut out, primary.len() as u64)?;
-    write_u64(&mut out, secondary.len() as u64)?;
-    write_u32(&mut out, flen as u32)?;
-    write_u32(&mut out, plen as u32)?;
-    write_u32(&mut out, slen as u32)?;
-    write_u32(&mut out, frecsize as u32)?;
-    write_u32(&mut out, precsize as u32)?;
-    write_u32(&mut out, srecsize as u32)?;
-    write_u64(&mut out, foffset as u64)?;
-    write_u64(&mut out, poffset as u64)?;
-    write_u64(&mut out, soffset as u64)?;
+    write_u64(
+        &mut out,
+        checked_u64_usize(primary.len(), "SSI primary count")?,
+    )?;
+    write_u64(
+        &mut out,
+        checked_u64_usize(secondary.len(), "SSI secondary count")?,
+    )?;
+    write_u32(&mut out, checked_u32_usize(flen, "SSI file name length")?)?;
+    write_u32(&mut out, checked_u32_usize(plen, "SSI primary key length")?)?;
+    write_u32(
+        &mut out,
+        checked_u32_usize(slen, "SSI secondary key length")?,
+    )?;
+    write_u32(
+        &mut out,
+        checked_u32_usize(frecsize, "SSI file record size")?,
+    )?;
+    write_u32(
+        &mut out,
+        checked_u32_usize(precsize, "SSI primary record size")?,
+    )?;
+    write_u32(
+        &mut out,
+        checked_u32_usize(srecsize, "SSI secondary record size")?,
+    )?;
+    write_u64(
+        &mut out,
+        checked_u64_usize(foffset, "SSI file table offset")?,
+    )?;
+    write_u64(
+        &mut out,
+        checked_u64_usize(poffset, "SSI primary table offset")?,
+    )?;
+    write_u64(
+        &mut out,
+        checked_u64_usize(soffset, "SSI secondary table offset")?,
+    )?;
 
     write_fixed_path(&mut out, stored_path, flen)?;
     write_u32(&mut out, 0)?; // HMM file format code
@@ -518,6 +660,11 @@ fn fixed_path_len(path: &Path) -> usize {
 fn write_fixed_str<W: Write>(w: &mut W, s: &str, len: usize) -> HmmerResult<()> {
     let mut buf = vec![0u8; len];
     let bytes = s.as_bytes();
+    if bytes.contains(&0) {
+        return Err(HmmerError::Format(
+            "SSI fixed string contains embedded NUL byte".to_string(),
+        ));
+    }
     if bytes.len() >= len {
         return Err(HmmerError::Format(format!(
             "SSI string '{}' exceeds fixed field length {}",
@@ -531,6 +678,11 @@ fn write_fixed_str<W: Write>(w: &mut W, s: &str, len: usize) -> HmmerResult<()> 
 fn write_fixed_path<W: Write>(w: &mut W, path: &Path, len: usize) -> HmmerResult<()> {
     let mut buf = vec![0u8; len];
     let bytes = path_bytes(path);
+    if bytes.contains(&0) {
+        return Err(HmmerError::Format(
+            "SSI fixed path contains embedded NUL byte".to_string(),
+        ));
+    }
     if bytes.len() >= len {
         return Err(HmmerError::Format(format!(
             "SSI path '{}' exceeds fixed field length {}",
@@ -540,6 +692,26 @@ fn write_fixed_path<W: Write>(w: &mut W, path: &Path, len: usize) -> HmmerResult
     }
     buf[..bytes.len()].copy_from_slice(&bytes);
     w.write_all(&buf).map_err(HmmerError::Io)
+}
+
+fn checked_add_usize(a: usize, b: usize, field: &str) -> HmmerResult<usize> {
+    a.checked_add(b)
+        .ok_or_else(|| HmmerError::Format(format!("{field} size overflows usize")))
+}
+
+fn checked_mul_usize(a: usize, b: usize, field: &str) -> HmmerResult<usize> {
+    a.checked_mul(b)
+        .ok_or_else(|| HmmerError::Format(format!("{field} size overflows usize")))
+}
+
+fn checked_u32_usize(value: usize, field: &str) -> HmmerResult<u32> {
+    u32::try_from(value)
+        .map_err(|_| HmmerError::Format(format!("{field} exceeds u32 range: {value}")))
+}
+
+fn checked_u64_usize(value: usize, field: &str) -> HmmerResult<u64> {
+    u64::try_from(value)
+        .map_err(|_| HmmerError::Format(format!("{field} exceeds u64 range: {value}")))
 }
 
 #[cfg(unix)]
@@ -591,15 +763,27 @@ fn write_i64<W: Write>(w: &mut W, v: i64) -> HmmerResult<()> {
 fn read_fixed_string<R: Read>(r: &mut R, len: usize) -> HmmerResult<String> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let end = validate_fixed_string_padding(&buf)?;
     Ok(String::from_utf8_lossy(&buf[..end]).to_string())
 }
 
 fn read_fixed_path<R: Read>(r: &mut R, len: usize) -> HmmerResult<PathBuf> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).map_err(HmmerError::Io)?;
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let end = validate_fixed_string_padding(&buf)?;
     Ok(path_from_bytes(&buf[..end]))
+}
+
+fn validate_fixed_string_padding(buf: &[u8]) -> HmmerResult<usize> {
+    let end = buf.iter().position(|&b| b == 0).ok_or_else(|| {
+        HmmerError::Format("SSI fixed-width string is missing NUL terminator".to_string())
+    })?;
+    if buf[end + 1..].iter().any(|&b| b != 0) {
+        return Err(HmmerError::Format(
+            "SSI fixed-width string has nonzero padding after NUL terminator".to_string(),
+        ));
+    }
+    Ok(end)
 }
 
 fn skip_exact<R: Read>(r: &mut R, len: usize) -> HmmerResult<()> {
@@ -703,6 +887,22 @@ mod tests {
     }
 
     #[test]
+    fn write_hmm_ssi_records_rejects_embedded_nul_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let hmm_path = dir.path().join("models.hmm");
+        let ssi_path = dir.path().join("models.hmm.ssi");
+
+        let err = write_hmm_ssi_records(
+            &hmm_path,
+            &ssi_path,
+            [("bad\0name".to_string(), None, 0)],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
     fn read_hmm_ssi_accepts_32_bit_offsets() {
         let dir = tempfile::tempdir().unwrap();
         let ssi_path = dir.path().join("small.ssi");
@@ -756,10 +956,71 @@ mod tests {
         write_fixed_str(&mut out, primary, plen).unwrap();
         drop(out);
 
-        let on_disk = read_hmm_ssi_path(&ssi_path).unwrap();
+        let on_disk = read_ssi_path(&ssi_path).unwrap();
         assert_eq!(on_disk.indexed_path, PathBuf::from(stored_path));
         assert_eq!(on_disk.lookup(primary), Some(1234));
         assert_eq!(on_disk.lookup(secondary), Some(1234));
+    }
+
+    #[test]
+    fn read_hmm_ssi_rejects_table_extent_beyond_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssi_path = dir.path().join("bad.ssi");
+
+        let stored_path = "bad.hmm";
+        let primary = "alpha";
+        let flen = fixed_len(stored_path);
+        let plen = fixed_len(primary);
+        let slen = 0usize;
+        let frecsize = flen + 4 * std::mem::size_of::<u32>();
+        let precsize = plen + std::mem::size_of::<u16>() + 2 * SSI_OFFSZ as usize + 8;
+        let srecsize = slen + plen;
+        let foffset = 9 * std::mem::size_of::<u32>()
+            + 2 * std::mem::size_of::<u64>()
+            + std::mem::size_of::<u16>()
+            + 3 * SSI_OFFSZ as usize;
+        let poffset = 9_999u64;
+        let soffset = foffset as u64 + frecsize as u64;
+
+        let mut out = std::fs::File::create(&ssi_path).unwrap();
+        write_u32(&mut out, SSI_V30_MAGIC).unwrap();
+        write_u32(&mut out, 0).unwrap();
+        write_u32(&mut out, SSI_OFFSZ).unwrap();
+        write_u16(&mut out, 1).unwrap();
+        write_u64(&mut out, 1).unwrap();
+        write_u64(&mut out, 0).unwrap();
+        write_u32(&mut out, flen as u32).unwrap();
+        write_u32(&mut out, plen as u32).unwrap();
+        write_u32(&mut out, slen as u32).unwrap();
+        write_u32(&mut out, frecsize as u32).unwrap();
+        write_u32(&mut out, precsize as u32).unwrap();
+        write_u32(&mut out, srecsize as u32).unwrap();
+        write_u64(&mut out, foffset as u64).unwrap();
+        write_u64(&mut out, poffset).unwrap();
+        write_u64(&mut out, soffset).unwrap();
+        write_fixed_str(&mut out, stored_path, flen).unwrap();
+        write_u32(&mut out, 0).unwrap();
+        write_u32(&mut out, 0).unwrap();
+        write_u32(&mut out, 0).unwrap();
+        write_u32(&mut out, 0).unwrap();
+        drop(out);
+
+        let err = read_ssi_path(&ssi_path).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("primary table extent exceeds file length"));
+    }
+
+    #[test]
+    fn read_hmm_ssi_rejects_unterminated_fixed_string() {
+        let err = validate_fixed_string_padding(b"alpha").unwrap_err();
+        assert!(err.to_string().contains("missing NUL terminator"));
+    }
+
+    #[test]
+    fn read_hmm_ssi_rejects_nonzero_fixed_string_padding() {
+        let err = validate_fixed_string_padding(b"a\0x").unwrap_err();
+        assert!(err.to_string().contains("nonzero padding"));
     }
 
     #[cfg(unix)]
@@ -788,6 +1049,24 @@ mod tests {
         let on_disk = read_hmm_ssi(&hmm_path).unwrap().unwrap();
         assert_eq!(on_disk.indexed_path, basename);
         assert!(on_disk.indexed_path.as_os_str().as_bytes().contains(&0xff));
+    }
+
+    #[test]
+    fn read_hmm_ssi_rejects_stale_file_table_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let hmm_path = dir.path().join("current.hmm");
+        let ssi_path = path_with_appended_suffix(&hmm_path, ".ssi");
+        write_hmm_ssi_records_with_stored_path(
+            &hmm_path,
+            Path::new("other.hmm"),
+            &ssi_path,
+            [("alpha".to_string(), None, 0)],
+            false,
+        )
+        .unwrap();
+
+        let err = read_hmm_ssi(&hmm_path).unwrap_err();
+        assert!(err.to_string().contains("was built for"));
     }
 
     #[test]

@@ -280,12 +280,8 @@ impl Bg {
         };
         self.fhmm_e0 = vec![1.0_f32; kp]; // bg/bg = 1.0, including gap/nonres/missing
         self.fhmm_e1 = vec![1.0_f32; kp];
-        for x in 0..self.k {
-            self.fhmm_e1[x] = if self.f[x] > 0.0 {
-                compo[x] / self.f[x]
-            } else {
-                0.0
-            };
+        for (x, &c) in compo.iter().enumerate().take(self.k) {
+            self.fhmm_e1[x] = if self.f[x] > 0.0 { c / self.f[x] } else { 0.0 };
         }
 
         match self.abc_type {

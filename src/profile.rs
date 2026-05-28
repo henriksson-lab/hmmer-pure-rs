@@ -1,6 +1,8 @@
 //! P7_PROFILE - Scoring profile for sequence comparison.
 //! Direct port of p7_profile.c and modelconfig.c.
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::alphabet::Alphabet;
 use crate::bg::Bg;
 use crate::hmm::*;

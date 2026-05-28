@@ -1,5 +1,6 @@
 //! HMM file I/O: reading and writing HMMER3 format HMM files.
 //! Direct port of p7_hmmfile.c.
+#![allow(clippy::large_enum_variant, clippy::while_let_loop)]
 
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -10,12 +11,65 @@ use crate::hmm::*;
 use crate::output::{fmt_fixed1, fmt_fixed2, fmt_fixed4, fmt_fixed5, fmt_fixed6, fmt_hmm_prob};
 use crate::util::cmath::{c_expf_to_f32, c_log_f64, c_logf_to_f32};
 
+const MAX_HMM_MODEL_LENGTH: usize = 1_000_000;
+pub(crate) const MAX_ASCII_HMM_LINE_LEN: usize = 1 << 20;
+
+pub(crate) fn read_capped_text_line<B: BufRead>(
+    reader: &mut B,
+    limit: usize,
+) -> HmmerResult<Option<String>> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().map_err(HmmerError::Io)?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let take = available
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(available.len());
+        if bytes.len().saturating_add(take) > limit {
+            return Err(HmmerError::Format(format!(
+                "Input line exceeds maximum supported length of {limit} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| HmmerError::Format("Input line is not valid UTF-8".to_string()))
+}
+
+struct CappedLineReader<B: BufRead> {
+    reader: B,
+}
+
+impl<B: BufRead> CappedLineReader<B> {
+    fn new(reader: B) -> Self {
+        Self { reader }
+    }
+
+    fn next_line(&mut self) -> HmmerResult<Option<String>> {
+        read_capped_text_line(&mut self.reader, MAX_ASCII_HMM_LINE_LEN)
+    }
+}
+
 /// Open an HMM save file and read every HMM contained in it.
 ///
 /// Wrapper over [`read_hmms`] that opens `path` first. Returns all HMMs
 /// in the file as a `Vec`; errors propagate I/O and format failures.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
-    let file = std::fs::File::open(path).map_err(|e| HmmerError::Io(e))?;
+    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let reader = BufReader::new(file);
     read_hmms(reader)
 }
@@ -69,13 +123,10 @@ pub fn read_hmm_file_record_at(path: &Path, offset: u64) -> HmmerResult<Hmm> {
 
     let mut reader = BufReader::new(file);
     let mut record = String::new();
-    let mut line = String::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).map_err(HmmerError::Io)?;
-        if n == 0 {
+        let Some(line) = read_capped_text_line(&mut reader, MAX_ASCII_HMM_LINE_LEN)? else {
             break;
-        }
+        };
         record.push_str(&line);
         if line.trim() == "//" {
             break;
@@ -109,7 +160,7 @@ pub fn read_hmm_file_record_at(path: &Path, offset: u64) -> HmmerResult<Hmm> {
 /// "read everything" idiom and a single ASCII parser.
 pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
-    let mut lines = reader.lines();
+    let mut lines = CappedLineReader::new(reader);
     let mut expected_abc = None;
     let mut expected_format: Option<String> = None;
 
@@ -182,7 +233,7 @@ pub fn fetch_one_sequential(path: &Path, key: &str) -> HmmerResult<FetchOutcome>
     }
 
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-    let mut lines = BufReader::new(file).lines();
+    let mut lines = CappedLineReader::new(BufReader::new(file));
     let mut expected_abc = None;
     while let Some((hmm, _fmt)) = read_one_hmm_with_format(&mut lines)? {
         check_shared_alphabet(&mut expected_abc, hmm.abc_type)?;
@@ -214,7 +265,7 @@ fn check_shared_alphabet(
 
 pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
-    let mut lines = reader.lines();
+    let mut lines = CappedLineReader::new(reader);
     let mut expected_abc = None;
 
     loop {
@@ -242,7 +293,7 @@ pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResu
 }
 
 pub fn read_first_hmm<R: Read>(reader: BufReader<R>) -> HmmerResult<Hmm> {
-    let mut lines = reader.lines();
+    let mut lines = CappedLineReader::new(reader);
     read_one_hmm_with_format(&mut lines)?
         .map(|(hmm, _format_version)| hmm)
         .ok_or_else(|| HmmerError::Format("No HMM records found".to_string()))
@@ -305,14 +356,13 @@ pub fn read_hmms_auto<R: Read>(mut reader: BufReader<R>) -> HmmerResult<Vec<Hmm>
 /// File values are stored as `-ln(p)` and are exponentiated back into
 /// probabilities on the fly. Returns `Ok(None)` on clean EOF.
 fn read_one_hmm_with_format<B: BufRead>(
-    lines: &mut std::io::Lines<B>,
+    lines: &mut CappedLineReader<B>,
 ) -> HmmerResult<Option<(Hmm, String)>> {
     // Find the format header line
     let header = loop {
-        match lines.next() {
+        match lines.next_line()? {
             None => return Ok(None),
-            Some(Err(e)) => return Err(HmmerError::Io(e)),
-            Some(Ok(line)) => {
+            Some(line) => {
                 let trimmed = line.trim();
                 if trimmed.starts_with("HMMER3/") {
                     break trimmed.to_string();
@@ -362,9 +412,8 @@ fn read_one_hmm_with_format<B: BufRead>(
     // Read header lines until "HMM" line
     loop {
         let line = lines
-            .next()
-            .ok_or_else(|| HmmerError::Format("Unexpected EOF in HMM header".to_string()))?
-            .map_err(HmmerError::Io)?;
+            .next_line()?
+            .ok_or_else(|| HmmerError::Format("Unexpected EOF in HMM header".to_string()))?;
         let trimmed = line.trim();
 
         if trimmed.starts_with("HMM ") || trimmed == "HMM" {
@@ -391,7 +440,7 @@ fn read_one_hmm_with_format<B: BufRead>(
                 m = value
                     .parse()
                     .map_err(|_| HmmerError::Format("Bad LENG".to_string()))?;
-                if m == 0 {
+                if m == 0 || m > MAX_HMM_MODEL_LENGTH {
                     return Err(HmmerError::Format(format!(
                         "Invalid model length {value} on LENG line"
                     )));
@@ -612,9 +661,8 @@ fn read_one_hmm_with_format<B: BufRead>(
     // Skip the transition label line ("m->m m->i ...")
     // Skip the transition label line ("m->m m->i ...")
     lines
-        .next()
-        .ok_or_else(|| HmmerError::Format("Missing transition label line".to_string()))?
-        .map_err(HmmerError::Io)?;
+        .next_line()?
+        .ok_or_else(|| HmmerError::Format("Missing transition label line".to_string()))?;
 
     // Create the HMM
     let mut hmm = Hmm::new(m, abc_type, k);
@@ -663,9 +711,8 @@ fn read_one_hmm_with_format<B: BufRead>(
 
     // Read COMPO line (optional, node 0 match emissions)
     let compo_line = lines
-        .next()
-        .ok_or_else(|| HmmerError::Format("Missing COMPO/insert line".to_string()))?
-        .map_err(HmmerError::Io)?;
+        .next_line()?
+        .ok_or_else(|| HmmerError::Format("Missing COMPO/insert line".to_string()))?;
 
     let compo_trimmed = compo_line.trim();
     if compo_trimmed.starts_with("COMPO") {
@@ -684,9 +731,8 @@ fn read_one_hmm_with_format<B: BufRead>(
 
         // Read node 0 insert emissions
         let ins_line = lines
-            .next()
-            .ok_or_else(|| HmmerError::Format("Missing node 0 insert line".to_string()))?
-            .map_err(HmmerError::Io)?;
+            .next_line()?
+            .ok_or_else(|| HmmerError::Format("Missing node 0 insert line".to_string()))?;
         parse_emission_line(&ins_line, k, &mut hmm.ins[0])?;
     } else {
         // No COMPO line — this line IS the node 0 insert emissions
@@ -695,18 +741,16 @@ fn read_one_hmm_with_format<B: BufRead>(
 
     // Read node 0 transitions
     let trans_line = lines
-        .next()
-        .ok_or_else(|| HmmerError::Format("Missing node 0 transition line".to_string()))?
-        .map_err(HmmerError::Io)?;
+        .next_line()?
+        .ok_or_else(|| HmmerError::Format("Missing node 0 transition line".to_string()))?;
     parse_transition_line(&trans_line, &mut hmm.t[0])?;
 
     // Read nodes 1..M
     for node in 1..=m {
         // Match emission line: "  k  <K values> <map> <cons> <rf> <mm/cs>"
         let match_line = lines
-            .next()
-            .ok_or_else(|| HmmerError::Format(format!("Missing node {} match line", node)))?
-            .map_err(HmmerError::Io)?;
+            .next_line()?
+            .ok_or_else(|| HmmerError::Format(format!("Missing node {} match line", node)))?;
         let parts: Vec<&str> = match_line.split_whitespace().collect();
 
         // Parse node number (first field)
@@ -792,26 +836,23 @@ fn read_one_hmm_with_format<B: BufRead>(
 
         // Insert emission line
         let ins_line = lines
-            .next()
-            .ok_or_else(|| HmmerError::Format(format!("Missing node {} insert line", node)))?
-            .map_err(HmmerError::Io)?;
+            .next_line()?
+            .ok_or_else(|| HmmerError::Format(format!("Missing node {} insert line", node)))?;
         parse_emission_line(&ins_line, k, &mut hmm.ins[node])?;
 
         // Transition line
         let trans_line = lines
-            .next()
-            .ok_or_else(|| HmmerError::Format(format!("Missing node {} transition line", node)))?
-            .map_err(HmmerError::Io)?;
+            .next_line()?
+            .ok_or_else(|| HmmerError::Format(format!("Missing node {} transition line", node)))?;
         parse_transition_line(&trans_line, &mut hmm.t[node])?;
     }
 
     // Read end-of-record marker "//"
     let mut saw_terminator = false;
     loop {
-        match lines.next() {
+        match lines.next_line()? {
             None => break,
-            Some(Err(e)) => return Err(HmmerError::Io(e)),
-            Some(Ok(line)) => {
+            Some(line) => {
                 let trimmed = line.trim();
                 if trimmed == "//" {
                     saw_terminator = true;
@@ -1354,7 +1395,11 @@ pub fn write_hmm_h2_ascii<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResul
     writeln!(
         w,
         "MAP   {}",
-        if hmm.flags & P7H_MAP != 0 { "yes" } else { "no" }
+        if hmm.flags & P7H_MAP != 0 {
+            "yes"
+        } else {
+            "no"
+        }
     )
     .map_err(HmmerError::Io)?;
 
@@ -1599,6 +1644,26 @@ mod tests {
         let mut hmm = Hmm::new(1, abc_type, abc.k);
         hmm.name = name.to_string();
         hmm
+    }
+
+    #[test]
+    fn rejects_excessive_ascii_model_length_before_allocating() {
+        let input = format!(
+            "HMMER3/f\nNAME  huge\nLENG  {}\nALPH  amino\nHMM          A C D E F G H I K L M N P Q R S T V W Y\n",
+            MAX_HMM_MODEL_LENGTH + 1
+        );
+
+        let err = read_hmms_from_str(&input).unwrap_err();
+        assert!(err.to_string().contains("Invalid model length"));
+    }
+
+    #[test]
+    fn rejects_ascii_hmm_line_that_exceeds_cap() {
+        let mut input = b"HMMER3/f ".to_vec();
+        input.extend(std::iter::repeat_n(b'x', MAX_ASCII_HMM_LINE_LEN));
+
+        let err = read_hmms(BufReader::new(Cursor::new(input))).unwrap_err();
+        assert!(err.to_string().contains("maximum supported length"));
     }
 
     #[test]

@@ -5,6 +5,13 @@
 //! implemented, including C-shaped main-summary rows for Forward,
 //! Viterbi/MSV, and hybrid modes.
 
+#![allow(
+    clippy::approx_constant,
+    clippy::manual_clamp,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::too_many_arguments
+)]
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -611,7 +618,7 @@ fn write_optional_outputs(
             ScoreMode::Viterbi | ScoreMode::Hybrid | ScoreMode::Msv => {
                 let (mu, lambda) =
                     gumbel::fit_complete(scores).unwrap_or_else(|_| fallback_gumbel(scores));
-                let mufix = gumbel::fit_complete_loc(scores, 0.693147).unwrap_or_else(|_| mu);
+                let mufix = gumbel::fit_complete_loc(scores, 0.693147).unwrap_or(mu);
                 write_gumbel_plot(
                     &mut file,
                     mu,
@@ -857,11 +864,11 @@ fn write_gumbel_summary(
         .unwrap_or_else(|_| fallback_gumbel(&histogram.sorted));
     let e10 = histogram.sorted.len() as f64 * gumbel::surv(x10, mu, lambda);
 
-    let mufix = gumbel::fit_complete_loc(&histogram.sorted, 0.693147).unwrap_or_else(|_| mu);
+    let mufix = gumbel::fit_complete_loc(&histogram.sorted, 0.693147).unwrap_or(mu);
     let e10fix = histogram.sorted.len() as f64 * gumbel::surv(x10, mufix, 0.693147);
 
-    let mufix2 = gumbel::fit_complete_loc(&histogram.sorted, model_params.lambda)
-        .unwrap_or_else(|_| model_params.mu);
+    let mufix2 =
+        gumbel::fit_complete_loc(&histogram.sorted, model_params.lambda).unwrap_or(model_params.mu);
     let e10fix2 = histogram.sorted.len() as f64 * gumbel::surv(x10, mufix2, model_params.lambda);
 
     let e10p =

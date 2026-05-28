@@ -1,5 +1,6 @@
 //! SSV filter for long target sequences (nhmmer/Infernal).
 //! Port of p7_SSVFilter_longtarget() from impl_sse/msvfilter.c.
+#![allow(clippy::needless_range_loop)]
 //!
 //! Slides a window across a long DNA/RNA sequence, returning hit windows
 //! where the SSV score exceeds a P-value threshold. Used by nhmmer and
@@ -302,9 +303,9 @@ pub unsafe fn ssv_filter_longtarget(
             let mut k = end + 1;
             let mut n = target_end + 1;
             let mut max_end = target_end;
-            let mut max_sc = sc_val as i32;
+            let mut max_sc = sc_val;
             let mut pos_since_max = 0;
-            let mut running_sc = sc_val as i32;
+            let mut running_sc = sc_val;
 
             // Match C: `while (k<om->M && n<=L)` — k strictly less than M.
             while k < m && n <= l {
@@ -451,7 +452,7 @@ pub fn compute_prefix_suffix_lengths_from_om(
     // for a few model positions.
     const BETA: f64 = 1.0e-7;
     let m = om.m;
-    let nq = (m + 3) / 4; // nqf
+    let nq = crate::simd::oprofile::nqf(m);
     let mut prefix = vec![0.0_f32; m + 1];
     let mut suffix = vec![0.0_f32; m + 1];
 
@@ -810,7 +811,11 @@ mod tests {
     fn merge_respects_id_guard() {
         let mut ws = vec![win(100, 100, false, 0), win(110, 100, false, 1)];
         merge_windows_impl(&mut ws, 0.0);
-        assert_eq!(ws.len(), 2, "windows from different FM segments must not merge");
+        assert_eq!(
+            ws.len(),
+            2,
+            "windows from different FM segments must not merge"
+        );
 
         let mut ws2 = vec![win(100, 100, false, 7), win(110, 100, false, 7)];
         merge_windows_impl(&mut ws2, 0.0);

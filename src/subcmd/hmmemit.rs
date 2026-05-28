@@ -1,5 +1,7 @@
 //! hmmemit — sample or emit sequences from an HMM.
 
+#![allow(clippy::if_same_then_else, clippy::needless_range_loop)]
+
 use std::io::{BufReader, Write};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;

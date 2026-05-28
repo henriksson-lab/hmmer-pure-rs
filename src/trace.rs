@@ -172,6 +172,12 @@ impl Trace {
     }
 }
 
+impl Default for Trace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Float near-equality test. Faithful port of `esl_FCompare_old`
 /// (hmmer/easel/easel.c:2400). Used by the Viterbi traceback to compare a DP
 /// cell value against `prev + tsc + emission` candidate predecessors.
@@ -519,7 +525,7 @@ pub fn alignment_display_with_pp_emission_odds(
     let has_rf = hmm
         .rf
         .as_ref()
-        .map_or(false, |rf| !rf.is_empty() && rf[0] != 0);
+        .is_some_and(|rf| !rf.is_empty() && rf[0] != 0);
     let mut hmmfrom = 0;
     let mut hmmto = 0;
     let mut sqfrom = 0;
@@ -564,7 +570,7 @@ pub fn alignment_display_with_pp_emission_odds(
                 // Match line: C HMMER (p7_alidisplay.c:220-224) pushes the
                 // model character on identity, `+` when emission-odds ratio
                 // exceeds 1.0 (positive log-odds), space otherwise.
-                if cons_ch.to_ascii_uppercase() == seq_ch.to_ascii_uppercase() {
+                if cons_ch.eq_ignore_ascii_case(&seq_ch) {
                     mline.push(cons_ch);
                 } else {
                     let x = dsq[i] as usize;

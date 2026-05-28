@@ -1,6 +1,8 @@
 //! Generic (non-SIMD) Forward algorithm.
 //! Direct port of generic_fwdback.c.
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::logsum::p7_flogsum;

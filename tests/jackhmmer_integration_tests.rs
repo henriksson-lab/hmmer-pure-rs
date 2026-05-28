@@ -307,7 +307,7 @@ fn run_jackhmmer_with_chkali(
     (stdout, msas)
 }
 
-fn round_block<'a>(stdout: &'a str, round: usize) -> &'a str {
+fn round_block(stdout: &str, round: usize) -> &str {
     if round == 1 {
         let start = stdout.find("Scores for complete sequences").unwrap();
         let rest = &stdout[start..];
@@ -1333,6 +1333,7 @@ fn jackhmmer_globins_round2_tables_match_bundled_c_exactly() {
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k fixture"]
 fn jackhmmer_medium_realworld_round2_matches_expected_tbl_and_dom_counts() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|O43739|CYH3_HUMAN");
@@ -1367,6 +1368,7 @@ fn jackhmmer_medium_realworld_round2_matches_expected_tbl_and_dom_counts() {
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k fixture"]
 fn jackhmmer_haptoglobin_realworld_round2_matches_expected_tbl_and_dom_counts() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|P00738|HPT_HUMAN");
@@ -1402,6 +1404,7 @@ fn jackhmmer_haptoglobin_realworld_round2_matches_expected_tbl_and_dom_counts() 
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k fixture and bundled C jackhmmer"]
 fn jackhmmer_medium_realworld_round2_checkpoint_and_tables_match_c() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|O43739|CYH3_HUMAN");
@@ -1437,6 +1440,7 @@ fn jackhmmer_medium_realworld_round2_checkpoint_and_tables_match_c() {
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k fixture and bundled C jackhmmer"]
 fn jackhmmer_haptoglobin_realworld_round2_checkpoint_and_tables_match_c() {
     let db = test_path("test_data/human_swissprot_2k.fasta");
     let query = extract_fasta_record(&db, "sp|P00738|HPT_HUMAN");

@@ -1,10 +1,10 @@
 //! C math shims used where bit parity with HMMER's C code matters.
 
 /// Easel's `eslCONST_LOG2`.
-pub const ESL_CONST_LOG2: f64 = 0.69314718055994529_f64;
+pub const ESL_CONST_LOG2: f64 = std::f64::consts::LN_2;
 
 /// Easel's `eslCONST_LOG2R`.
-pub const ESL_CONST_LOG2R: f64 = 1.44269504088896341_f64;
+pub const ESL_CONST_LOG2R: f64 = std::f64::consts::LOG2_E;
 
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 #[link(name = "m")]
@@ -33,7 +33,7 @@ unsafe extern "C" {
 pub fn c_log_f64(x: f64) -> f64 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_log(x);
+        c_log(x)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
@@ -59,7 +59,7 @@ pub fn c_log_f32_to_f32(x: f32) -> f32 {
 pub fn c_logf_to_f32(x: f32) -> f32 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_logf(x);
+        c_logf(x)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
@@ -73,7 +73,7 @@ pub fn c_logf_to_f32(x: f32) -> f32 {
 pub fn c_exp_f64(x: f64) -> f64 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_exp(x);
+        c_exp(x)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
@@ -93,7 +93,7 @@ pub fn c_exp_to_f32(x: f64) -> f32 {
 pub fn c_expf_to_f32(x: f32) -> f32 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_expf(x);
+        c_expf(x)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
@@ -107,7 +107,7 @@ pub fn c_expf_to_f32(x: f32) -> f32 {
 pub fn c_pow_f64(x: f64, y: f64) -> f64 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_pow(x, y);
+        c_pow(x, y)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
@@ -121,7 +121,7 @@ pub fn c_pow_f64(x: f64, y: f64) -> f64 {
 pub fn c_sqrt_f64(x: f64) -> f64 {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     unsafe {
-        return c_sqrt(x);
+        c_sqrt(x)
     }
 
     #[cfg(not(all(unix, not(target_arch = "wasm32"))))]

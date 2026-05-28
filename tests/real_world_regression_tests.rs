@@ -1668,6 +1668,7 @@ fn test_gecco_pfam5_top_hits_match_golden_rows() {
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k Pfam fixture"]
 fn test_representative_pfam_real_world_top_hits_match_golden() {
     let families = ["Globin", "Ras", "Trypsin", "RVT_1"];
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
@@ -1746,6 +1747,7 @@ fn test_gecco_pfam5_domtblout_query_counts_are_stable() {
 }
 
 #[test]
+#[ignore = "requires local human_swissprot_2k Pfam fixture"]
 fn test_rrm1_domtblout_multi_domain_profile_is_stable() {
     let rows = parse_domtbl_rows(&run_hmmsearch_domtblout(
         &test_path("test_data/RRM_1_pfam.hmm"),
@@ -1782,7 +1784,7 @@ fn test_rrm1_domtblout_multi_domain_profile_is_stable() {
 }
 
 #[test]
-#[ignore = "slow parity sweep across all committed Pfam golden fixtures"]
+#[ignore = "slow parity sweep across all local/generated Pfam golden fixtures"]
 fn test_pfam_top3_rows_match_golden_for_all_families() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
     for family in PFAM_FAMILIES {
@@ -1815,7 +1817,7 @@ fn test_pfam_top3_rows_match_golden_for_all_families() {
 }
 
 #[test]
-#[ignore = "slow parity sweep across all committed Pfam golden fixtures"]
+#[ignore = "slow parity sweep across all local/generated Pfam golden fixtures"]
 fn test_pfam_top3_score_bias_rows_match_golden_for_all_families() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
     for family in PFAM_FAMILIES {
@@ -1840,7 +1842,7 @@ fn test_pfam_top3_score_bias_rows_match_golden_for_all_families() {
 }
 
 #[test]
-#[ignore = "slow parity sweep across all committed Pfam golden fixtures"]
+#[ignore = "slow parity sweep across all local/generated Pfam golden fixtures"]
 fn test_pfam_per_query_hit_counts_match_golden_for_all_families() {
     let seqdb = test_path("test_data/human_swissprot_2k.fasta");
     for family in PFAM_FAMILIES {
@@ -1910,7 +1912,8 @@ fn assert_fm_parity(hmm_rel: &str, fasta_rel: &str, extra: &[&str]) {
     let rust_keys = fm_hit_keys(&parse_nhmmer_rows(&rust_tbl));
     let c_keys = fm_hit_keys(&parse_nhmmer_rows(&c_tbl));
     assert_eq!(
-        rust_keys, c_keys,
+        rust_keys,
+        c_keys,
         "FM-index nhmmer hit set diverged from C for {hmm_rel} vs {fasta_rel} {extra:?}\n\
          Rust ({} hits): {rust_keys:?}\nC ({} hits): {c_keys:?}",
         rust_keys.len(),
@@ -1920,7 +1923,11 @@ fn assert_fm_parity(hmm_rel: &str, fasta_rel: &str, extra: &[&str]) {
 
 #[test]
 fn test_nhmmer_fmindex_made1_matches_c_hit_set() {
-    assert_fm_parity("hmmer/tutorial/MADE1.hmm", "hmmer/tutorial/dna_target.fa", &[]);
+    assert_fm_parity(
+        "hmmer/tutorial/MADE1.hmm",
+        "hmmer/tutorial/dna_target.fa",
+        &[],
+    );
 }
 
 #[test]
@@ -1936,7 +1943,11 @@ fn test_nhmmer_fmindex_made1_low_threshold_matches_c() {
 
 #[test]
 fn test_nhmmer_fmindex_3box_matches_c_hit_set() {
-    assert_fm_parity("hmmer/testsuite/3box.hmm", "hmmer/testsuite/3box-alitest.fa", &[]);
+    assert_fm_parity(
+        "hmmer/testsuite/3box.hmm",
+        "hmmer/testsuite/3box-alitest.fa",
+        &[],
+    );
 }
 
 #[test]
@@ -1952,7 +1963,11 @@ fn test_nhmmer_fmindex_3box_low_threshold_matches_c() {
 
 #[test]
 fn test_nhmmer_fmindex_ecori_matches_c_hit_set() {
-    assert_fm_parity("hmmer/testsuite/ecori.hmm", "hmmer/testsuite/3box-alitest.fa", &[]);
+    assert_fm_parity(
+        "hmmer/testsuite/ecori.hmm",
+        "hmmer/testsuite/3box-alitest.fa",
+        &[],
+    );
 }
 
 // Parse the four "Residues passing ... filter" counters (SSV, bias, Vit, Fwd)
@@ -2027,7 +2042,10 @@ fn test_nhmmer_fmindex_made1_filter_residue_counters_match_c() {
 #[test]
 fn test_nhmmer_fmindex_3box_filter_residue_counters_match_c() {
     // C (verified): SSV/bias/Vit/Fwd = 677/677/166/94 (exact on all four).
-    assert_fm_counters_match_c("hmmer/testsuite/3box.hmm", "hmmer/testsuite/3box-alitest.fa");
+    assert_fm_counters_match_c(
+        "hmmer/testsuite/3box.hmm",
+        "hmmer/testsuite/3box-alitest.fa",
+    );
 }
 
 // MED-2 regression: a MULTI-SEGMENT FM database. The single-segment fixtures
@@ -2232,11 +2250,24 @@ fn test_nhmmer_tblout_dash_line_aligns_with_header_wide_accession() {
     // never exceed its C fixed-literal length (i.e. it is space-padded, not
     // dash-filled). qaccw widened to 11 must show a 10-dash token + leading space,
     // not an 11-dash token.
-    let tokens: Vec<&str> = dash.trim_start_matches('#').split(' ').filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = dash
+        .trim_start_matches('#')
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .collect();
     let max_literal = [19usize, 10, 20, 10, 7, 7, 7, 7, 7, 7, 7, 6, 9, 6, 5, 21];
-    assert_eq!(tokens.len(), max_literal.len(), "unexpected dash token count: {:?}", tokens);
+    assert_eq!(
+        tokens.len(),
+        max_literal.len(),
+        "unexpected dash token count: {:?}",
+        tokens
+    );
     for (tok, &maxlen) in tokens.iter().zip(max_literal.iter()) {
-        assert!(tok.bytes().all(|b| b == b'-'), "dash token has non-dash char: {:?}", tok);
+        assert!(
+            tok.bytes().all(|b| b == b'-'),
+            "dash token has non-dash char: {:?}",
+            tok
+        );
         assert!(
             tok.len() <= maxlen,
             "dash token {:?} (len {}) exceeds C fixed literal length {} (column was dash-filled instead of space-padded)",

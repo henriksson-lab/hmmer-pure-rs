@@ -1,5 +1,6 @@
 //! AVX2-optimized MSV filter (32x uint8 vectors).
 //! Wider SIMD for ~2x speedup over SSE2 on supported CPUs.
+#![allow(clippy::needless_range_loop)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

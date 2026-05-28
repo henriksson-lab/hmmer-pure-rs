@@ -1,11 +1,15 @@
 //! Biological sequence type and FASTA I/O.
 //! Simplified port of esl_sq and esl_sqio_ascii for FASTA format.
 
+#![allow(clippy::manual_strip)]
+
 use crate::alphabet::{Alphabet, Dsq, DSQ_IGNORED, DSQ_ILLEGAL, DSQ_SENTINEL};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::msa;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
+
+const MAX_SEQUENCE_LINE_LEN: usize = 1 << 20;
 
 /// A biological sequence (digital or text mode).
 #[derive(Debug, Clone)]
@@ -56,6 +60,12 @@ impl Sequence {
         self.n = 0;
         self.l = 0;
         self.taxid = -1;
+    }
+}
+
+impl Default for Sequence {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -169,7 +179,7 @@ impl<R: Read> SeqFile<R> {
             let mut line = String::new();
             loop {
                 line.clear();
-                let n = self.reader.read_line(&mut line).map_err(HmmerError::Io)?;
+                let n = read_capped_line(&mut self.reader, &mut line)?;
                 if n == 0 {
                     self.at_eof = true;
                     return Ok(false);
@@ -230,7 +240,7 @@ impl<R: Read> SeqFile<R> {
             let mut line = String::new();
             loop {
                 line.clear();
-                let n = self.reader.read_line(&mut line).map_err(HmmerError::Io)?;
+                let n = read_capped_line(&mut self.reader, &mut line)?;
                 if n == 0 {
                     self.at_eof = true;
                     break;
@@ -258,7 +268,7 @@ impl<R: Read> SeqFile<R> {
             let mut in_seq = false;
             loop {
                 line.clear();
-                let n = self.reader.read_line(&mut line).map_err(HmmerError::Io)?;
+                let n = read_capped_line(&mut self.reader, &mut line)?;
                 if n == 0 {
                     self.at_eof = true;
                     break;
@@ -327,7 +337,7 @@ impl<R: Read> SeqFile<R> {
             let mut in_definition = false;
             loop {
                 line.clear();
-                let n = self.reader.read_line(&mut line).map_err(HmmerError::Io)?;
+                let n = read_capped_line(&mut self.reader, &mut line)?;
                 if n == 0 {
                     self.at_eof = true;
                     break;
@@ -356,7 +366,6 @@ impl<R: Read> SeqFile<R> {
                     in_definition = true;
                 } else if trimmed.starts_with("ACCESSION") && sq.acc.is_empty() {
                     sq.acc = trimmed[9..]
-                        .trim()
                         .split_whitespace()
                         .next()
                         .unwrap_or("")
@@ -404,6 +413,7 @@ impl<R: Read> SeqFile<R> {
             return format.matches_record_start(trimmed_line);
         }
         trimmed_line.starts_with('>')
+            || trimmed_line.starts_with("# STOCKHOLM")
             || trimmed_line.starts_with("ID ")
             || trimmed_line.starts_with("LOCUS ")
     }
@@ -473,6 +483,39 @@ impl<R: Read> SeqFile<R> {
     }
 }
 
+fn read_capped_line<R: BufRead>(reader: &mut R, line: &mut String) -> HmmerResult<usize> {
+    line.clear();
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf().map_err(HmmerError::Io)?;
+        if available.is_empty() {
+            return Ok(total);
+        }
+        let take = available
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(available.len(), |idx| idx + 1);
+        total = total
+            .checked_add(take)
+            .ok_or_else(|| HmmerError::Format("sequence file line length overflow".to_string()))?;
+        if total > MAX_SEQUENCE_LINE_LEN {
+            return Err(HmmerError::Format(format!(
+                "sequence file line exceeds {} bytes",
+                MAX_SEQUENCE_LINE_LEN
+            )));
+        }
+        let chunk = &available[..take];
+        let text = std::str::from_utf8(chunk)
+            .map_err(|e| HmmerError::Format(format!("invalid UTF-8 in sequence file: {e}")))?;
+        line.push_str(text);
+        let at_line_end = chunk.ends_with(b"\n");
+        reader.consume(take);
+        if at_line_end {
+            return Ok(total);
+        }
+    }
+}
+
 /// Open a sequence file for reading with `abc` (port of `esl_sqfile_Open`).
 ///
 /// Transparently wraps `.gz` files with a `flate2` decompressor; the
@@ -517,7 +560,7 @@ fn open_seq_file_inner(
         });
     }
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-    let reader: Box<dyn Read> = if path.extension().map_or(false, |e| e == "gz") {
+    let reader: Box<dyn Read> = if path.extension().is_some_and(|e| e == "gz") {
         Box::new(flate2::read::GzDecoder::new(file))
     } else {
         Box::new(file)
@@ -745,6 +788,21 @@ mod tests {
     }
 
     #[test]
+    fn test_read_stockholm_autodetects_without_asserted_format() {
+        let stockholm = b"# STOCKHOLM 1.0\nseq1 ACDE\nseq2 A-D-\n//\n";
+        let abc = Alphabet::amino();
+        let mut reader = SeqFile::new(&stockholm[..], abc);
+        let mut sq = Sequence::new();
+        assert!(reader.read(&mut sq).unwrap());
+        assert_eq!(sq.name, "seq1");
+        assert_eq!(sq.n, 4);
+        assert!(reader.read(&mut sq).unwrap());
+        assert_eq!(sq.name, "seq2");
+        assert_eq!(sq.n, 2);
+        assert!(!reader.read(&mut sq).unwrap());
+    }
+
+    #[test]
     fn test_asserted_format_rejects_other_record_start() {
         let uniprot = b"ID   seq1\nSQ   SEQUENCE 4 AA;\nACDE\n//\n";
         let abc = Alphabet::amino();
@@ -754,5 +812,30 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unrecognized sequence file record start"));
+    }
+
+    #[test]
+    fn test_read_fasta_rejects_overlong_header_line() {
+        let mut fasta = Vec::new();
+        fasta.push(b'>');
+        fasta.extend(std::iter::repeat_n(b'a', MAX_SEQUENCE_LINE_LEN));
+        fasta.push(b'\n');
+        let abc = Alphabet::amino();
+        let mut reader = SeqFile::new(&fasta[..], abc);
+        let mut sq = Sequence::new();
+        let err = reader.read(&mut sq).unwrap_err();
+        assert!(err.to_string().contains("sequence file line exceeds"));
+    }
+
+    #[test]
+    fn test_read_fasta_rejects_overlong_sequence_line() {
+        let mut fasta = b">seq\n".to_vec();
+        fasta.extend(std::iter::repeat_n(b'A', MAX_SEQUENCE_LINE_LEN + 1));
+        fasta.push(b'\n');
+        let abc = Alphabet::amino();
+        let mut reader = SeqFile::new(&fasta[..], abc);
+        let mut sq = Sequence::new();
+        let err = reader.read(&mut sq).unwrap_err();
+        assert!(err.to_string().contains("sequence file line exceeds"));
     }
 }

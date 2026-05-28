@@ -1,4 +1,5 @@
 //! Exact SSV-over-FM diagonal kernel for nhmmer's FM-index long-target path.
+#![allow(clippy::needless_range_loop)]
 //!
 //! This is an additive, faithful port of the core of C's
 //! `p7_SSVFM_longlarget` pipeline (hmmer/src/fm_ssv.c): the single FM trie
@@ -208,7 +209,7 @@ impl OptExt {
             let mut sc_fwd = 0f32;
             let mut sc_rev = 0f32;
             let mut j = 0usize;
-            while j < 10 && i + j + 1 <= m {
+            while j < 10 && i + j < m {
                 sc_fwd += max_scores[i + j + 1];
                 fwd[i][j] = sc_fwd;
                 sc_rev += max_scores[m - i - j];
@@ -965,7 +966,9 @@ mod tests {
         };
 
         // Threshold low enough that the consensus run is found.
-        let seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false);
+        let seeds = fm_get_seeds(
+            &fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false,
+        );
 
         // There must be at least one forward (NoComplement) seed.
         assert!(
@@ -1018,7 +1021,9 @@ mod tests {
 
         // High threshold: with a -3 mismatch penalty no diagonal in this target
         // can reach +12 bits over 8 positions.
-        let seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 12.0, &config, true, false);
+        let seeds = fm_get_seeds(
+            &fmf, &fmb, &alph, &scores, &consensus, 12.0, &config, true, false,
+        );
         assert!(
             seeds.is_empty(),
             "expected no seeds for absent consensus, got {seeds:?}"
@@ -1050,7 +1055,9 @@ mod tests {
             ..FmSsvConfig::default()
         };
 
-        let mut seeds = fm_get_seeds(&fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false);
+        let mut seeds = fm_get_seeds(
+            &fmf, &fmb, &alph, &scores, &consensus, 6.0, &config, true, false,
+        );
         assert!(!seeds.is_empty());
 
         // Build a 1-indexed target in alphabet codes for forward extension.

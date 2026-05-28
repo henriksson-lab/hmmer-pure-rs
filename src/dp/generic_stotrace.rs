@@ -1,6 +1,8 @@
 //! Generic stochastic traceback — sample alignment from Forward distribution.
 //! Port of generic_stotrace.c p7_GStochasticTrace().
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::alphabet::Dsq;
 use crate::dp::gmx::*;
 use crate::profile::*;
@@ -510,7 +512,7 @@ fn f_sum(vec: &[f32]) -> f32 {
 fn f_log_norm(vec: &mut [f32]) {
     let denom = f_log_sum(vec);
     for v in vec.iter_mut() {
-        *v += -1.0 * denom;
+        *v += -denom;
     }
     for v in vec.iter_mut() {
         *v = c_expf_to_f32(*v);

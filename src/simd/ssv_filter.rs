@@ -2,6 +2,7 @@
 //!
 //! This mirrors HMMER's impl_sse/ssvfilter.c for the Pkinase reference shape,
 //! where Q=ceil(M/16)=17 and C splits the scan into band widths 8 and 9.
+#![allow(clippy::absurd_extreme_comparisons, clippy::never_loop)]
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::{nqb, OProfile};
@@ -132,7 +133,7 @@ unsafe fn calc_band_8(
     let mut i = 0usize;
     while i < l && i < 9 {
         let x = *dsq_ptr.add(i) as usize;
-        let mut rsc = om.sbv.get_unchecked(x).as_ptr().add(i + 0);
+        let mut rsc = om.sbv.get_unchecked(x).as_ptr().add(i);
         step_lane!(sv00, rsc, xev);
         step_lane!(sv01, rsc, xev);
         step_lane!(sv02, rsc, xev);

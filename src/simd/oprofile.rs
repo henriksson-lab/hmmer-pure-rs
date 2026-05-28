@@ -1,5 +1,11 @@
 //! P7_OPROFILE - SSE2-optimized scoring profile.
 //! Direct port of impl_sse/p7_oprofile.c.
+#![allow(
+    clippy::approx_constant,
+    clippy::erasing_op,
+    clippy::identity_op,
+    clippy::needless_range_loop
+)]
 
 use crate::profile::*;
 use crate::util::cmath::{c_expf_to_f32, c_log_to_f32, c_logf_to_f32, ESL_CONST_LOG2};
@@ -179,7 +185,7 @@ pub struct OProfile {
 /// For positive `sc` the negated rounded value is negative; unsigned wrapping
 /// then yields the correct offset byte. Saturates to 255.
 fn biased_byteify(scale_b: f32, bias_b: u8, sc: f32) -> u8 {
-    let negated = -1.0 * (scale_b * sc).round();
+    let negated = -(scale_b * sc).round();
     if negated > (255 - bias_b) as f32 {
         255
     } else {
@@ -205,7 +211,7 @@ fn wordify(scale_w: f32, sc: f32) -> i16 {
 /// Convert a float log-odds score to an unbiased MSV byte cost.
 /// Mirrors C `unbiased_byteify`: negates and rounds, saturating to 255.
 fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
-    let negated = -1.0 * (scale_b * sc).round();
+    let negated = -(scale_b * sc).round();
     if negated > 255.0 {
         255
     } else {
@@ -225,17 +231,17 @@ fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
 unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
     use std::arch::x86_64::*;
 
-    const CEPHES_P0: f32 = 1.9875691500e-4;
-    const CEPHES_P1: f32 = 1.3981999507e-3;
-    const CEPHES_P2: f32 = 8.3334519073e-3;
-    const CEPHES_P3: f32 = 4.1665795894e-2;
-    const CEPHES_P4: f32 = 1.6666665459e-1;
-    const CEPHES_P5: f32 = 5.0000001201e-1;
-    const C0: f32 = 0.693359375;
-    const C1: f32 = -2.12194440e-4;
-    const LOG2R: f32 = 1.44269504088896341_f32;
-    const MAXLOGF: f32 = 88.3762626647949;
-    const MINLOGF: f32 = -88.3762626647949;
+    const CEPHES_P0: f32 = 1.987_569_1e-4;
+    const CEPHES_P1: f32 = 1.398_199_9e-3;
+    const CEPHES_P2: f32 = 8.333_452e-3;
+    const CEPHES_P3: f32 = 4.166_579_6e-2;
+    const CEPHES_P4: f32 = 1.666_666_6e-1;
+    const CEPHES_P5: f32 = 5e-1;
+    const C0: f32 = 0.693_359_4;
+    const C1: f32 = -2.121_944_4e-4;
+    const LOG2R: f32 = 1.442_695_f32;
+    const MAXLOGF: f32 = 88.376_26;
+    const MINLOGF: f32 = -88.376_26;
 
     let mut xv = _mm_loadu_ps(x.as_ptr());
     let maxmask = _mm_cmpgt_ps(xv, _mm_set1_ps(MAXLOGF));
@@ -380,7 +386,7 @@ impl OProfile {
             }
         }
 
-        let bias_b = unbiased_byteify(scale_b, -1.0 * max_sc);
+        let bias_b = unbiased_byteify(scale_b, -max_sc);
 
         // Build striped MSV match score vectors
         let mut rbv = vec![vec![[0u8; 16]; nq]; kp];

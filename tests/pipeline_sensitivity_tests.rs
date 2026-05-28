@@ -84,6 +84,7 @@ fn infernal_testsuite() -> std::path::PathBuf {
 }
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn pipeline_finds_trna_76bp() {
     let hmm = read_hmm_from_cm(&infernal_testsuite().join("tRNA.c.cm"));
     let seq = b"GCGGAUUUAGCUCAGUUGGGAGAGCGCCAGACUGAAGAUCUGGAGGUCCUGUGUUCGAUCCACAGAAUUCGCACCA";
@@ -101,12 +102,15 @@ fn pipeline_finds_trna_76bp() {
 }
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and 1k-tRNA.fa"]
 fn pipeline_finds_trna_1000bp() {
     let hmm = read_hmm_from_cm(&infernal_testsuite().join("tRNA.c.cm"));
     let fa_path = infernal_testsuite().join("1k-tRNA.fa");
-    if !fa_path.exists() {
-        return;
-    }
+    assert!(
+        fa_path.exists(),
+        "required Infernal fixture is absent: {}",
+        fa_path.display()
+    );
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
     for line in content.lines().skip(1) {
@@ -129,13 +133,15 @@ fn pipeline_finds_trna_1000bp() {
 }
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and /tmp/ecoli_k12.fna"]
 fn ssv_sensitivity_ecoli_genome() {
     let hmm = read_hmm_from_cm(&infernal_testsuite().join("tRNA.c.cm"));
     let ecoli_path = Path::new("/tmp/ecoli_k12.fna");
-    if !ecoli_path.exists() {
-        println!("Skipping: /tmp/ecoli_k12.fna not found");
-        return;
-    }
+    assert!(
+        ecoli_path.exists(),
+        "required host-local E. coli fixture is absent: {}",
+        ecoli_path.display()
+    );
 
     let content = std::fs::read_to_string(ecoli_path).unwrap();
     let mut genome = Vec::new();

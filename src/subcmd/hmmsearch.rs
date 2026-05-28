@@ -1,6 +1,8 @@
 //! Pure Rust hmmsearch — uses generic DP algorithms.
 //! Progressively replacing C hmmsearch functionality.
 
+#![allow(clippy::if_same_then_else, clippy::too_many_arguments)]
+
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -99,7 +101,11 @@ struct Args {
     inc_dome: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", allow_hyphen_values = true)]
+    #[arg(
+        long = "incdomT",
+        conflicts_with = "inc_dome",
+        allow_hyphen_values = true
+    )]
     inc_dom_t: Option<f64>,
 
     // --- Model-specific cutoffs ---
@@ -323,7 +329,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     logsum::p7_flogsuminit();
 
-    if args.hmmfile == PathBuf::from("-") && args.seqdb == PathBuf::from("-") {
+    if args.hmmfile.as_path() == Path::new("-") && args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: Either <hmmfile> or <seqdb> may be '-' but not both");
         std::process::exit(1);
     }
@@ -333,7 +339,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error reading HMM file: {}", e);
         std::process::exit(1);
     });
-    if hmms.len() > 1 && args.seqdb == PathBuf::from("-") {
+    if hmms.len() > 1 && args.seqdb.as_path() == Path::new("-") {
         eprintln!(
             "Error: target sequence file - isn't rewindable; can't search it with multiple queries"
         );
@@ -544,10 +550,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let nonull2 = args.nonull2;
         let seed = args.seed;
         let wants_alignment_file = args.ali_outfile.is_some();
-        let do_alignment = !args.noali
-            || args.domtblout.is_some()
-            || args.pfamtblout.is_some()
-            || wants_alignment_file;
+        let do_alignment = true;
         let do_alignment_display = !args.noali || wants_alignment_file;
         let mut total_residues: u64 = 0;
         let mut n_targets: u64 = 0;
@@ -649,7 +652,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 total_residues += sq.n as u64;
                 n_targets += 1;
 
-                local_pli.n_targets = 0;
+                local_pli.n_targets = n_targets.saturating_sub(1);
                 local_pli.n_past_msv = 0;
                 local_pli.n_past_bias = 0;
                 local_pli.n_past_vit = 0;
@@ -728,7 +731,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                             restrict_seen += 1;
                             total_residues += sq.n as u64;
                             n_targets += 1;
-                            batch.push(sq.clone());
+                            batch.push((n_targets, sq.clone()));
                             sq.reuse();
                         }
                         Ok(false) => break,
@@ -780,8 +783,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                             local_pli.domz_setby = pli.domz_setby;
                             (bg.clone(), local_gm, (*shared_om).clone(), local_pli)
                         },
-                        |(local_bg, local_gm, local_om, local_pli), sq| {
-                            local_pli.n_targets = 0;
+                        |(local_bg, local_gm, local_om, local_pli), (target_idx, sq)| {
+                            local_pli.n_targets = target_idx.saturating_sub(1);
                             local_pli.n_past_msv = 0;
                             local_pli.n_past_bias = 0;
                             local_pli.n_past_vit = 0;
@@ -949,6 +952,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             writeln!(out, "Domain annotation for each sequence:").unwrap();
         } else {
             writeln!(out, "Domain annotation for each sequence (and alignments):").unwrap();
+        }
+        if !any_reported {
+            writeln!(
+                out,
+                "\n   [No targets detected that satisfy reporting thresholds]"
+            )
+            .unwrap();
         }
 
         for hit in &th.hits {
@@ -1247,6 +1257,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
     }
 
+    let table_cmdline = normalize_hmmsearch_table_cmdline(&cmdline);
     if let Some(ref mut f) = tblout_file {
         write_table_footer(
             f,
@@ -1254,7 +1265,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SEARCH",
             &args.hmmfile,
             &args.seqdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
     if let Some(ref mut f) = domtblout_file {
@@ -1264,7 +1275,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SEARCH",
             &args.hmmfile,
             &args.seqdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
     if let Some(ref mut f) = pfamtblout_file {
@@ -1274,7 +1285,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SEARCH",
             &args.hmmfile,
             &args.seqdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
 
@@ -1321,7 +1332,7 @@ fn write_hmmsearch_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# sequence reporting threshold:    score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1337,7 +1348,7 @@ fn write_hmmsearch_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# domain reporting threshold:      score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1353,7 +1364,7 @@ fn write_hmmsearch_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# sequence inclusion threshold:    score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1369,7 +1380,7 @@ fn write_hmmsearch_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# domain inclusion threshold:      score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1530,7 +1541,7 @@ pub fn write_tblout<W: Write>(
         .unwrap();
         writeln!(
             f,
-            "#{:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:<qaccw$} {:>9} {:>6} {:>5} {:>9} {:>6} {:>5} {:>5} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
+            "#{:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:<qaccw$} {:>9} {:>6} {:>5} {:>9} {:>6} {:>5} {:>5} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} description of target",
             " target name",
             "accession",
             "query name",
@@ -1548,13 +1559,12 @@ pub fn write_tblout<W: Write>(
             "env",
             "dom",
             "rep",
-            "inc",
-            "description of target"
+            "inc"
         )
         .unwrap();
         writeln!(
             f,
-            "#{:>tname_hdrw$} {:>taccw$} {:>qnamew$} {:>qaccw$} {:>9} {:>6} {:>5} {:>9} {:>6} {:>5} {:>5} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {}",
+            "#{:>tname_hdrw$} {:>taccw$} {:>qnamew$} {:>qaccw$} {:>9} {:>6} {:>5} {:>9} {:>6} {:>5} {:>5} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3} ---------------------",
             "-------------------",
             "----------",
             "--------------------",
@@ -1572,8 +1582,7 @@ pub fn write_tblout<W: Write>(
             "---",
             "---",
             "---",
-            "---",
-            "---------------------"
+            "---"
         )
         .unwrap();
     }
@@ -1620,10 +1629,12 @@ pub fn best_domain(hit: &Hit) -> Option<&Domain> {
     // C p7_pipeline.c:1110 uses a strict `>` scan, so the FIRST domain with the
     // maximum bitscore wins on a tie. `Iterator::max_by` keeps the LAST max, so
     // fold manually replacing only on a strict increase.
-    hit.dcl.iter().fold(None, |best: Option<&Domain>, d| match best {
-        Some(b) if b.bitscore >= d.bitscore => Some(b),
-        _ => Some(d),
-    })
+    hit.dcl
+        .iter()
+        .fold(None, |best: Option<&Domain>, d| match best {
+            Some(b) if b.bitscore >= d.bitscore => Some(b),
+            _ => Some(d),
+        })
 }
 
 #[inline]
@@ -1759,6 +1770,13 @@ pub fn write_standard_stdout_tables<W: Write>(
         writeln!(out, "Domain annotation for each sequence:").unwrap();
     } else {
         writeln!(out, "Domain annotation for each sequence (and alignments):").unwrap();
+    }
+    if !any_reported {
+        writeln!(
+            out,
+            "\n   [No targets detected that satisfy reporting thresholds]"
+        )
+        .unwrap();
     }
 
     for hit in &th.hits {
@@ -1949,7 +1967,7 @@ pub fn write_domtblout<W: Write>(
         .unwrap();
         writeln!(
             f,
-            "#{:<tname_hdrw$} {:<taccw$} {:>5} {:<qnamew$} {:<qaccw$} {:>5} {:>9} {:>6} {:>5} {:>3} {:>3} {:>9} {:>9} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>4} {}",
+            "#{:<tname_hdrw$} {:<taccw$} {:>5} {:<qnamew$} {:<qaccw$} {:>5} {:>9} {:>6} {:>5} {:>3} {:>3} {:>9} {:>9} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>4} description of target",
             " target name",
             "accession",
             "tlen",
@@ -1971,13 +1989,12 @@ pub fn write_domtblout<W: Write>(
             "to",
             "from",
             "to",
-            "acc",
-            "description of target"
+            "acc"
         )
         .unwrap();
         writeln!(
             f,
-            "#{:>tname_hdrw$} {:>taccw$} {:>5} {:>qnamew$} {:>qaccw$} {:>5} {:>9} {:>6} {:>5} {:>3} {:>3} {:>9} {:>9} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>4} {}",
+            "#{:>tname_hdrw$} {:>taccw$} {:>5} {:>qnamew$} {:>qaccw$} {:>5} {:>9} {:>6} {:>5} {:>3} {:>3} {:>9} {:>9} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>4} ---------------------",
             "-------------------",
             "----------",
             "-----",
@@ -1999,8 +2016,7 @@ pub fn write_domtblout<W: Write>(
             "-----",
             "-----",
             "-----",
-            "----",
-            "---------------------"
+            "----"
         )
         .unwrap();
     }
@@ -2098,27 +2114,25 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
     writeln!(f, "#").unwrap();
     writeln!(
         f,
-        "# {:<tname_hdrw$} {:>6} {:>9} {:>3} {:>5} {:>5}    {}",
+        "# {:<tname_hdrw$} {:>6} {:>9} {:>3} {:>5} {:>5}    description",
         "name",
         " bits",
         "  E-value",
         "n",
         "exp",
         " bias",
-        "description",
         tname_hdrw = tnamew - 1,
     )
     .unwrap();
     writeln!(
         f,
-        "# {:>tname_hdrw$} {:>6} {:>9} {:>3} {:>5} {:>5}    {}",
+        "# {:>tname_hdrw$} {:>6} {:>9} {:>3} {:>5} {:>5}    ---------------------",
         "-------------------",
         "------",
         "---------",
         "---",
         "-----",
         "-----",
-        "---------------------",
         tname_hdrw = tnamew - 1,
     )
     .unwrap();
@@ -2148,7 +2162,7 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
     writeln!(f, "#").unwrap();
     writeln!(
         f,
-        "# {:<tname_hdrw$} {:>6} {:>9} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}     {}",
+        "# {:<tname_hdrw$} {:>6} {:>9} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}     description",
         " name",
         "bits",
         "E-value",
@@ -2160,13 +2174,12 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
         "ali-en",
         "hmm-st",
         "hmm-en",
-        "description",
         tname_hdrw = tnamew - 1,
     )
     .unwrap();
     writeln!(
         f,
-        "# {:>tname_hdrw$} {:>6} {:>9} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}      {}",
+        "# {:>tname_hdrw$} {:>6} {:>9} {:>5} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}      ---------------------",
         "-------------------",
         "------",
         "---------",
@@ -2178,7 +2191,6 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
         "------",
         "------",
         "------",
-        "---------------------",
         tname_hdrw = tnamew - 1,
     )
     .unwrap();
@@ -2194,7 +2206,7 @@ pub(crate) fn write_pfamtblout_with_pipeline<W: Write>(
             continue;
         }
         let mut ndom_reported = 0usize;
-        for (_dom_idx, dom) in hit.dcl.iter().enumerate() {
+        for dom in hit.dcl.iter() {
             if dom.is_reported {
                 ndom_reported += 1;
                 reported_domains.push((hit_idx, ndom_reported, hit, dom));
@@ -2294,6 +2306,21 @@ pub fn write_table_footer<W: Write>(
     writeln!(f, "# [ok]").unwrap();
 }
 
+fn normalize_hmmsearch_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some(_wrapper), Some("hmmsearch" | "search")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "hmmsearch".to_string()
+            } else {
+                format!("hmmsearch {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
+}
+
 /// Build and write the `-A` multiple alignment of all included domains.
 ///
 /// Faithful port of the `-A` block in `hmmer/src/hmmsearch.c:554-572` and
@@ -2366,7 +2393,22 @@ pub(crate) fn open_restricted_target_seq_file(
     let ssi_path = ssifile
         .map(Path::to_path_buf)
         .unwrap_or_else(|| hmmer_pure_rs::ssi::path_with_appended_suffix(path, ".ssi"));
-    let offset = lookup_ssi_primary_offset(&ssi_path, stkey)?;
+    let on_disk = hmmer_pure_rs::ssi::read_ssi_path(&ssi_path)
+        .map_err(|e| format!("failed to read SSI index {}: {e}", ssi_path.display()))?;
+    if on_disk.indexed_path.file_name() != path.file_name() {
+        return Err(format!(
+            "SSI index {} was built for {}, not {}",
+            ssi_path.display(),
+            on_disk.indexed_path.display(),
+            path.display()
+        ));
+    }
+    let offset = on_disk.lookup(stkey).ok_or_else(|| {
+        format!(
+            "sequence {stkey} not found in SSI index {}",
+            ssi_path.display()
+        )
+    })?;
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("failed to open sequence file {}: {e}", path.display()))?;
     file.seek(SeekFrom::Start(offset))
@@ -2378,126 +2420,6 @@ pub(crate) fn open_restricted_target_seq_file(
     } else {
         sqf
     })
-}
-
-fn lookup_ssi_primary_offset(ssi_path: &Path, key: &str) -> Result<u64, String> {
-    let mut file = std::fs::File::open(ssi_path)
-        .map_err(|e| format!("failed to open SSI index {}: {e}", ssi_path.display()))?;
-    let magic = read_be_u32(&mut file)?;
-    if magic != 0xd3d3c9b3 {
-        return Err(format!("bad SSI magic in {}", ssi_path.display()));
-    }
-    let _flags = read_be_u32(&mut file)?;
-    let offsz = read_be_u32(&mut file)?;
-    let nfiles = read_be_u16(&mut file)?;
-    let nprimary = read_be_u64(&mut file)?;
-    let nsecondary = read_be_u64(&mut file)?;
-    let flen = read_be_u32(&mut file)? as usize;
-    let plen = read_be_u32(&mut file)? as usize;
-    let slen = read_be_u32(&mut file)? as usize;
-    let frecsize = read_be_u32(&mut file)? as usize;
-    let precsize = read_be_u32(&mut file)? as usize;
-    let srecsize = read_be_u32(&mut file)? as usize;
-    let _foffset = read_be_offset(&mut file, offsz)?;
-    let poffset = read_be_offset(&mut file, offsz)?;
-    let soffset = read_be_offset(&mut file, offsz)?;
-    if (offsz != 4 && offsz != 8) || nfiles != 1 {
-        return Err(format!("unsupported SSI header in {}", ssi_path.display()));
-    }
-    if frecsize != flen + 16
-        || precsize != plen + 2 + 2 * offsz as usize + 8
-        || srecsize != slen + plen
-    {
-        return Err(format!(
-            "SSI index {} has inconsistent record sizes",
-            ssi_path.display()
-        ));
-    }
-
-    let mut primary_offsets = std::collections::HashMap::new();
-    file.seek(SeekFrom::Start(poffset))
-        .map_err(|e| format!("failed to read SSI index {}: {e}", ssi_path.display()))?;
-    for _ in 0..nprimary {
-        let primary = read_fixed_string(&mut file, plen)?;
-        let file_idx = read_be_u16(&mut file)?;
-        let offset = read_be_offset(&mut file, offsz)?;
-        let _data_offset = read_be_offset(&mut file, offsz)?;
-        let _record_len = read_be_i64(&mut file)?;
-        if file_idx == 0 {
-            primary_offsets.insert(primary, offset);
-        }
-    }
-    if let Some(offset) = primary_offsets.get(key).copied() {
-        return Ok(offset);
-    }
-
-    file.seek(SeekFrom::Start(soffset))
-        .map_err(|e| format!("failed to read SSI index {}: {e}", ssi_path.display()))?;
-    for _ in 0..nsecondary {
-        let secondary = read_fixed_string(&mut file, slen)?;
-        let primary = read_fixed_string(&mut file, plen)?;
-        if secondary == key {
-            return primary_offsets.get(&primary).copied().ok_or_else(|| {
-                format!(
-                    "SSI index {} secondary key {key} references missing primary {primary}",
-                    ssi_path.display()
-                )
-            });
-        }
-    }
-    Err(format!(
-        "sequence {key} not found in SSI index {}",
-        ssi_path.display()
-    ))
-}
-
-fn read_fixed_string<R: Read>(reader: &mut R, len: usize) -> Result<String, String> {
-    let mut buf = vec![0u8; len];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("failed to read SSI index: {e}"))?;
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    Ok(String::from_utf8_lossy(&buf[..end]).to_string())
-}
-
-fn read_be_u16<R: Read>(reader: &mut R) -> Result<u16, String> {
-    let mut buf = [0u8; 2];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("failed to read SSI index: {e}"))?;
-    Ok(u16::from_be_bytes(buf))
-}
-
-fn read_be_u32<R: Read>(reader: &mut R) -> Result<u32, String> {
-    let mut buf = [0u8; 4];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("failed to read SSI index: {e}"))?;
-    Ok(u32::from_be_bytes(buf))
-}
-
-fn read_be_u64<R: Read>(reader: &mut R) -> Result<u64, String> {
-    let mut buf = [0u8; 8];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("failed to read SSI index: {e}"))?;
-    Ok(u64::from_be_bytes(buf))
-}
-
-fn read_be_offset<R: Read>(reader: &mut R, offsz: u32) -> Result<u64, String> {
-    match offsz {
-        4 => read_be_u32(reader).map(u64::from),
-        8 => read_be_u64(reader),
-        _ => Err(format!("unsupported SSI offset size {offsz}")),
-    }
-}
-
-fn read_be_i64<R: Read>(reader: &mut R) -> Result<i64, String> {
-    let mut buf = [0u8; 8];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("failed to read SSI index: {e}"))?;
-    Ok(i64::from_be_bytes(buf))
 }
 
 #[cfg(test)]
@@ -2679,7 +2601,15 @@ mod tests {
         // space-separated negative form. allow_hyphen_values keeps clap from
         // treating "-0.5" as an unknown flag.
         let args = Args::try_parse_from([
-            "hmmsearch", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "model.hmm", "targets.fa",
+            "hmmsearch",
+            "--F1",
+            "-0.5",
+            "--F2",
+            "-1e-3",
+            "--F3",
+            "-2",
+            "model.hmm",
+            "targets.fa",
         ])
         .unwrap();
         assert_eq!(args.f1, -0.5);

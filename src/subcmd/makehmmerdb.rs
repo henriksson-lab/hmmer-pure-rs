@@ -155,7 +155,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Invalid block size: --block_size must be > 0");
         return std::process::ExitCode::FAILURE;
     }
-    if args.seqfile == PathBuf::from("-") && args.binaryfile == PathBuf::from("-") {
+    if args.seqfile == std::path::Path::new("-") && args.binaryfile == std::path::Path::new("-") {
         eprintln!("Either <seqfile> or <binaryfile> can be - but not both.");
         return std::process::ExitCode::FAILURE;
     }
@@ -170,7 +170,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     // heuristic on the first sequence's leading window, then parse sequences
     // from the in-memory copy. (Reading once and reusing the buffer also lets us
     // guess on stdin, which C handles via its rewindable recording buffer.)
-    let raw_input: Vec<u8> = if args.seqfile == PathBuf::from("-") {
+    let raw_input: Vec<u8> = if args.seqfile == std::path::Path::new("-") {
         let mut buf = Vec::new();
         if let Err(e) = std::io::stdin().lock().read_to_end(&mut buf) {
             eprintln!("Error reading stdin: {}", e);
@@ -261,7 +261,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     writeln!(err, "Building FM-index blocks...").unwrap();
 
     let outpath = args.binaryfile;
-    let mut out: Box<dyn Write> = if outpath == PathBuf::from("-") {
+    let mut out: Box<dyn Write> = if outpath == std::path::Path::new("-") {
         Box::new(std::io::stdout())
     } else {
         Box::new(std::fs::File::create(&outpath).unwrap_or_else(|e| {
@@ -367,7 +367,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 fn read_seqfile_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
-    if path.extension().map_or(false, |e| e == "gz") {
+    if path.extension().is_some_and(|e| e == "gz") {
         flate2::read::GzDecoder::new(file).read_to_end(&mut buf)?;
     } else {
         std::io::BufReader::new(file).read_to_end(&mut buf)?;
@@ -456,7 +456,10 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
         Some(s) => s,
         None => return &[],
     };
-    let end = bytes.iter().rposition(|b| !b.is_ascii_whitespace()).unwrap();
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .unwrap();
     &bytes[start..=end]
 }
 
@@ -761,10 +764,7 @@ fn append_sequence_text(
     let mut in_ambig_run = false;
     for i in 1..=sq.n {
         let dsq = sq.dsq[i];
-        let ch = if abc.is_canonical(dsq) {
-            in_ambig_run = false;
-            abc.sym[dsq as usize]
-        } else if abc.is_residue(dsq) && !replace_degenerate_residues {
+        let ch = if abc.is_canonical(dsq) || (abc.is_residue(dsq) && !replace_degenerate_residues) {
             in_ambig_run = false;
             abc.sym[dsq as usize]
         } else if abc.is_residue(dsq) {
@@ -1129,6 +1129,7 @@ fn write_metadata_extension<W: Write + ?Sized>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_c_metadata_extension<W: Write + ?Sized>(
     out: &mut W,
     fwd_only: bool,
@@ -1159,6 +1160,7 @@ fn write_c_metadata_extension<W: Write + ?Sized>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_c_stream_extension<W: Write + ?Sized>(
     out: &mut W,
     fwd_only: bool,
@@ -1189,6 +1191,7 @@ fn write_c_stream_extension<W: Write + ?Sized>(
     out.write_all(&payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_native_c_stream<W: Write + ?Sized>(
     out: &mut W,
     fwd_only: bool,
@@ -1215,6 +1218,7 @@ fn write_native_c_stream<W: Write + ?Sized>(
     out.write_all(&payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_c_stream_payload(
     fwd_only: bool,
     fm_alphabet: FmAlphabet,
@@ -1281,6 +1285,7 @@ fn build_c_stream_payload(
     Ok(payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_c_metadata_payload<W: Write + ?Sized>(
     out: &mut W,
     fwd_only: bool,
@@ -1328,6 +1333,10 @@ fn write_c_metadata_payload<W: Write + ?Sized>(
         } else {
             seq.name.as_str()
         };
+        reject_embedded_nul("sequence name", &seq.name)?;
+        reject_embedded_nul("sequence accession", &seq.acc)?;
+        reject_embedded_nul("sequence source", source)?;
+        reject_embedded_nul("sequence description", &seq.desc)?;
         out.write_all(&checked_u16(seq.name.len(), "name_length")?.to_le_bytes())?;
         out.write_all(&checked_u16(seq.acc.len(), "acc_length")?.to_le_bytes())?;
         out.write_all(&checked_u16(source.len(), "source_length")?.to_le_bytes())?;
@@ -1346,6 +1355,7 @@ fn write_c_metadata_payload<W: Write + ?Sized>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_c_fm_record<W: Write + ?Sized>(
     out: &mut W,
     fm_alphabet: FmAlphabet,
@@ -1372,7 +1382,11 @@ fn write_c_fm_record<W: Write + ?Sized>(
     // (reversed-text) FM record (makehmmerdb.c:694); the reverse-strand record
     // is emitted with overlap=0 (makehmmerdb.c:700). The forward record is the
     // one built from reversed text, i.e. `reverse_text_for_bwt == true`.
-    let overlap = if reverse_text_for_bwt { block.overlap_bases } else { 0 };
+    let overlap = if reverse_text_for_bwt {
+        block.overlap_bases
+    } else {
+        0
+    };
     out.write_all(&checked_u32(overlap, "overlap")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.seq_count, "seq_count")?.to_le_bytes())?;
     out.write_all(&checked_u32(block.ambig_count, "ambig_count")?.to_le_bytes())?;
@@ -1622,9 +1636,7 @@ fn c_block_text(
     );
     for seq in &seq_data[block.seq_offset..block.seq_offset + block.seq_count] {
         let end = seq.fm_start + seq.length;
-        text.extend(
-            fm_alphabet.encode_text_without_separators(&all_text[seq.fm_start..end], rng)?,
-        );
+        text.extend(fm_alphabet.encode_text_without_separators(&all_text[seq.fm_start..end], rng)?);
     }
     Ok(text)
 }
@@ -1693,6 +1705,16 @@ fn write_string<W: Write + ?Sized>(out: &mut W, value: &str) -> std::io::Result<
 fn write_c_string<W: Write + ?Sized>(out: &mut W, value: &str) -> std::io::Result<()> {
     out.write_all(value.as_bytes())?;
     out.write_all(&[0])
+}
+
+fn reject_embedded_nul(field: &str, value: &str) -> std::io::Result<()> {
+    if value.as_bytes().contains(&0) {
+        Err(invalid_data(format!(
+            "{field} contains an embedded NUL byte"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn checked_u16(value: usize, field: &str) -> std::io::Result<u16> {
@@ -1765,6 +1787,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 8, 18]
         );
+    }
+
+    #[test]
+    fn c_metadata_writer_rejects_embedded_nul_strings() {
+        let err = reject_embedded_nul("sequence name", "bad\0name").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("embedded NUL"));
     }
 
     #[test]
@@ -1857,13 +1886,19 @@ mod tests {
     #[test]
     fn guess_alphabet_dna_rna_amino() {
         // DNA: all four canonical bases, mostly ACGT.
-        let dna = b">s\n".iter().chain(b"ACGTACGTACGTACGTAAAACCCCGGGGTTTT".iter())
-            .copied().collect::<Vec<u8>>();
+        let dna = b">s\n"
+            .iter()
+            .chain(b"ACGTACGTACGTACGTAAAACCCCGGGGTTTT".iter())
+            .copied()
+            .collect::<Vec<u8>>();
         assert_eq!(guess_alphabet(&dna), Some(GuessedAlphabet::Dna));
 
         // RNA: ACGU.
-        let rna = b">s\n".iter().chain(b"ACGUACGUACGUACGUAAAACCCCGGGGUUUU".iter())
-            .copied().collect::<Vec<u8>>();
+        let rna = b">s\n"
+            .iter()
+            .chain(b"ACGUACGUACGUACGUAAAACCCCGGGGUUUU".iter())
+            .copied()
+            .collect::<Vec<u8>>();
         assert_eq!(guess_alphabet(&rna), Some(GuessedAlphabet::Rna));
 
         // Amino: contains aa-only giveaway residues (E, F, ...).
@@ -2001,13 +2036,21 @@ mod tests {
         assert_eq!(blocks[1].overlap_bases, 5);
         // windows: block 0 = fm_start 0 len 20; block 1 = fm_start 15 len 15.
         assert_eq!(
-            seqs.iter().map(|s| (s.fm_start, s.length)).collect::<Vec<_>>(),
+            seqs.iter()
+                .map(|s| (s.fm_start, s.length))
+                .collect::<Vec<_>>(),
             vec![(0, 20), (15, 15)]
         );
 
         let ambig_ranges = vec![
-            AmbiguityRange { lower: 16, upper: 17 },
-            AmbiguityRange { lower: 18, upper: 19 },
+            AmbiguityRange {
+                lower: 16,
+                upper: 17,
+            },
+            AmbiguityRange {
+                lower: 18,
+                upper: 19,
+            },
         ];
         assign_ambiguities_to_blocks(&seqs, &ambig_ranges, &mut blocks);
         // Block 0 sees both runs (offset 0, count 2); block 1 re-reads both from
@@ -2025,8 +2068,14 @@ mod tests {
         assert_eq!(
             compact_ambiguity_ranges(&seqs, &compact_starts, &ambig_ranges),
             vec![
-                AmbiguityRange { lower: 16, upper: 17 },
-                AmbiguityRange { lower: 18, upper: 19 },
+                AmbiguityRange {
+                    lower: 16,
+                    upper: 17
+                },
+                AmbiguityRange {
+                    lower: 18,
+                    upper: 19
+                },
                 AmbiguityRange { lower: 1, upper: 2 },
                 AmbiguityRange { lower: 3, upper: 4 },
             ]
@@ -2059,10 +2108,16 @@ mod tests {
         // Verified against the bundled C binary: 32/64/4096 accepted;
         // 31/33/8192/0 rejected.
         for ok in [32usize, 64, 128, 256, 512, 1024, 2048, 4096] {
-            assert!(validate_bin_length(ok).is_ok(), "bin_length {ok} should be accepted");
+            assert!(
+                validate_bin_length(ok).is_ok(),
+                "bin_length {ok} should be accepted"
+            );
         }
         for bad in [0usize, 16, 31, 33, 48, 100, 4097, 8192] {
-            assert!(validate_bin_length(bad).is_err(), "bin_length {bad} should be rejected");
+            assert!(
+                validate_bin_length(bad).is_err(),
+                "bin_length {bad} should be rejected"
+            );
         }
     }
 
@@ -2072,10 +2127,16 @@ mod tests {
         // accepted; 6/7 rejected. We additionally reject 0 (C accepts it then
         // segfaults).
         for ok in [1usize, 2, 4, 8, 16, 32, 256] {
-            assert!(validate_sa_freq(ok).is_ok(), "sa_freq {ok} should be accepted");
+            assert!(
+                validate_sa_freq(ok).is_ok(),
+                "sa_freq {ok} should be accepted"
+            );
         }
         for bad in [0usize, 3, 6, 7, 9, 100] {
-            assert!(validate_sa_freq(bad).is_err(), "sa_freq {bad} should be rejected");
+            assert!(
+                validate_sa_freq(bad).is_err(),
+                "sa_freq {bad} should be rejected"
+            );
         }
     }
 }

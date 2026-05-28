@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -141,6 +141,11 @@ const P7_ALIDISPLAY_CSLINE_PRESENT: u8 = 1 << 2;
 const P7_ALIDISPLAY_PPLINE_PRESENT: u8 = 1 << 3;
 const P7_ALIDISPLAY_ASEQ_PRESENT: u8 = 1 << 4;
 const P7_ALIDISPLAY_NTSEQ_PRESENT: u8 = 1 << 5;
+const MAX_HMMD_HMM_QUERY_LENGTH: usize = 1_000_000;
+const MAX_HMMPGMD_INIT_BODY: usize = 16 * 1024 * 1024;
+const MAX_HMMPGMD_SEARCH_BODY: usize = 64 * 1024 * 1024;
+const MAX_HMMPGMD_SEARCH_RESPONSE_BODY: usize = 512 * 1024 * 1024;
+const MAX_HMMPGMD_SHUTDOWN_BODY: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct HmmdHeader {
@@ -164,6 +169,7 @@ enum DbMode {
     Seq,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ClientQuery {
     Sequence {
@@ -374,7 +380,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     }
 }
 
-fn load_hmmdb(hmmdb: &PathBuf) -> ServerState {
+fn load_hmmdb(hmmdb: &Path) -> ServerState {
     logsum::p7_flogsuminit();
 
     eprintln!("Loading HMM database: {}", hmmdb.display());
@@ -400,7 +406,7 @@ fn load_hmmdb(hmmdb: &PathBuf) -> ServerState {
     eprintln!("Profiles built");
 
     ServerState::Hmm(HmmDbState {
-        path: hmmdb.clone(),
+        path: hmmdb.to_path_buf(),
         hmms,
         abc,
         bg,
@@ -725,6 +731,7 @@ fn run_hmmdb_sequence_query(
     Ok(results)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_hmmdb_sequence_model(
     db: &HmmDbState,
     index: usize,
@@ -1105,7 +1112,7 @@ fn read_client_request_from_reader(reader: &mut impl BufRead) -> std::io::Result
     }
 }
 
-fn write_hit_response(stream: &mut std::net::TcpStream, results: &mut Vec<SearchHit>) {
+fn write_hit_response(stream: &mut std::net::TcpStream, results: &mut [SearchHit]) {
     sort_search_hits(results);
     let _ = writeln!(stream, "HITS {}", results.len());
     for hit in results.iter() {
@@ -1285,18 +1292,19 @@ fn worker_sharded_requests(
         };
     }
 
-    let requested_ranges = coalesce_db_ranges(
-        &command
-            .seqdb_ranges
-            .clone()
-            .unwrap_or_else(|| match usize::try_from(total_nseqs) {
-                Ok(0) | Err(_) => Vec::new(),
-                Ok(total) => vec![DbRange {
-                    start: 1,
-                    end: total,
-                }],
-            }),
-    );
+    let requested_ranges =
+        coalesce_db_ranges(
+            &command
+                .seqdb_ranges
+                .clone()
+                .unwrap_or_else(|| match usize::try_from(total_nseqs) {
+                    Ok(0) | Err(_) => Vec::new(),
+                    Ok(total) => vec![DbRange {
+                        start: 1,
+                        end: total,
+                    }],
+                }),
+        );
     if matches!(command.query, ClientQuery::Hmm(_)) && !db_ranges_are_contiguous(&requested_ranges)
     {
         return vec![WorkerRequest::ascii(HMMD_CMD_SEARCH, request)];
@@ -1400,7 +1408,11 @@ fn db_ranges_are_contiguous(ranges: &[DbRange]) -> bool {
 // exact, byte-identical worker-payload merge stays correct: each surviving target
 // is emitted by exactly one worker and the concatenated hit lists need no dedup.
 fn coalesce_db_ranges(ranges: &[DbRange]) -> Vec<DbRange> {
-    let mut sorted: Vec<DbRange> = ranges.iter().copied().filter(|r| r.end >= r.start).collect();
+    let mut sorted: Vec<DbRange> = ranges
+        .iter()
+        .copied()
+        .filter(|r| r.end >= r.start)
+        .collect();
     sorted.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
     let mut out: Vec<DbRange> = Vec::with_capacity(sorted.len());
     for range in sorted {
@@ -1525,7 +1537,7 @@ fn binary_worker_request(
         ClientQuery::Hmm(hmm) => serialize_hmmd_hmm_query(hmm),
     };
     let query_length = match &command.query {
-        ClientQuery::Sequence { seq, .. } => seq.as_bytes().len().saturating_add(2),
+        ClientQuery::Sequence { seq, .. } => seq.len().saturating_add(2),
         ClientQuery::Hmm(hmm) => hmm.m,
     };
     let mut body = Vec::with_capacity(
@@ -1762,7 +1774,7 @@ fn run_worker_connection_search(
     write_header(
         stream,
         HmmdHeader {
-            length: request.body.len() as u32,
+            length: checked_u32_frame_len(request.body.len(), "worker request body")?,
             command: request.command,
             status: 0,
         },
@@ -1774,8 +1786,12 @@ fn run_worker_connection_search(
     stream.read_exact(&mut status)?;
     let code = u32::from_be_bytes(status[0..4].try_into().unwrap());
     let msg_size = u64::from_be_bytes(status[4..12].try_into().unwrap());
-    let mut payload = vec![0; msg_size as usize];
-    stream.read_exact(&mut payload)?;
+    let payload = read_limited_u64_body(
+        stream,
+        msg_size,
+        MAX_HMMPGMD_SEARCH_RESPONSE_BODY,
+        "worker status payload",
+    )?;
     if code == 0 {
         Ok(payload)
     } else {
@@ -1821,8 +1837,12 @@ fn shutdown_worker_connection(stream: &mut TcpStream) -> std::io::Result<()> {
         return Err(std::io::Error::other("worker rejected SHUTDOWN"));
     }
     if header.length > 0 {
-        let mut body = vec![0; header.length as usize];
-        stream.read_exact(&mut body)?;
+        let _ = read_limited_header_body(
+            stream,
+            header,
+            MAX_HMMPGMD_SHUTDOWN_BODY,
+            "worker shutdown response body",
+        )?;
     }
     Ok(())
 }
@@ -1971,7 +1991,9 @@ fn parse_worker_payload(payload: &[u8]) -> std::io::Result<ParsedWorkerPayload> 
         nreported: read_payload_u64(payload, 98)?,
         nincluded: read_payload_u64(payload, 106)?,
     };
-    let nhits = read_payload_u64(payload, 90)? as usize;
+    let nhits_u64 = read_payload_u64(payload, 90)?;
+    let nhits = usize::try_from(nhits_u64)
+        .map_err(|_| std::io::Error::other("worker search payload hit count too large"))?;
     if nhits == 0 {
         if payload.len() != HMMD_SEARCH_STATS_SIZE {
             return Err(std::io::Error::other(
@@ -1989,18 +2011,30 @@ fn parse_worker_payload(payload: &[u8]) -> std::io::Result<ParsedWorkerPayload> 
             hits: Vec::new(),
         });
     }
-    let offsets_start = 114;
-    let stats_size = offsets_start + nhits.saturating_mul(8);
-
-    let mut hits = None;
-    if payload.len() >= stats_size {
-        let mut hit_offsets = Vec::with_capacity(nhits);
-        for i in 0..nhits {
-            hit_offsets.push(read_payload_u64(payload, offsets_start + i * 8)? as usize);
-        }
-        hits = parse_worker_hits_with_offsets(payload, stats_size, &hit_offsets).ok();
+    let offsets_start: usize = 114;
+    let offset_bytes = nhits
+        .checked_mul(8)
+        .ok_or_else(|| std::io::Error::other("worker hit offset table overflow"))?;
+    let stats_size = offsets_start
+        .checked_add(offset_bytes)
+        .ok_or_else(|| std::io::Error::other("worker hit offset table overflow"))?;
+    if stats_size > payload.len() {
+        return Err(std::io::Error::other("short worker hit offset table"));
     }
-    let hits = match hits {
+
+    let mut hit_offsets = Vec::with_capacity(nhits);
+    for i in 0..nhits {
+        let offset_pos = offsets_start
+            .checked_add(
+                i.checked_mul(8)
+                    .ok_or_else(|| std::io::Error::other("worker hit offset table overflow"))?,
+            )
+            .ok_or_else(|| std::io::Error::other("worker hit offset table overflow"))?;
+        let offset = usize::try_from(read_payload_u64(payload, offset_pos)?)
+            .map_err(|_| std::io::Error::other("worker hit offset too large"))?;
+        hit_offsets.push(offset);
+    }
+    let hits = match parse_worker_hits_with_offsets(payload, stats_size, &hit_offsets).ok() {
         Some(hits) => hits,
         None => parse_worker_hits_sequential(payload, nhits)?,
     };
@@ -2416,6 +2450,28 @@ fn parse_hmmd_hmm_query(query_bytes: &[u8], query_length: usize) -> Result<Clien
         return Err("short HMMD_SEARCH_CMD HMM query shell".to_string());
     }
     let m = query_length;
+    if !(1..=MAX_HMMD_HMM_QUERY_LENGTH).contains(&m) {
+        return Err("HMMD_SEARCH_CMD HMM query length out of range".to_string());
+    }
+    let rows = m
+        .checked_add(1)
+        .ok_or_else(|| "HMMD_SEARCH_CMD HMM query length overflow".to_string())?;
+    let values_per_row =
+        hmmer_pure_rs::hmm::NTRANSITIONS
+            .checked_add(2usize.checked_mul(Alphabet::amino().k).ok_or_else(|| {
+                "HMMD_SEARCH_CMD HMM query serialized length overflow".to_string()
+            })?)
+            .ok_or_else(|| "HMMD_SEARCH_CMD HMM query serialized length overflow".to_string())?;
+    let required_floats = rows
+        .checked_mul(values_per_row)
+        .ok_or_else(|| "HMMD_SEARCH_CMD HMM query serialized length overflow".to_string())?;
+    let required_bytes = required_floats
+        .checked_mul(std::mem::size_of::<f32>())
+        .and_then(|n| C_P7_HMM_SHELL_SIZE.checked_add(n))
+        .ok_or_else(|| "HMMD_SEARCH_CMD HMM query serialized length overflow".to_string())?;
+    if query_bytes.len() < required_bytes {
+        return Err("short HMMD_SEARCH_CMD HMM query data".to_string());
+    }
     let mut hmm = Hmm::new(m, AlphabetType::Amino, Alphabet::amino().k);
     hmm.flags = read_native_i32(query_bytes, 288)? as u32;
     hmm.nseq = read_native_i32(query_bytes, 104)?;
@@ -3198,6 +3254,7 @@ fn write_f64(out: &mut Vec<u8>, value: f64) {
 }
 
 impl SearchHit {
+    #[allow(clippy::too_many_arguments)]
     fn from_pipeline_hit(
         hit: &Hit,
         name: String,
@@ -3282,7 +3339,7 @@ fn initialize_worker(stream: &mut TcpStream, init_body: &[u8]) -> std::io::Resul
     write_header(
         stream,
         HmmdHeader {
-            length: init_body.len() as u32,
+            length: checked_u32_frame_len(init_body.len(), "worker init body")?,
             command: HMMD_CMD_INIT,
             status: 0,
         },
@@ -3294,8 +3351,12 @@ fn initialize_worker(stream: &mut TcpStream, init_body: &[u8]) -> std::io::Resul
     if header.command != HMMD_CMD_INIT || header.status != 0 {
         return Err(std::io::Error::other("worker rejected INIT"));
     }
-    let mut body = vec![0; header.length as usize];
-    stream.read_exact(&mut body)?;
+    let _ = read_limited_header_body(
+        stream,
+        header,
+        MAX_HMMPGMD_INIT_BODY,
+        "worker init response body",
+    )?;
     Ok(())
 }
 
@@ -3331,11 +3392,15 @@ fn run_worker(host: &str, wport: u16, cpu: usize, mut state: Option<ServerState>
                 return ExitCode::FAILURE;
             }
         };
-        let mut body = vec![0; header.length as usize];
-        if let Err(e) = stream.read_exact(&mut body) {
-            eprintln!("Worker command body read failed: {}", e);
-            return ExitCode::FAILURE;
-        }
+        let max_len = worker_command_body_limit(header.command);
+        let body =
+            match read_limited_header_body(&mut stream, header, max_len, "worker command body") {
+                Ok(body) => body,
+                Err(e) => {
+                    eprintln!("Worker command body read failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
 
         match header.command {
             HMMD_CMD_INIT => {
@@ -3369,7 +3434,7 @@ fn run_worker(host: &str, wport: u16, cpu: usize, mut state: Option<ServerState>
                         status: 0,
                     },
                 )
-                .and_then(|_| stream.write_all(&vec![0; HMMD_INIT_RESPONSE_SIZE]))
+                .and_then(|_| stream.write_all(&[0; HMMD_INIT_RESPONSE_SIZE]))
                 .and_then(|_| stream.flush())
                 {
                     eprintln!("Worker INIT response failed: {}", e);
@@ -3445,6 +3510,57 @@ fn read_header(stream: &mut TcpStream) -> std::io::Result<HmmdHeader> {
     })
 }
 
+fn worker_command_body_limit(command: u32) -> usize {
+    match command {
+        HMMD_CMD_INIT => MAX_HMMPGMD_INIT_BODY,
+        HMMD_CMD_SEARCH | HMMD_CMD_SCAN => MAX_HMMPGMD_SEARCH_BODY,
+        HMMD_CMD_SHUTDOWN => MAX_HMMPGMD_SHUTDOWN_BODY,
+        _ => 0,
+    }
+}
+
+fn checked_u32_frame_len(len: usize, label: &str) -> std::io::Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} is too large for an HMMD frame: {len} bytes"),
+        )
+    })
+}
+
+fn read_limited_header_body(
+    stream: &mut TcpStream,
+    header: HmmdHeader,
+    max_len: usize,
+    label: &str,
+) -> std::io::Result<Vec<u8>> {
+    read_limited_u64_body(stream, u64::from(header.length), max_len, label)
+}
+
+fn read_limited_u64_body(
+    stream: &mut TcpStream,
+    len: u64,
+    max_len: usize,
+    label: &str,
+) -> std::io::Result<Vec<u8>> {
+    let max_len_u64 = u64::try_from(max_len).unwrap_or(u64::MAX);
+    if len > max_len_u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} is too large: {len} bytes > {max_len}"),
+        ));
+    }
+    let len = usize::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} is too large for this platform: {len} bytes"),
+        )
+    })?;
+    let mut body = vec![0; len];
+    stream.read_exact(&mut body)?;
+    Ok(body)
+}
+
 fn write_header(stream: &mut TcpStream, header: HmmdHeader) -> std::io::Result<()> {
     stream.write_all(&header.length.to_ne_bytes())?;
     stream.write_all(&header.command.to_ne_bytes())?;
@@ -3457,20 +3573,33 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn hmmpgmd_frame_length_guards_reject_oversized_bodies_before_allocation() {
+        assert!(checked_u32_frame_len((u32::MAX as usize) + 1, "test frame").is_err());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = std::thread::spawn(move || TcpStream::connect(addr).unwrap());
+        let (mut server, _) = listener.accept().unwrap();
+        let mut client = join.join().unwrap();
+
+        let err = read_limited_u64_body(&mut server, u64::MAX, 1, "oversized payload").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("oversized payload is too large"));
+
+        client.write_all(&[1, 2, 3, 4]).unwrap();
+        let body = read_limited_u64_body(&mut server, 4, 4, "small payload").unwrap();
+        assert_eq!(body, [1, 2, 3, 4]);
+    }
+
+    #[test]
     fn master_with_both_databases_parses() {
         // Regression for audit H1: C `hmmpgmd.c` declares `--seqdb`/`--hmmdb`
         // with `incomp = "--worker"` only (NOT each other). The canonical
         // master invocation `--master --seqdb X --hmmdb Y` must parse without a
         // clap conflict error.
-        let args = Args::try_parse_from([
-            "hmmpgmd",
-            "--master",
-            "--seqdb",
-            "x.fa",
-            "--hmmdb",
-            "y.hmm",
-        ])
-        .expect("master may cache both --seqdb and --hmmdb");
+        let args =
+            Args::try_parse_from(["hmmpgmd", "--master", "--seqdb", "x.fa", "--hmmdb", "y.hmm"])
+                .expect("master may cache both --seqdb and --hmmdb");
         assert!(args.master);
         assert_eq!(args.seqdb.as_deref(), Some(std::path::Path::new("x.fa")));
         assert_eq!(args.hmmdb.as_deref(), Some(std::path::Path::new("y.hmm")));
@@ -3510,6 +3639,29 @@ mod tests {
 
         payload.extend_from_slice(b"garbage");
         assert!(parse_worker_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn worker_payload_rejects_huge_hit_count_before_allocation() {
+        let mut payload = Vec::new();
+        write_c_stats_payload(&mut payload, 1, 2, 0, &WorkerSearchStats::default(), &[]);
+        payload[90..98].copy_from_slice(&u64::MAX.to_be_bytes());
+
+        let err = match parse_worker_payload(&payload) {
+            Ok(_) => panic!("huge worker hit count was accepted"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("hit offset table overflow")
+                || err.to_string().contains("hit count too large")
+        );
+    }
+
+    #[test]
+    fn hmmd_hmm_query_rejects_oversized_length_before_allocation() {
+        let query = vec![0u8; C_P7_HMM_SHELL_SIZE];
+        let err = parse_hmmd_hmm_query(&query, MAX_HMMD_HMM_QUERY_LENGTH + 1).unwrap_err();
+        assert!(err.contains("query length out of range"));
     }
 
     fn sample_search_hit_with_domains() -> SearchHit {
@@ -3673,7 +3825,6 @@ mod tests {
                 .split("--seqdb_ranges")
                 .nth(1)
                 .expect("worker request carries --seqdb_ranges")
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap();

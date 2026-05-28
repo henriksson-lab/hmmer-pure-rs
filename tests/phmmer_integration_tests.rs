@@ -92,7 +92,7 @@ fn top_hit_rows_from_stdout(stdout: &str, n: usize) -> Vec<(String, String, Stri
         if !in_hits {
             continue;
         }
-        if rows.len() > 0 && line.trim().is_empty() {
+        if !rows.is_empty() && line.trim().is_empty() {
             break;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();

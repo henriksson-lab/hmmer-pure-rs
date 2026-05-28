@@ -3,6 +3,8 @@
 //! Computes `log(exp(a) + exp(b))` using a precomputed lookup table.
 //! This is a direct port of HMMER's `logsum.c`.
 
+#![allow(clippy::needless_range_loop)]
+
 use std::sync::Once;
 
 use crate::util::cmath::{c_exp_f64, c_log_f64};

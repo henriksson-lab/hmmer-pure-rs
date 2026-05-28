@@ -1,5 +1,6 @@
 //! SSE2-optimized MSV filter.
 //! Direct port of impl_sse/msvfilter.c p7_MSVFilter().
+#![allow(clippy::missing_safety_doc, clippy::needless_range_loop)]
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::{nqb, OProfile};

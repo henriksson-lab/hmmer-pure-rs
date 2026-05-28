@@ -5,6 +5,8 @@
 //! with Easel's `esl_dsqdata_Write()`, and files written by Easel can be read
 //! back by [`read_dsqdata`]. See `hmmer/easel/esl_dsqdata.c` for the
 //! source-of-truth.
+
+#![allow(clippy::needless_late_init)]
 //!
 //! ## On-disk layout (four files)
 //!
@@ -110,6 +112,10 @@ const MAGIC_V1SWAP: u32 = 0xb1d1d3c4;
 const EOD_BIT: u32 = 1 << 31;
 /// Control bit: packet is 5-bit packed (port of `eslDSQDATA_5BIT`).
 const FIVEBIT_BIT: u32 = 1 << 30;
+const DSQDATA_INDEX_HEADER_LEN: u64 = 7 * 4 + 3 * 8;
+const DSQDATA_SIDECAR_HEADER_LEN: u64 = 8;
+const DSQDATA_INDEX_RECORD_LEN: u64 = 16;
+const MAX_DSQDATA_STUB_LINE_LEN: usize = 4096;
 
 #[inline]
 fn is_eod(v: u32) -> bool {
@@ -332,9 +338,9 @@ pub fn write_dsqdata(
         validate_dsq(sq)?;
         nres += sq.n as u64;
         max_seqlen = max_seqlen.max(sq.n as u64);
-        max_namelen = max_namelen.max(sq.name.as_bytes().len() as u32);
-        max_acclen = max_acclen.max(sq.acc.as_bytes().len() as u32);
-        max_desclen = max_desclen.max(sq.desc.as_bytes().len() as u32);
+        max_namelen = max_namelen.max(sq.name.len() as u32);
+        max_acclen = max_acclen.max(sq.acc.len() as u32);
+        max_desclen = max_desclen.max(sq.desc.len() as u32);
     }
     let nseq = sequences.len() as u64;
 
@@ -439,10 +445,9 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     let p = basename;
 
     // ---- Stub file: parse "Easel dsqdata v1 x<tag>" first line. ----
-    let stub = std::fs::read_to_string(p).map_err(HmmerError::Io)?;
-    let first = stub
-        .lines()
-        .next()
+    let stub_file = open(p)?;
+    let mut stub_reader = BufReader::new(stub_file);
+    let first = crate::hmmfile::read_capped_text_line(&mut stub_reader, MAX_DSQDATA_STUB_LINE_LEN)?
         .ok_or_else(|| HmmerError::Format("dsqdata stub file is empty".into()))?;
     let mut toks = first.split_whitespace();
     if toks.next() != Some("Easel") || toks.next() != Some("dsqdata") {
@@ -465,7 +470,13 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         .map_err(|_| HmmerError::Format("dsqdata stub has non-integer tag".into()))?;
 
     // ---- Index file header. ----
-    let mut ifp = BufReader::new(open(&with_ext(p, "dsqi"))?);
+    let dsqi_path = with_ext(p, "dsqi");
+    let dsqm_path = with_ext(p, "dsqm");
+    let dsqs_path = with_ext(p, "dsqs");
+
+    let ifile = open(&dsqi_path)?;
+    let ifile_len = ifile.metadata().map_err(HmmerError::Io)?.len();
+    let mut ifp = BufReader::new(ifile);
     let magic = read_u32(&mut ifp)?;
     let tag = read_u32(&mut ifp)?;
     let alphatype = read_u32(&mut ifp)?;
@@ -488,7 +499,9 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         ));
     }
     if magic != MAGIC_V1 {
-        return Err(HmmerError::Format("dsqdata index file has bad magic".into()));
+        return Err(HmmerError::Format(
+            "dsqdata index file has bad magic".into(),
+        ));
     }
     let alphabet = match alphatype {
         1 => Alphabet::rna(),
@@ -503,10 +516,12 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     };
     let do_pack5 = alphabet.abc_type == AlphabetType::Amino;
 
+    let nseq_usize = validate_dsqdata_nseq(nseq, ifile_len)?;
+
     // ---- Read all index records into memory (small: 16 bytes × nseq). ----
     // We read the full index up front so the loader thread can seek freely.
-    let mut all_records: Vec<IndexRecord> = Vec::with_capacity(nseq as usize);
-    for _ in 0..nseq {
+    let mut all_records: Vec<IndexRecord> = Vec::with_capacity(nseq_usize);
+    for _ in 0..nseq_usize {
         let metadata_end = read_i64(&mut ifp)?;
         let psq_end = read_i64(&mut ifp)?;
         all_records.push(IndexRecord {
@@ -517,11 +532,15 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     drop(ifp); // index fully consumed
 
     // ---- Validate metadata and sequence file headers. ----
-    let mut mfp = BufReader::new(open(&with_ext(p, "dsqm"))?);
+    let mfile = open(&dsqm_path)?;
+    let mfile_len = mfile.metadata().map_err(HmmerError::Io)?.len();
+    let mut mfp = BufReader::new(mfile);
     let m_magic = read_u32(&mut mfp)?;
     let m_tag = read_u32(&mut mfp)?;
     if m_magic != magic {
-        return Err(HmmerError::Format("dsqdata metadata file has bad magic".into()));
+        return Err(HmmerError::Format(
+            "dsqdata metadata file has bad magic".into(),
+        ));
     }
     if m_tag != stub_tag {
         return Err(HmmerError::Format(
@@ -529,17 +548,23 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
         ));
     }
 
-    let mut sfp = BufReader::new(open(&with_ext(p, "dsqs"))?);
+    let sfile = open(&dsqs_path)?;
+    let sfile_len = sfile.metadata().map_err(HmmerError::Io)?.len();
+    let mut sfp = BufReader::new(sfile);
     let s_magic = read_u32(&mut sfp)?;
     let s_tag = read_u32(&mut sfp)?;
     if s_magic != magic {
-        return Err(HmmerError::Format("dsqdata sequence file has bad magic".into()));
+        return Err(HmmerError::Format(
+            "dsqdata sequence file has bad magic".into(),
+        ));
     }
     if s_tag != stub_tag {
         return Err(HmmerError::Format(
             "dsqdata sequence file has bad tag, doesn't match stub".into(),
         ));
     }
+
+    validate_dsqdata_index_extents(&all_records, mfile_len, sfile_len)?;
 
     // ---- Spawn the loader thread. ----
     // The loader reads raw bytes in chunks of CHUNK_MAXSEQ sequences and sends
@@ -618,10 +643,10 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     });
 
     // ---- Main thread: receive and unpack each chunk. ----
-    let mut sequences: Vec<Sequence> = Vec::with_capacity(nseq as usize);
+    let mut sequences: Vec<Sequence> = Vec::with_capacity(nseq_usize);
 
     for raw in rx {
-        let chunk = raw.map_err(|e| HmmerError::Format(e.into()))?;
+        let chunk = raw.map_err(HmmerError::Format)?;
         unpack_chunk(&chunk, do_pack5, &mut sequences)?;
     }
 
@@ -638,11 +663,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
 /// This is the "unpacker" side of the two-thread pipeline. It mirrors
 /// `dsqdata_unpack_chunk()` in the C implementation but operates on
 /// chunk-relative offsets pre-computed by the loader thread.
-fn unpack_chunk(
-    chunk: &RawChunk,
-    do_pack5: bool,
-    out: &mut Vec<Sequence>,
-) -> HmmerResult<()> {
+fn unpack_chunk(chunk: &RawChunk, do_pack5: bool, out: &mut Vec<Sequence>) -> HmmerResult<()> {
     let psq = &chunk.packed;
     let metadata = &chunk.metadata;
 
@@ -679,16 +700,18 @@ fn unpack_chunk(
         let mstart = (meta_last + 1) as usize;
         let mend = (rec.metadata_end + 1) as usize; // exclusive
         if mend > metadata.len() || mstart > mend {
-            return Err(HmmerError::Format("dsqdata: metadata offset out of range".into()));
+            return Err(HmmerError::Format(
+                "dsqdata: metadata offset out of range".into(),
+            ));
         }
         let block = &metadata[mstart..mend];
         // name\0 acc\0 desc\0 taxid(int32)
         let (name, rest) = take_cstr(block)?;
         let (acc, rest) = take_cstr(rest)?;
         let (desc, rest) = take_cstr(rest)?;
-        if rest.len() < 4 {
+        if rest.len() != 4 {
             return Err(HmmerError::Format(
-                "dsqdata: metadata record truncated (taxid)".into(),
+                "dsqdata: metadata record must end with exactly one taxid".into(),
             ));
         }
         // taxid: a per-sequence NCBI taxonomy id (int32; -1 = none), matching
@@ -719,6 +742,18 @@ fn unpack_chunk(
 // ---------------------------------------------------------------------------
 
 fn validate_dsq(sq: &Sequence) -> HmmerResult<()> {
+    for (field, value) in [
+        ("name", sq.name.as_bytes()),
+        ("accession", sq.acc.as_bytes()),
+        ("description", sq.desc.as_bytes()),
+    ] {
+        if value.contains(&0) {
+            return Err(HmmerError::Format(format!(
+                "Sequence {} {field} contains an embedded NUL byte",
+                sq.name
+            )));
+        }
+    }
     if sq.dsq.len() < sq.n + 2 {
         return Err(HmmerError::Format(format!(
             "Sequence {} digital data is shorter than declared length {}",
@@ -730,6 +765,112 @@ fn validate_dsq(sq: &Sequence) -> HmmerResult<()> {
             "Sequence {} is missing digital sentinels",
             sq.name
         )));
+    }
+    Ok(())
+}
+
+fn validate_dsqdata_nseq(nseq: u64, index_file_len: u64) -> HmmerResult<usize> {
+    if index_file_len < DSQDATA_INDEX_HEADER_LEN {
+        return Err(HmmerError::Format("dsqdata index file is truncated".into()));
+    }
+    let index_payload = index_file_len - DSQDATA_INDEX_HEADER_LEN;
+    let max_records = index_payload / DSQDATA_INDEX_RECORD_LEN;
+    if nseq > max_records {
+        return Err(HmmerError::Format(format!(
+            "dsqdata index declares {nseq} sequences but only {max_records} index records fit in the file"
+        )));
+    }
+    usize::try_from(nseq).map_err(|_| {
+        HmmerError::Format(format!(
+            "dsqdata index declares too many sequences for this platform: {nseq}"
+        ))
+    })
+}
+
+fn validate_dsqdata_index_extents(
+    records: &[IndexRecord],
+    metadata_file_len: u64,
+    sequence_file_len: u64,
+) -> HmmerResult<()> {
+    if metadata_file_len < DSQDATA_SIDECAR_HEADER_LEN
+        || sequence_file_len < DSQDATA_SIDECAR_HEADER_LEN
+    {
+        return Err(HmmerError::Format(
+            "dsqdata sidecar file is truncated".into(),
+        ));
+    }
+    let metadata_payload_len = metadata_file_len - DSQDATA_SIDECAR_HEADER_LEN;
+    let sequence_payload_bytes = sequence_file_len - DSQDATA_SIDECAR_HEADER_LEN;
+    if !sequence_payload_bytes.is_multiple_of(4) {
+        return Err(HmmerError::Format(
+            "dsqdata sequence file has a partial trailing packet".into(),
+        ));
+    }
+    let sequence_packets = sequence_payload_bytes / 4;
+    if records.is_empty() {
+        if metadata_payload_len != 0 || sequence_packets != 0 {
+            return Err(HmmerError::Format(
+                "dsqdata sidecar payload has trailing bytes with zero sequences".into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut prev_meta = -1i64;
+    let mut prev_psq = -1i64;
+    for (idx, rec) in records.iter().enumerate() {
+        if rec.metadata_end < prev_meta || rec.psq_end <= prev_psq {
+            return Err(HmmerError::Format(format!(
+                "dsqdata index record {} is not monotonic",
+                idx + 1
+            )));
+        }
+        if rec.metadata_end < 0 {
+            return Err(HmmerError::Format(format!(
+                "dsqdata index record {} has negative metadata extent",
+                idx + 1
+            )));
+        }
+        let metadata_end = u64::try_from(rec.metadata_end).map_err(|_| {
+            HmmerError::Format(format!(
+                "dsqdata index record {} has invalid metadata extent",
+                idx + 1
+            ))
+        })?;
+        let psq_end = u64::try_from(rec.psq_end).map_err(|_| {
+            HmmerError::Format(format!(
+                "dsqdata index record {} has invalid packet extent",
+                idx + 1
+            ))
+        })?;
+        if metadata_end >= metadata_payload_len {
+            return Err(HmmerError::Format(format!(
+                "dsqdata index record {} metadata extent exceeds .dsqm payload",
+                idx + 1
+            )));
+        }
+        if psq_end >= sequence_packets {
+            return Err(HmmerError::Format(format!(
+                "dsqdata index record {} packet extent exceeds .dsqs payload",
+                idx + 1
+            )));
+        }
+        prev_meta = rec.metadata_end;
+        prev_psq = rec.psq_end;
+    }
+    let final_metadata_len = u64::try_from(prev_meta + 1)
+        .map_err(|_| HmmerError::Format("dsqdata final metadata extent is invalid".into()))?;
+    let final_sequence_packets = u64::try_from(prev_psq + 1)
+        .map_err(|_| HmmerError::Format("dsqdata final packet extent is invalid".into()))?;
+    if final_metadata_len != metadata_payload_len {
+        return Err(HmmerError::Format(
+            "dsqdata metadata sidecar has trailing bytes after final index record".into(),
+        ));
+    }
+    if final_sequence_packets != sequence_packets {
+        return Err(HmmerError::Format(
+            "dsqdata sequence sidecar has trailing packets after final index record".into(),
+        ));
     }
     Ok(())
 }
@@ -841,6 +982,10 @@ mod tests {
         std::fs::remove_file(with_ext(base, "dsqs")).ok();
     }
 
+    fn write_le_i64_at(buf: &mut [u8], offset: usize, value: i64) {
+        buf[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
     #[test]
     fn roundtrip_amino_5bit() {
         let abc = Alphabet::amino();
@@ -928,6 +1073,66 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dsqdata_trailing_sidecar_payload_after_final_record() {
+        let records = [IndexRecord {
+            metadata_end: 3,
+            psq_end: 0,
+        }];
+        let err = validate_dsqdata_index_extents(
+            &records,
+            DSQDATA_SIDECAR_HEADER_LEN + 5,
+            DSQDATA_SIDECAR_HEADER_LEN + 4,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("metadata sidecar has trailing bytes"));
+
+        let err = validate_dsqdata_index_extents(
+            &records,
+            DSQDATA_SIDECAR_HEADER_LEN + 4,
+            DSQDATA_SIDECAR_HEADER_LEN + 8,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("sequence sidecar has trailing packets"));
+    }
+
+    #[test]
+    fn rejects_zero_sequence_dsqdata_with_payload_bytes() {
+        let err = validate_dsqdata_index_extents(
+            &[],
+            DSQDATA_SIDECAR_HEADER_LEN + 1,
+            DSQDATA_SIDECAR_HEADER_LEN,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("zero sequences"));
+    }
+
+    #[test]
+    fn rejects_dsqdata_metadata_padding_after_taxid() {
+        let abc = Alphabet::amino();
+        let dsq = abc.digitize(b"");
+        let packed = pack5(&dsq, 0);
+        let metadata = b"empty\0\0\0\xff\xff\xff\xffx".to_vec();
+        let metadata_end = metadata.len() as i64 - 1;
+        let chunk = RawChunk {
+            packed,
+            metadata,
+            records: vec![IndexRecord {
+                metadata_end,
+                psq_end: 0,
+            }],
+        };
+        let mut out = Vec::new();
+        let err = unpack_chunk(&chunk, true, &mut out).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("metadata record must end with exactly one taxid"));
+    }
+
+    #[test]
     fn pack5_roundtrip_lengths() {
         let abc = Alphabet::amino();
         for len in [0usize, 1, 5, 6, 7, 12, 13, 100] {
@@ -956,6 +1161,101 @@ mod tests {
         std::fs::write(with_ext(&base, "dsqs"), Vec::<u8>::new()).unwrap();
         let err = read_dsqdata(&base).unwrap_err();
         assert!(err.to_string().contains("bad magic"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn reads_only_first_dsqdata_stub_line() {
+        let base = tmp("stub_first_line_only");
+        cleanup(&base);
+        let mut stub = b"Easel dsqdata v1 x12345\n".to_vec();
+        stub.extend(std::iter::repeat_n(b'x', MAX_DSQDATA_STUB_LINE_LEN + 1));
+        std::fs::write(&base, stub).unwrap();
+
+        let err = read_dsqdata(&base).unwrap_err();
+        assert!(!err.to_string().contains("maximum supported length"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn rejects_dsqdata_nseq_that_exceeds_index_records_before_allocation() {
+        let base = tmp("bad_nseq");
+        cleanup(&base);
+        std::fs::write(&base, "Easel dsqdata v1 x12345\n").unwrap();
+        let mut idx = Vec::new();
+        idx.extend_from_slice(&MAGIC_V1.to_le_bytes());
+        idx.extend_from_slice(&12345u32.to_le_bytes());
+        idx.extend_from_slice(&(AlphabetType::Amino as u32).to_le_bytes());
+        idx.extend_from_slice(&0u32.to_le_bytes());
+        idx.extend_from_slice(&0u32.to_le_bytes());
+        idx.extend_from_slice(&0u32.to_le_bytes());
+        idx.extend_from_slice(&0u32.to_le_bytes());
+        idx.extend_from_slice(&0u64.to_le_bytes());
+        idx.extend_from_slice(&u64::MAX.to_le_bytes());
+        idx.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(with_ext(&base, "dsqi"), idx).unwrap();
+
+        let err = read_dsqdata(&base).unwrap_err();
+        assert!(err.to_string().contains("only 0 index records fit"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn rejects_dsqdata_nonmonotonic_index_before_loader_allocation() {
+        let abc = Alphabet::amino();
+        let seqs = vec![
+            Sequence {
+                name: "seq1".into(),
+                acc: String::new(),
+                desc: String::new(),
+                dsq: abc.digitize(b"ACD"),
+                n: 3,
+                l: 3,
+                taxid: -1,
+            },
+            Sequence {
+                name: "seq2".into(),
+                acc: String::new(),
+                desc: String::new(),
+                dsq: abc.digitize(b"EFG"),
+                n: 3,
+                l: 3,
+                taxid: -1,
+            },
+        ];
+
+        let base = tmp("bad_index_order");
+        write_dsqdata(&base, &seqs, &abc).unwrap();
+        let mut idx = std::fs::read(with_ext(&base, "dsqi")).unwrap();
+        write_le_i64_at(&mut idx, DSQDATA_INDEX_HEADER_LEN as usize + 16, 0);
+        std::fs::write(with_ext(&base, "dsqi"), idx).unwrap();
+
+        let err = read_dsqdata(&base).unwrap_err();
+        assert!(err.to_string().contains("not monotonic"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn rejects_dsqdata_packet_extent_past_sequence_file() {
+        let abc = Alphabet::amino();
+        let seqs = vec![Sequence {
+            name: "seq1".into(),
+            acc: String::new(),
+            desc: String::new(),
+            dsq: abc.digitize(b"ACD"),
+            n: 3,
+            l: 3,
+            taxid: -1,
+        }];
+
+        let base = tmp("bad_psq_extent");
+        write_dsqdata(&base, &seqs, &abc).unwrap();
+        let mut idx = std::fs::read(with_ext(&base, "dsqi")).unwrap();
+        write_le_i64_at(&mut idx, DSQDATA_INDEX_HEADER_LEN as usize + 8, 999);
+        std::fs::write(with_ext(&base, "dsqi"), idx).unwrap();
+
+        let err = read_dsqdata(&base).unwrap_err();
+        assert!(err.to_string().contains("packet extent exceeds"));
         cleanup(&base);
     }
 

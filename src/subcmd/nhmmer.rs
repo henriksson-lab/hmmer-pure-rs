@@ -45,6 +45,10 @@ const NHMMER_FM_SCORE_TRIE_NORMAL_TEXT_LIMIT: usize = 4096;
 const NHMMER_FM_CONSENSUS_MATCH_REQ: usize = 11;
 const NHMMER_FM_SEED_SSV_LENGTH: usize = 100;
 const NHMMER_DEFAULT_BLOCK_LENGTH: usize = 1024 * 256;
+const MAKEHMMERDB_INDEX_MIN_RECORD_BYTES: usize = 64 + 4 + 24 + 256 * 8;
+const MAKEHMMERDB_C_MIN_SEQUENCE_META_BYTES: usize = 4 + 8 + 4 + 4 + 2 + 2 + 2 + 2 + 4;
+const MAKEHMMERDB_C_AMBIGUITY_BYTES: usize = 8;
+const MAKEHMMERDB_MAX_IN_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 #[cfg(test)]
 const NHMMER_FM_WINDOW_LIMIT_REGRESSION_SIZE: usize = 4096;
 const NHMMER_FM_WINDOW_SOURCE_LIMIT: usize = 4096;
@@ -254,7 +258,12 @@ struct Args {
     dom_e: f64,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
-    #[arg(long = "domT", conflicts_with = "dom_e", hide = true, allow_hyphen_values = true)]
+    #[arg(
+        long = "domT",
+        conflicts_with = "dom_e",
+        hide = true,
+        allow_hyphen_values = true
+    )]
     dom_t: Option<f64>,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
@@ -262,7 +271,12 @@ struct Args {
     inc_dome: f64,
 
     /// Retained for C command-line compatibility; not used by nhmmer output
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true, allow_hyphen_values = true)]
+    #[arg(
+        long = "incdomT",
+        conflicts_with = "inc_dome",
+        hide = true,
+        allow_hyphen_values = true
+    )]
     inc_dom_t: Option<f64>,
 
     /// Set RNG seed (0: one-time arbitrary seed)
@@ -278,8 +292,8 @@ struct Args {
     crick: bool,
 
     /// Window length (max expected hit length)
-    #[arg(long = "w_length")]
-    w_length: Option<usize>,
+    #[arg(long = "w_length", value_parser = parse_window_length)]
+    w_length: Option<i32>,
 
     /// Length of blocks read from target database in threaded C nhmmer
     #[arg(long = "block_length", value_parser = parse_block_length)]
@@ -414,6 +428,17 @@ fn parse_positive_usize(s: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_window_length(s: &str) -> Result<i32, String> {
+    let value = s
+        .parse::<i32>()
+        .map_err(|e| format!("invalid window length: {e}"))?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("--w_length must be > 0 and fit in a 32-bit signed integer".to_string())
+    }
+}
+
 fn parse_window_beta(s: &str) -> Result<f64, String> {
     let value = s
         .parse::<f64>()
@@ -465,6 +490,7 @@ fn parse_gap_extend(s: &str) -> Result<f32, String> {
 /// hit (target/query name+acc, hmm/ali/env coords, seq length, strand,
 /// E-value, score, bias, description), then a footer block with program /
 /// version / query file / target file / option settings / cwd / date.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
     f: &mut W,
     program: &str,
@@ -529,13 +555,11 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
         // then posw x5, then %6s strand, %9s E-value, %6s score, %5s bias.
         writeln!(
             f,
-            "#{tname:<tnw$} {tacc:<taccw$} {qn:<qnw$} {qacc:<qaccw$} {hf} {ht} {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5}  {desc}",
+            "#{tname:<tnw$} {tacc:<taccw$} {qn:<qnw$} {qacc:<qaccw$} hmmfrom hmm to {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5}  description of target",
             tname = " target name",
             tacc = "accession",
             qn = "query name",
             qacc = "accession",
-            hf = "hmmfrom",
-            ht = "hmm to",
             af = "alifrom",
             at = " ali to",
             ef = "envfrom",
@@ -545,7 +569,6 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             ev = "  E-value",
             sc = " score",
             bi = " bias",
-            desc = "description of target",
             tnw = namew - 1,
             qnw = qw,
             taccw = taccw,
@@ -562,13 +585,11 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
         //   %6s -> 6, %9s -> 9, %6s -> 6, %5s -> 5, %s -> 21.
         writeln!(
             f,
-            "#{tname:>tnw$} {tacc:>taccw$} {qn:>qnw$} {qacc:>qaccw$} {hf} {ht} {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5} {desc}",
+            "#{tname:>tnw$} {tacc:>taccw$} {qn:>qnw$} {qacc:>qaccw$} ------- ------- {af:>posw$} {at:>posw$} {ef:>posw$} {et:>posw$} {sl:>posw$} {strand:>6} {ev:>9} {sc:>6} {bi:>5} ---------------------",
             tname = "-------------------",
             tacc = "----------",
             qn = "--------------------",
             qacc = "----------",
-            hf = "-------",
-            ht = "-------",
             af = "-------",
             at = "-------",
             ef = "-------",
@@ -578,7 +599,6 @@ pub(crate) fn write_nhmmer_tblout<W: std::io::Write>(
             ev = "---------",
             sc = "------",
             bi = "-----",
-            desc = "---------------------",
             tnw = namew - 1,
             qnw = qw,
             taccw = taccw,
@@ -720,42 +740,36 @@ pub(crate) fn write_nhmmer_dfamtblout<W: std::io::Write>(
     writeln!(f, "#").unwrap();
     writeln!(
         f,
-        "# {:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:>6} {:>9} {:>5}  {}  {} {:>6} {:>posw$} {:>posw$} {:>posw$} {:>posw$} {:>posw$}   {}",
+        "# {:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:>6} {:>9} {:>5}  hmm-st  hmm-en {:>6} {:>posw$} {:>posw$} {:>posw$} {:>posw$} {:>posw$}   description of target",
         "target name",
         "acc",
         "query name",
         "bits",
         "  e-value",
         " bias",
-        "hmm-st",
-        "hmm-en",
         "strand",
         "ali-st",
         "ali-en",
         "env-st",
         "env-en",
-        length_header,
-        "description of target"
+        length_header
     )
     .unwrap();
     writeln!(
         f,
-        "# {:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:>6} {:>9} {:>5} {} {} {:>6} {:>posw$} {:>posw$} {:>posw$} {:>posw$} {:>posw$}   {}",
+        "# {:<tname_hdrw$} {:<taccw$} {:<qnamew$} {:>6} {:>9} {:>5} ------- ------- {:>6} {:>posw$} {:>posw$} {:>posw$} {:>posw$} {:>posw$}   ---------------------",
         "-------------------",
         "-------------------",
         "-------------------",
         "------",
         "---------",
         "-----",
-        "-------",
-        "-------",
         "------",
         "-------",
         "-------",
         "-------",
         "-------",
-        "-------",
-        "---------------------"
+        "-------"
     )
     .unwrap();
 
@@ -1072,17 +1086,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
     }
     if let Some(ref format) = args.qformat {
-        if is_stockholm_query_format(format) {
-            // Supported below by the query loader.
-        } else if is_text_msa_query_format(format) {
+        if is_stockholm_query_format(format) || is_text_msa_query_format(format) {
             // Supported below by the query loader.
         } else if query_sequence_format(format).is_some() {
             // Supported below by the single-sequence query loader.
-        } else if format.eq_ignore_ascii_case("hmm") {
-            // HMM files are the legacy/default query input.
         } else {
             eprintln!(
-                "nhmmer --qformat={} is not implemented: supported query format assertions are hmm, fasta, uniprot, genbank, embl, ddbj, afa, a2m, psiblast, clustal, clustallike, selex, phylip, phylips, stockholm, and pfam",
+                "nhmmer --qformat={} is not implemented: supported query format assertions are fasta, uniprot, genbank, embl, ddbj, afa, a2m, psiblast, clustal, clustallike, selex, phylip, phylips, stockholm, and pfam",
                 format
             );
             std::process::exit(1);
@@ -1116,7 +1126,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             .ok();
     }
 
-    if args.hmmfile == PathBuf::from("-") && args.seqdb == PathBuf::from("-") {
+    if args.hmmfile.as_path() == Path::new("-") && args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: Either <query file> or <seqdb> may be '-' but not both");
         std::process::exit(1);
     }
@@ -1125,7 +1135,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("{e}");
         std::process::exit(1);
     });
-    if hmms.len() > 1 && args.seqdb == PathBuf::from("-") {
+    if hmms.len() > 1 && args.seqdb.as_path() == Path::new("-") {
         eprintln!(
             "Error: target sequence file - isn't rewindable; can't search it with multiple queries"
         );
@@ -1846,28 +1856,26 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "Scores for complete hits:").unwrap();
         writeln!(
             out,
-            "  {:>9} {:>6} {:>5}  {:<namew$} {:>posw$} {:>posw$}  {}",
+            "  {:>9} {:>6} {:>5}  {:<namew$} {:>posw$} {:>posw$}  Description",
             "E-value",
             " score",
             " bias",
             "Sequence",
             "start",
             "end",
-            "Description",
             namew = namew,
             posw = posw,
         )
         .unwrap();
         writeln!(
             out,
-            "  {:>9} {:>6} {:>5}  {:<namew$} {:>posw$} {:>posw$}  {}",
+            "  {:>9} {:>6} {:>5}  {:<namew$} {:>posw$} {:>posw$}  -----------",
             "-------",
             "------",
             "-----",
             "--------",
             "-----",
             "-----",
-            "-----------",
             namew = namew,
             posw = posw,
         )
@@ -1892,8 +1900,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             // then E-value in %g format.
             writeln!(
                 out,
-                "{} {} {} {}  {:<namew$} {:>posw$} {:>posw$} {}",
-                ' ',
+                "  {} {} {}  {:<namew$} {:>posw$} {:>posw$} {}",
                 fmt_evalue(c_exp_f64(hit.lnp)),
                 hmmer_pure_rs::output::fmt_score(hit.score),
                 hmmer_pure_rs::output::fmt_bias(dom_bias_bits),
@@ -2257,7 +2264,7 @@ fn write_nhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# sequence reporting threshold:    score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -2273,7 +2280,7 @@ fn write_nhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str) {
         writeln!(
             out,
             "# sequence inclusion threshold:    score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -2367,15 +2374,13 @@ fn read_query_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
     }
 
     match args.qformat.as_deref() {
-        Some(format) if format.eq_ignore_ascii_case("hmm") => read_hmms(&args.hmmfile)
-            .map_err(|e| format!("Error reading HMM file: {e}")),
         Some(format) if is_stockholm_query_format(format) => read_query_msa_hmms(args),
         Some(format) if is_text_msa_query_format(format) => read_query_msa_hmms(args),
         Some(format) if query_sequence_format(format).is_some() => {
             read_query_sequence_hmms(args, query_sequence_format(format), true)
         }
         Some(format) => Err(format!(
-            "nhmmer --qformat={} is not implemented: supported query format assertions are hmm, fasta, uniprot, genbank, embl, ddbj, afa, a2m, psiblast, clustal, clustallike, selex, phylip, phylips, stockholm, and pfam",
+            "nhmmer --qformat={} is not implemented: supported query format assertions are fasta, uniprot, genbank, embl, ddbj, afa, a2m, psiblast, clustal, clustallike, selex, phylip, phylips, stockholm, and pfam",
             format
         )),
         None => match read_hmms(&args.hmmfile) {
@@ -2628,20 +2633,25 @@ fn dna1_conditional_probabilities(abc: &Alphabet, bg_f: &[f32]) -> Result<Vec<Ve
         }
     }
 
-    for i in 0..abc.k {
+    for row in joint.iter_mut().take(abc.k) {
         for jp in abc.k + 1..abc.kp - 2 {
-            joint[i][jp] = (0..abc.k)
+            row[jp] = (0..abc.k)
                 .filter(|&j| abc.degen[jp][j])
-                .map(|j| joint[i][j])
+                .map(|j| row[j])
                 .sum();
         }
     }
     for ip in abc.k + 1..abc.kp - 2 {
-        for j in 0..abc.k {
-            joint[ip][j] = (0..abc.k)
-                .filter(|&i| abc.degen[ip][i])
-                .map(|i| joint[i][j])
-                .sum();
+        let canonical_cols: Vec<f64> = (0..abc.k)
+            .map(|j| {
+                (0..abc.k)
+                    .filter(|&i| abc.degen[ip][i])
+                    .map(|i| joint[i][j])
+                    .sum()
+            })
+            .collect();
+        for (j, &value) in canonical_cols.iter().enumerate() {
+            joint[ip][j] = value;
         }
         for jp in abc.k + 1..abc.kp - 2 {
             joint[ip][jp] = (0..abc.k)
@@ -2748,10 +2758,10 @@ fn set_nhmmer_single_sequence_composition(hmm: &mut Hmm) {
 
 fn set_nhmmer_single_sequence_consensus(hmm: &mut Hmm, seq: &Sequence, abc: &Alphabet) {
     let mut cons = vec![b' '; hmm.m + 2];
-    for node in 1..=hmm.m {
+    for (node, cons_byte) in cons.iter_mut().enumerate().take(hmm.m + 1).skip(1) {
         let residue = seq.dsq[node];
         if abc.is_residue(residue) {
-            cons[node] = abc.sym[residue as usize];
+            *cons_byte = abc.sym[residue as usize];
         }
     }
     hmm.consensus = Some(cons);
@@ -3164,7 +3174,7 @@ fn is_fmindex_target_format(format: &str) -> bool {
 }
 
 fn is_likely_raw_makehmmerdb_c_stream(prefix: &[u8]) -> bool {
-    matches!(prefix.get(0), Some(0 | 1))
+    matches!(prefix.first(), Some(0 | 1))
         && prefix.get(1) == Some(&0)
         && prefix.get(2) == Some(&4)
         && prefix.get(3) == Some(&2)
@@ -3174,13 +3184,55 @@ fn read_makehmmerdb_target_database(path: &Path, abc: &Alphabet) -> Result<Nhmme
     if path == Path::new("-") {
         return Err("nhmmer --tformat fmindex does not support stdin targets yet".to_string());
     }
-    let bytes = std::fs::read(path).map_err(|e| {
+    let bytes = read_makehmmerdb_database_bytes(path)?;
+    parse_makehmmerdb_target_database(&bytes, abc)
+}
+
+fn read_makehmmerdb_database_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|e| {
+        format!(
+            "failed to open FM-index target database {}: {e}",
+            path.display()
+        )
+    })?;
+    let metadata = file.metadata().map_err(|e| {
+        format!(
+            "failed to stat FM-index target database {}: {e}",
+            path.display()
+        )
+    })?;
+    let len = metadata.len();
+    if len > MAKEHMMERDB_MAX_IN_MEMORY_BYTES {
+        return Err(format!(
+            "FM-index target database {} is too large for the current in-memory reader ({} bytes > {} bytes)",
+            path.display(),
+            len,
+            MAKEHMMERDB_MAX_IN_MEMORY_BYTES
+        ));
+    }
+    let capacity = u64_to_usize(len, "FM-index target database size")?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|e| {
+        format!(
+            "failed to reserve memory for FM-index target database {}: {e}",
+            path.display()
+        )
+    })?;
+    let mut limited = file.take(MAKEHMMERDB_MAX_IN_MEMORY_BYTES + 1);
+    limited.read_to_end(&mut bytes).map_err(|e| {
         format!(
             "failed to read FM-index target database {}: {e}",
             path.display()
         )
     })?;
-    parse_makehmmerdb_target_database(&bytes, abc)
+    if bytes.len() as u64 > MAKEHMMERDB_MAX_IN_MEMORY_BYTES {
+        return Err(format!(
+            "FM-index target database {} is too large for the current in-memory reader (exceeds {} bytes)",
+            path.display(),
+            MAKEHMMERDB_MAX_IN_MEMORY_BYTES
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug)]
@@ -3212,7 +3264,10 @@ fn parse_makehmmerdb_target_database(
                 "unsupported makehmmerdb C stream version {version}"
             ));
         }
-        let payload_len = read_u64(&mut cursor)? as usize;
+        let payload_len = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb C stream payload length",
+        )?;
         let payload_start = stream_start + b"HMMERDB_C_STREAM\0".len() + 12;
         let payload_end = payload_start
             .checked_add(payload_len)
@@ -3234,11 +3289,20 @@ fn parse_makehmmerdb_target_database(
             let _ = read_makehmmerdb_c_fm_record(&mut payload, freq_sa, freq_cnt_b, false)?;
         }
     }
+    if makehmmerdb_remaining(&payload) != 0 {
+        return Err("trailing bytes after makehmmerdb C stream records".to_string());
+    }
     if records_by_block.is_empty() && !sequences.is_empty() {
         return Err("makehmmerdb C stream has sequence metadata but no FM records".to_string());
     }
+    validate_makehmmerdb_fm_records(&records_by_block, ambiguities.len())?;
     if !container_index_records.is_empty() {
-        validate_makehmmerdb_index_records(&container_index_records, block_count)?;
+        validate_makehmmerdb_index_records(
+            &container_index_records,
+            &records_by_block,
+            fwd_only,
+            ambiguities.len(),
+        )?;
     }
     let fm_index_records = if !container_index_records.is_empty() {
         container_index_records
@@ -3307,25 +3371,63 @@ fn parse_makehmmerdb_index_extension(bytes: &[u8]) -> Result<Vec<NhmmerFmIndexRe
         ));
     }
     let _fwd_only = read_u32(&mut cursor)? != 0;
-    let record_count = read_u64(&mut cursor)? as usize;
+    let record_count = u64_to_usize(
+        read_u64(&mut cursor)?,
+        "makehmmerdb FM-index record table count",
+    )?;
+    ensure_makehmmerdb_remaining(
+        &cursor,
+        record_count,
+        MAKEHMMERDB_INDEX_MIN_RECORD_BYTES,
+        "makehmmerdb FM-index record table",
+    )?;
     let mut records = Vec::with_capacity(record_count);
     for _ in 0..record_count {
-        let block_id = read_u64(&mut cursor)? as usize;
-        let text_start = read_u64(&mut cursor)? as usize;
-        let text_len = read_u64(&mut cursor)? as usize;
-        let seq_offset = read_u64(&mut cursor)? as usize;
-        let seq_count = read_u64(&mut cursor)? as usize;
-        let ambig_offset = read_u64(&mut cursor)? as usize;
-        let ambig_count = read_u64(&mut cursor)? as usize;
-        let overlap_bases = read_u64(&mut cursor)? as usize;
+        let block_id = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index block id")?;
+        let text_start = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index text start")?;
+        let text_len = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index text length")?;
+        let seq_offset = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index sequence offset",
+        )?;
+        let seq_count = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index sequence count",
+        )?;
+        let ambig_offset = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index ambiguity offset",
+        )?;
+        let ambig_count = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index ambiguity count",
+        )?;
+        let overlap_bases =
+            u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index overlap bases")?;
         let kind = read_u32(&mut cursor)?;
-        let bwt_len = read_u64(&mut cursor)? as usize;
-        let sa_len = read_u64(&mut cursor)? as usize;
-        let c_len = read_u64(&mut cursor)? as usize;
+        let bwt_len = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index BWT length")?;
+        let sa_len = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index suffix array length",
+        )?;
+        let c_len = u64_to_usize(
+            read_u64(&mut cursor)?,
+            "makehmmerdb FM-index C table length",
+        )?;
         if c_len != 256 {
             return Err(format!(
                 "makehmmerdb FM-index C table has {c_len} entries, expected 256"
             ));
+        }
+        let bwt_bytes = bwt_len;
+        let sa_bytes = checked_count_bytes(sa_len, 4, "makehmmerdb FM-index suffix array")?;
+        let c_bytes = checked_count_bytes(c_len, 8, "makehmmerdb FM-index C table")?;
+        let remaining_record_bytes = bwt_bytes
+            .checked_add(sa_bytes)
+            .and_then(|value| value.checked_add(c_bytes))
+            .ok_or_else(|| "makehmmerdb FM-index record byte span overflows usize".to_string())?;
+        if makehmmerdb_remaining(&cursor) < remaining_record_bytes {
+            return Err("makehmmerdb FM-index record payload is truncated".to_string());
         }
 
         let mut bwt = vec![0u8; bwt_len];
@@ -3340,7 +3442,7 @@ fn parse_makehmmerdb_index_extension(bytes: &[u8]) -> Result<Vec<NhmmerFmIndexRe
 
         let mut c = [0usize; 256];
         for value in &mut c {
-            *value = read_u64(&mut cursor)? as usize;
+            *value = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index C table value")?;
         }
 
         let fm = FmIndex::from_parts(bwt, sa, c, text_len)?;
@@ -3360,10 +3462,45 @@ fn parse_makehmmerdb_index_extension(bytes: &[u8]) -> Result<Vec<NhmmerFmIndexRe
     Ok(records)
 }
 
+fn validate_makehmmerdb_fm_records(
+    records_by_block: &[NhmmerFmRecord],
+    ambiguity_count: usize,
+) -> Result<(), String> {
+    for record in records_by_block {
+        if record.seq_offset.checked_add(record.seq_count).is_none() {
+            return Err("makehmmerdb C stream sequence span overflows usize".to_string());
+        }
+        let Some(ambig_end) = record.ambig_offset.checked_add(record.ambig_count) else {
+            return Err("makehmmerdb C stream ambiguity span overflows usize".to_string());
+        };
+        if ambig_end > ambiguity_count {
+            return Err(
+                "makehmmerdb C stream ambiguity span is outside metadata table".to_string(),
+            );
+        }
+        if record.overlap_bases > record.text_bases_len {
+            return Err("makehmmerdb C stream overlap exceeds block text length".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn validate_makehmmerdb_index_records(
     records: &[NhmmerFmIndexRecord],
-    block_count: usize,
+    records_by_block: &[NhmmerFmRecord],
+    fwd_only: bool,
+    ambiguity_count: usize,
 ) -> Result<(), String> {
+    let block_count = records_by_block.len();
+    let mut expected_starts = Vec::with_capacity(block_count);
+    let mut text_start = 0usize;
+    for block in records_by_block {
+        expected_starts.push(text_start);
+        text_start = text_start
+            .checked_add(block.text_bases_len)
+            .ok_or_else(|| "makehmmerdb FM-index text span overflows usize".to_string())?;
+    }
+    let mut seen = vec![[false; 2]; block_count];
     for record in records {
         if record.block_id >= block_count {
             return Err(format!(
@@ -3396,6 +3533,59 @@ fn validate_makehmmerdb_index_records(
         if record.overlap_bases > record.text_len {
             return Err("makehmmerdb FM-index overlap exceeds block text length".to_string());
         }
+        let block = &records_by_block[record.block_id];
+        if record.text_start != expected_starts[record.block_id]
+            || record.text_len != block.text_bases_len
+            || record.seq_offset != block.seq_offset
+            || record.seq_count != block.seq_count
+            || record.ambig_offset != block.ambig_offset
+            || record.ambig_count != block.ambig_count
+            || record.overlap_bases != block.overlap_bases
+        {
+            return Err(
+                "makehmmerdb FM-index record metadata does not match C stream block".to_string(),
+            );
+        }
+        let expected_text = &block.text[..block.text_bases_len];
+        let expected_fm = if record.kind == 0 {
+            let reversed_text: Vec<u8> = expected_text.iter().rev().copied().collect();
+            FmIndex::build(&reversed_text)
+        } else {
+            FmIndex::build(expected_text)
+        };
+        if record.fm.bwt != expected_fm.bwt
+            || record.fm.sa != expected_fm.sa
+            || record.fm.c != expected_fm.c
+        {
+            return Err(
+                "makehmmerdb FM-index record does not match C stream block text".to_string(),
+            );
+        }
+        let Some(ambig_end) = record.ambig_offset.checked_add(record.ambig_count) else {
+            return Err("makehmmerdb FM-index ambiguity span overflows usize".to_string());
+        };
+        if ambig_end > ambiguity_count {
+            return Err(
+                "makehmmerdb FM-index ambiguity span is outside metadata table".to_string(),
+            );
+        }
+        let kind = record.kind as usize;
+        if seen[record.block_id][kind] {
+            return Err("makehmmerdb FM-index contains duplicate block/strand record".to_string());
+        }
+        seen[record.block_id][kind] = true;
+    }
+    for (block_id, block_seen) in seen.iter().enumerate() {
+        if !block_seen[0] {
+            return Err(format!(
+                "makehmmerdb FM-index is missing forward-strand record for block {block_id}"
+            ));
+        }
+        if !fwd_only && !block_seen[1] {
+            return Err(format!(
+                "makehmmerdb FM-index is missing reverse-strand record for block {block_id}"
+            ));
+        }
     }
     Ok(())
 }
@@ -3409,7 +3599,7 @@ fn build_raw_c_stream_fm_index_records(
     let mut text_start = 0usize;
 
     for (block_id, block) in records_by_block.iter().enumerate() {
-        let text_len = block.text.len();
+        let text_len = block.text_bases_len;
         if text_len == 0 {
             text_start = text_start
                 .checked_add(text_len)
@@ -3417,7 +3607,8 @@ fn build_raw_c_stream_fm_index_records(
             continue;
         }
 
-        let reversed_text: Vec<u8> = block.text.iter().rev().copied().collect();
+        let block_text = &block.text[..text_len];
+        let reversed_text: Vec<u8> = block_text.iter().rev().copied().collect();
         records.push(NhmmerFmIndexRecord {
             block_id,
             kind: 0,
@@ -3442,7 +3633,7 @@ fn build_raw_c_stream_fm_index_records(
                 ambig_offset: block.ambig_offset,
                 ambig_count: block.ambig_count,
                 overlap_bases: block.overlap_bases,
-                fm: FmIndex::build(&block.text),
+                fm: FmIndex::build(block_text),
             });
         }
 
@@ -3493,6 +3684,7 @@ fn fm_seed_candidate_windows(
 // The union of windows is deduped/merged in `fm_finalize_seed_windows`, and the
 // real SSV/MSV/Viterbi/Forward scoring re-runs downstream in
 // `search_longtarget`, which derives the final hit coordinates.
+#[allow(clippy::too_many_arguments)]
 fn fm_seed_candidate_windows_with_config(
     target_db: &NhmmerTargetDb,
     seq_idx: usize,
@@ -4012,7 +4204,12 @@ fn fm_ssv_augment_windows(
     for k in 1..=m {
         let mut best = 0.0f32;
         for x in 0..kp {
-            let p = hmm.mat.get(k).and_then(|r| r.get(x)).copied().unwrap_or(0.0);
+            let p = hmm
+                .mat
+                .get(k)
+                .and_then(|r| r.get(x))
+                .copied()
+                .unwrap_or(0.0);
             let q = bg.f.get(x).copied().unwrap_or(0.0);
             let v = if p > 0.0 && q > 0.0 {
                 ((p as f64) / (q as f64)).ln() as f32
@@ -4110,7 +4307,7 @@ fn fm_ssv_augment_windows(
     let fm_text_codes: Option<Vec<usize>> = if seq_meta.fm_start == 0
         && seq_meta.length == seq.n
         && record.text_len >= seq.n
-        && record.fm.n as usize == record.text_len
+        && record.fm.n == record.text_len
     {
         let mut codes = vec![0usize; record.text_len + 2];
         if is_complement {
@@ -4137,7 +4334,10 @@ fn fm_ssv_augment_windows(
 
     let c_faithful = fm_text_codes.is_some();
     let text_len = record.text_len as i64;
-    let fm_n = record.fm.n as i64;
+    // C's FM_DATA.N is the BWT length, including the terminal symbol. Rust
+    // `FmIndex::n` stores only the biological text length, so use the serialized
+    // BWT length for faithful FM_extendSeed coordinates.
+    let fm_n = record.fm.bwt.len() as i64;
     for mut diag in diags {
         if diag.complementarity != want || diag.length <= 0 {
             continue;
@@ -4715,6 +4915,7 @@ fn nhmmer_push_consensus_seeds(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fm_locate_model_consensus_seeds(
     fm: &FmIndex,
     hmm: &Hmm,
@@ -4941,6 +5142,7 @@ fn nhmmer_push_score_threshold_seeds(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn nhmmer_fm_lod_tables(
     hmm: &Hmm,
     bg: &Bg,
@@ -4966,10 +5168,10 @@ fn nhmmer_fm_lod_tables(
     let mut lod_bits = vec![[f32::NEG_INFINITY; 4]; hmm.m + 1];
     let mut best_suffix = vec![vec![0.0_f32; max_depth + 1]; hmm.m + 2];
     let mut best_prefix = vec![vec![0.0_f32; max_depth + 1]; hmm.m + 1];
-    for node in 1..=hmm.m {
-        for x in 0..abc.k.min(4) {
+    for (node, lod_row) in lod_bits.iter_mut().enumerate().take(hmm.m + 1).skip(1) {
+        for (x, lod_cell) in lod_row.iter_mut().enumerate().take(abc.k.min(4)) {
             if hmm.mat[node][x] > 0.0 && bg.f[x] > 0.0 {
-                lod_bits[node][x] = ((hmm.mat[node][x] as f64) / (bg.f[x] as f64)).log2() as f32;
+                *lod_cell = ((hmm.mat[node][x] as f64) / (bg.f[x] as f64)).log2() as f32;
             }
         }
     }
@@ -5029,6 +5231,7 @@ fn fm_locate_model_score_seeds(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fm_locate_model_score_seeds_with_start_limit(
     fm: &FmIndex,
     hmm: &Hmm,
@@ -5604,11 +5807,13 @@ struct NhmmerFmRecord {
     ambig_offset: usize,
     ambig_count: usize,
     overlap_bases: usize,
+    text_bases_len: usize,
     text: Vec<u8>,
 }
 
-fn read_makehmmerdb_c_metadata_payload<R: Read>(
-    cursor: &mut R,
+#[allow(clippy::type_complexity)]
+fn read_makehmmerdb_c_metadata_payload(
+    cursor: &mut Cursor<&[u8]>,
 ) -> Result<
     (
         bool,
@@ -5630,10 +5835,33 @@ fn read_makehmmerdb_c_metadata_payload<R: Read>(
     let freq_sa = read_u32(cursor)? as usize;
     let _freq_cnt_sb = read_u32(cursor)? as usize;
     let freq_cnt_b = read_u32(cursor)? as usize;
+    if freq_sa == 0 {
+        return Err("makehmmerdb FM-index suffix-array sampling frequency is zero".to_string());
+    }
+    if freq_cnt_b == 0 {
+        return Err("makehmmerdb FM-index occurrence sampling frequency is zero".to_string());
+    }
     let block_count = read_u16(cursor)? as usize;
     let seq_count = read_u32(cursor)? as usize;
     let ambig_count = read_u32(cursor)? as usize;
-    let _char_count = read_u64(cursor)? as usize;
+    let _char_count = u64_to_usize(read_u64(cursor)?, "makehmmerdb metadata character count")?;
+
+    let sequence_bytes = checked_count_bytes(
+        seq_count,
+        MAKEHMMERDB_C_MIN_SEQUENCE_META_BYTES,
+        "makehmmerdb sequence metadata",
+    )?;
+    let ambiguity_bytes = checked_count_bytes(
+        ambig_count,
+        MAKEHMMERDB_C_AMBIGUITY_BYTES,
+        "makehmmerdb ambiguity metadata",
+    )?;
+    let min_payload_bytes = sequence_bytes
+        .checked_add(ambiguity_bytes)
+        .ok_or_else(|| "makehmmerdb metadata payload byte span overflows usize".to_string())?;
+    if makehmmerdb_remaining(cursor) < min_payload_bytes {
+        return Err("makehmmerdb metadata payload is truncated".to_string());
+    }
 
     let mut sequences = Vec::with_capacity(seq_count);
     for _ in 0..seq_count {
@@ -5657,13 +5885,20 @@ fn read_makehmmerdb_c_metadata_payload<R: Read>(
             length,
         });
     }
+    ensure_makehmmerdb_remaining(
+        cursor,
+        ambig_count,
+        MAKEHMMERDB_C_AMBIGUITY_BYTES,
+        "makehmmerdb ambiguity metadata",
+    )?;
     let mut ambiguities = Vec::with_capacity(ambig_count);
     for _ in 0..ambig_count {
         let lower = read_i32(cursor)?;
         let upper = read_i32(cursor)?;
-        if lower >= 0 && upper >= lower {
-            ambiguities.push((lower as usize, upper as usize));
+        if lower < 0 || upper < lower {
+            return Err("makehmmerdb ambiguity metadata has invalid coordinates".to_string());
         }
+        ambiguities.push((lower as usize, upper as usize));
     }
     Ok((
         fwd_only,
@@ -5675,13 +5910,19 @@ fn read_makehmmerdb_c_metadata_payload<R: Read>(
     ))
 }
 
-fn read_makehmmerdb_c_fm_record<R: Read>(
-    cursor: &mut R,
+fn read_makehmmerdb_c_fm_record(
+    cursor: &mut Cursor<&[u8]>,
     freq_sa: usize,
     freq_cnt_b: usize,
     has_text_and_sa: bool,
 ) -> Result<NhmmerFmRecord, String> {
-    let n = read_u64(cursor)? as usize;
+    if freq_sa == 0 {
+        return Err("makehmmerdb FM-index suffix-array sampling frequency is zero".to_string());
+    }
+    if freq_cnt_b == 0 {
+        return Err("makehmmerdb FM-index occurrence sampling frequency is zero".to_string());
+    }
+    let n = u64_to_usize(read_u64(cursor)?, "makehmmerdb FM-index record length")?;
     let _term_loc = read_u32(cursor)?;
     let seq_offset = read_u32(cursor)? as usize;
     let ambig_offset = read_u32(cursor)? as usize;
@@ -5690,35 +5931,70 @@ fn read_makehmmerdb_c_fm_record<R: Read>(
     let ambig_count = read_u32(cursor)? as usize;
 
     let mut text = Vec::new();
+    let packed_len = n.div_ceil(4);
+    let text_bytes = if has_text_and_sa { packed_len } else { 0 };
+    let bwt_bytes = packed_len;
+    let sa_count = if has_text_and_sa {
+        1usize
+            .checked_add(n / freq_sa)
+            .ok_or_else(|| "makehmmerdb FM-index suffix-array span overflows usize".to_string())?
+    } else {
+        0
+    };
+    let sa_bytes = checked_count_bytes(sa_count, 4, "makehmmerdb FM-index suffix array")?;
+    let occ_b_count = 1usize
+        .checked_add(n.div_ceil(freq_cnt_b))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "makehmmerdb FM-index occurrence table span overflows usize".to_string())?;
+    let occ_b_bytes = checked_count_bytes(occ_b_count, 2, "makehmmerdb FM-index occurrence table")?;
+    let occ_sb_count = 1usize
+        .checked_add(n.div_ceil(65_536))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| {
+            "makehmmerdb FM-index superblock occurrence table span overflows usize".to_string()
+        })?;
+    let occ_sb_bytes = checked_count_bytes(
+        occ_sb_count,
+        4,
+        "makehmmerdb FM-index superblock occurrence table",
+    )?;
+    let record_payload_bytes = text_bytes
+        .checked_add(bwt_bytes)
+        .and_then(|value| value.checked_add(sa_bytes))
+        .and_then(|value| value.checked_add(occ_b_bytes))
+        .and_then(|value| value.checked_add(occ_sb_bytes))
+        .ok_or_else(|| "makehmmerdb FM-index record byte span overflows usize".to_string())?;
+    if makehmmerdb_remaining(cursor) < record_payload_bytes {
+        return Err("makehmmerdb FM-index record payload is truncated".to_string());
+    }
+
     if has_text_and_sa {
         text = unpack_dna_quads(cursor, n)?;
+        if n == 0 {
+            return Err("makehmmerdb FM-index text record is missing terminal symbol".to_string());
+        }
     }
     let _bwt = unpack_dna_quads(cursor, n)?;
     if has_text_and_sa {
-        let sa_count = 1 + n / freq_sa;
         for _ in 0..sa_count {
             let _ = read_u32(cursor)?;
         }
     }
-    let occ_b_count = (1 + n.div_ceil(freq_cnt_b)) * 4;
     for _ in 0..occ_b_count {
         let _ = read_u16(cursor)?;
     }
-    let occ_sb_count = (1 + n.div_ceil(65_536)) * 4;
     for _ in 0..occ_sb_count {
         let _ = read_u32(cursor)?;
     }
 
     if has_text_and_sa {
-        if matches!(text.last(), Some(b'\0')) {
-            text.pop();
-        }
         Ok(NhmmerFmRecord {
             seq_offset,
             seq_count,
             ambig_offset,
             ambig_count,
             overlap_bases,
+            text_bases_len: n,
             text,
         })
     } else {
@@ -5728,6 +6004,7 @@ fn read_makehmmerdb_c_fm_record<R: Read>(
             ambig_offset,
             ambig_count,
             overlap_bases,
+            text_bases_len: 0,
             text: Vec::new(),
         })
     }
@@ -5764,8 +6041,41 @@ fn read_nul_string<R: Read>(cursor: &mut R, len: usize) -> Result<String, String
     if bytes[len] != 0 {
         return Err("makehmmerdb string is missing NUL terminator".to_string());
     }
+    if bytes[..len].contains(&0) {
+        return Err("makehmmerdb string contains embedded NUL byte".to_string());
+    }
     String::from_utf8(bytes[..len].to_vec())
         .map_err(|e| format!("makehmmerdb string is not UTF-8: {e}"))
+}
+
+fn makehmmerdb_remaining(cursor: &Cursor<&[u8]>) -> usize {
+    cursor
+        .get_ref()
+        .len()
+        .saturating_sub(cursor.position() as usize)
+}
+
+fn u64_to_usize(value: u64, what: &str) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("{what} exceeds usize"))
+}
+
+fn checked_count_bytes(count: usize, element_size: usize, what: &str) -> Result<usize, String> {
+    count
+        .checked_mul(element_size)
+        .ok_or_else(|| format!("{what} byte span overflows usize"))
+}
+
+fn ensure_makehmmerdb_remaining(
+    cursor: &Cursor<&[u8]>,
+    count: usize,
+    element_size: usize,
+    what: &str,
+) -> Result<(), String> {
+    let bytes = checked_count_bytes(count, element_size, what)?;
+    if makehmmerdb_remaining(cursor) < bytes {
+        return Err(format!("{what} is truncated"));
+    }
+    Ok(())
 }
 
 fn read_u8<R: Read>(cursor: &mut R) -> Result<u8, String> {
@@ -5816,11 +6126,11 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn nhmmer_max_length(
     hmm: &hmmer_pure_rs::hmm::Hmm,
-    w_length: Option<usize>,
+    w_length: Option<i32>,
     w_beta: Option<f64>,
 ) -> i32 {
     if let Some(w_length) = w_length {
-        w_length as i32
+        w_length
     } else if let Some(w_beta) = w_beta.filter(|beta| *beta > 0.0) {
         builder::max_length_from_beta(hmm, w_beta)
     } else if hmm.max_length > 0 {
@@ -5861,6 +6171,12 @@ mod tests {
             search_dfam_query_accession(Some("DF0000629.2")),
             "DF0000629.2"
         );
+    }
+
+    #[test]
+    fn makehmmerdb_c_string_rejects_embedded_nul() {
+        let err = read_nul_string(&mut &b"ab\0cd\0"[..], 5).unwrap_err();
+        assert!(err.contains("embedded NUL"));
     }
 
     #[test]
@@ -5982,7 +6298,8 @@ mod tests {
 
     #[test]
     fn nhmmer_loads_makehmmerdb_container_index_records_for_seed_lookup() {
-        let fm = FmIndex::build(b"ACGTACGT");
+        let reversed_text = b"TGCATGCA";
+        let fm = FmIndex::build(reversed_text);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"HMMERDB\0");
         bytes.extend_from_slice(MAKEHMMERDB_INDEX_MAGIC);
@@ -5992,7 +6309,7 @@ mod tests {
         for value in [0u64, 0, fm.n as u64, 0, 1, 0, 0, 0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&(fm.bwt.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(fm.sa.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&256u64.to_le_bytes());
@@ -6007,7 +6324,7 @@ mod tests {
         let records = parse_makehmmerdb_index_extension(&bytes).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].block_id, 0);
-        assert_eq!(records[0].kind, 1);
+        assert_eq!(records[0].kind, 0);
         assert_eq!(records[0].text_start, 0);
         assert_eq!(records[0].text_len, 8);
         assert_eq!(records[0].seq_offset, 0);
@@ -6015,10 +6332,171 @@ mod tests {
         assert_eq!(records[0].ambig_offset, 0);
         assert_eq!(records[0].ambig_count, 0);
         assert_eq!(records[0].overlap_bases, 0);
-        let mut positions = records[0].fm.locate(b"CGT");
+        let mut positions = records[0].fm.locate(b"TGC");
         positions.sort();
-        assert_eq!(positions, vec![1, 5]);
-        validate_makehmmerdb_index_records(&records, 1).unwrap();
+        assert_eq!(positions, vec![0, 4]);
+        let blocks = vec![NhmmerFmRecord {
+            seq_offset: 0,
+            seq_count: 1,
+            ambig_offset: 0,
+            ambig_count: 0,
+            overlap_bases: 0,
+            text_bases_len: 8,
+            text: b"ACGTACGT".to_vec(),
+        }];
+        validate_makehmmerdb_index_records(&records, &blocks, true, 0).unwrap();
+    }
+
+    #[test]
+    fn makehmmerdb_index_rejects_huge_record_count_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"HMMERDB\0");
+        bytes.extend_from_slice(MAKEHMMERDB_INDEX_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+        let err = parse_makehmmerdb_index_extension(&bytes).unwrap_err();
+        assert!(
+            err.contains("makehmmerdb FM-index record table"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn makehmmerdb_index_rejects_huge_bwt_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"HMMERDB\0");
+        bytes.extend_from_slice(MAKEHMMERDB_INDEX_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        for value in [0u64, 0, 8, 0, 1, 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&4096u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&256u64.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0, 256 * 8));
+
+        let err = parse_makehmmerdb_index_extension(&bytes).unwrap_err();
+        assert!(
+            err.contains("makehmmerdb FM-index record payload"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn makehmmerdb_c_metadata_header(freq_sa: u32, freq_cnt_b: u32, seq_count: u32) -> Vec<u8> {
+        let mut bytes = vec![1, 0, 4, 2];
+        bytes.extend_from_slice(&freq_sa.to_le_bytes());
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.extend_from_slice(&freq_cnt_b.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&seq_count.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn makehmmerdb_c_metadata_rejects_zero_sampling_frequencies() {
+        let zero_sa_bytes = makehmmerdb_c_metadata_header(0, 8, 0);
+        let mut zero_sa = Cursor::new(zero_sa_bytes.as_slice());
+        let err = read_makehmmerdb_c_metadata_payload(&mut zero_sa).unwrap_err();
+        assert!(
+            err.contains("suffix-array sampling frequency is zero"),
+            "unexpected error: {err}"
+        );
+
+        let zero_cnt_bytes = makehmmerdb_c_metadata_header(4, 0, 0);
+        let mut zero_cnt = Cursor::new(zero_cnt_bytes.as_slice());
+        let err = read_makehmmerdb_c_metadata_payload(&mut zero_cnt).unwrap_err();
+        assert!(
+            err.contains("occurrence sampling frequency is zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn makehmmerdb_c_metadata_rejects_short_huge_sequence_payload_before_allocation() {
+        let bytes = makehmmerdb_c_metadata_header(4, 8, u32::MAX);
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        let err = read_makehmmerdb_c_metadata_payload(&mut cursor).unwrap_err();
+        assert!(
+            err.contains("makehmmerdb metadata payload is truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn makehmmerdb_c_metadata_rejects_invalid_ambiguity_coordinates() {
+        let mut bytes = makehmmerdb_c_metadata_header(4, 8, 0);
+        let ambig_count_offset = 4 + 4 + 4 + 4 + 2 + 4;
+        bytes[ambig_count_offset..ambig_count_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(-1i32).to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        let err = read_makehmmerdb_c_metadata_payload(&mut cursor).unwrap_err();
+        assert!(
+            err.contains("invalid coordinates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn makehmmerdb_c_fm_record_rejects_zero_sampling_frequencies() {
+        let mut empty = Cursor::new([].as_slice());
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 0, 8, true).unwrap_err();
+        assert!(
+            err.contains("suffix-array sampling frequency is zero"),
+            "unexpected error: {err}"
+        );
+
+        let mut empty = Cursor::new([].as_slice());
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 4, 0, true).unwrap_err();
+        assert!(
+            err.contains("occurrence sampling frequency is zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn makehmmerdb_c_fm_record_tracks_terminal_symbol_separately_from_bases() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&5u64.to_le_bytes());
+        for value in [0u32, 0, 0, 0, 1, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0b00011011, 0]);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0u8, 8 * 2));
+        bytes.extend(std::iter::repeat_n(0u8, 8 * 4));
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        let record = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true).unwrap();
+        assert_eq!(record.text_bases_len, 5);
+        assert_eq!(&record.text[..4], b"ACGT");
+    }
+
+    #[test]
+    fn makehmmerdb_c_fm_record_rejects_short_huge_payload_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1024u64.to_le_bytes());
+        for value in [0u32, 0, 0, 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        let err = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true).unwrap_err();
+        assert!(
+            err.contains("makehmmerdb FM-index record payload"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -7707,6 +8185,7 @@ mod tests {
                 ambig_offset: 0,
                 ambig_count: 0,
                 overlap_bases: 0,
+                text_bases_len: text.len(),
                 text: text.to_vec(),
             }],
             false,
@@ -7762,6 +8241,7 @@ mod tests {
                 ambig_offset: 0,
                 ambig_count: 0,
                 overlap_bases: 0,
+                text_bases_len: text.len(),
                 text: text.to_vec(),
             }],
             false,
@@ -8002,6 +8482,7 @@ mod tests {
 /// (`hmmer/src/nhmmer.c:1330`), which calls `p7_Pipeline_LongTarget` on every
 /// sequence regardless of length. Dispatches to `search_longtarget` when the
 /// SSE2 SIMD path is available; fails loudly otherwise.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_sequence(
     sq: &Sequence,
     hmm: &hmmer_pure_rs::hmm::Hmm,
@@ -8265,6 +8746,7 @@ impl NhmmerThresholdConfig {
 /// inter-window `fwd_overlap` carry exactly like C. Returned coordinates are
 /// in the strand-local (input `sq`) frame; the caller flips them for crick.
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
 fn search_longtarget(
     sq: &Sequence,
     hmm: &hmmer_pure_rs::hmm::Hmm,
@@ -8546,8 +9028,9 @@ fn search_longtarget(
 
         // Vit windows are already extended+merged within each SSV subseq above
         // (matching C p7_pipeline.c:1614). Just aggregate them.
-        if !vit_windows.is_empty() {
-            windows = vit_windows;
+        windows = vit_windows;
+        if windows.is_empty() {
+            return Vec::new();
         }
     }
 
@@ -8614,6 +9097,7 @@ fn search_longtarget(
         // do_null2=true) override the user's intent.
         lpli.do_biasfilter = !nobias;
         lpli.do_null2 = !nonull2;
+        lpli.long_target_b3 = bias_windows.b3;
         // SSV already ran; still apply Viterbi (F2) and Forward (F3) filters
         // per window so we don't emit one Hit for every SSV candidate.
 
@@ -8633,11 +9117,7 @@ fn search_longtarget(
             if win_idx + 1 < windows.len() {
                 let next = &windows[win_idx + 1];
                 let this_end = win.n + win.length;
-                fwd_overlap = if next.n < this_end {
-                    this_end - next.n
-                } else {
-                    0
-                };
+                fwd_overlap = this_end.saturating_sub(next.n);
             } else {
                 fwd_overlap = 0;
             }

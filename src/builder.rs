@@ -102,8 +102,8 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet, ignore_rf: bool) -> Vec<f64> {
     // column: r[j] (esl_msaweight.c:224-231).
     let mut r = vec![0i32; ncons];
     for (j, &apos) in conscols.iter().enumerate() {
-        for a in 0..k {
-            if ct[apos][a] > 0 {
+        for &count in ct[apos].iter().take(k) {
+            if count > 0 {
                 r[j] += 1;
             }
         }
@@ -133,9 +133,7 @@ pub fn pb_weights(msa: &Msa, abc: &Alphabet, ignore_rf: bool) -> Vec<f64> {
         }
     } else {
         let uniform = 1.0 / nseq as f64;
-        for w in &mut weights {
-            *w = uniform;
-        }
+        weights.fill(uniform);
     }
     for w in &mut weights {
         *w *= nseq as f64;
@@ -165,12 +163,9 @@ fn consensus_by_rf(rf: &[u8], abc: &Alphabet, alen: usize, conscols: &mut Vec<us
 fn consensus_by_all(ct: &[Vec<i32>], abc: &Alphabet, alen: usize, conscols: &mut Vec<usize>) {
     let k = abc.k;
     let kp = abc.kp;
-    for apos in 1..=alen {
-        let mut tot = 0i32;
-        for a in 0..(kp - 2) {
-            tot += ct[apos][a];
-        }
-        if (ct[apos][k] as f32 / tot as f32) < PB_SYMFRAC {
+    for (apos, row) in ct.iter().enumerate().take(alen + 1).skip(1) {
+        let tot: i32 = row.iter().take(kp - 2).sum();
+        if (row[k] as f32 / tot as f32) < PB_SYMFRAC {
             conscols.push(apos);
         }
     }
@@ -310,12 +305,9 @@ fn consensus_by_sample(
     }
 
     if nfrag <= PB_MAXFRAG {
-        for apos in 1..=alen {
-            let mut tot = 0i32;
-            for a in 0..(kp - 2) {
-                tot += ct[apos][a];
-            }
-            if (ct[apos][k] as f32 / tot as f32) < PB_SYMFRAC {
+        for (apos, row) in ct.iter().enumerate().take(alen + 1).skip(1) {
+            let tot: i32 = row.iter().take(kp - 2).sum();
+            if (row[k] as f32 / tot as f32) < PB_SYMFRAC {
                 conscols.push(apos);
             }
         }
@@ -682,11 +674,13 @@ fn upgma_tree(mut distances: Vec<Vec<f64>>) -> UpgmaTree {
 
         let i = n_active - 2;
         let j = n_active - 1;
-        for col in 0..n_active {
+        let mut col = 0usize;
+        while col < n_active {
             distances[i][col] = (nin[i] as f64 * distances[i][col]
                 + nin[j] as f64 * distances[j][col])
                 / (nin[i] + nin[j]) as f64;
             distances[col][i] = distances[i][col];
+            col += 1;
         }
         nin[i] += nin[j];
         idx[i] = node as i32;
@@ -777,6 +771,7 @@ pub fn model_mask_from_msa(
 /// effective Neff estimation -> Dirichlet priors ->
 /// composition/consensus annotation -> E-value calibration.
 /// Counterpart to C's `p7_Builder()` (with `build.c`'s `build_model()`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa(
     msa: &Msa,
     abc: &Alphabet,
@@ -803,6 +798,7 @@ pub fn build_hmm_from_msa(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa_with_prior(
     msa: &Msa,
     abc: &Alphabet,
@@ -832,6 +828,7 @@ pub fn build_hmm_from_msa_with_prior(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa_with_prior_and_max_insert(
     msa: &Msa,
     abc: &Alphabet,
@@ -941,8 +938,8 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
     // Store alignment column map for hmmalign --mapali.
     let mut map = vec![0i32; m + 1];
     let mut node = 0usize;
-    for col in 0..msa.alen {
-        if matassign[col] {
+    for (col, &is_match) in matassign.iter().enumerate().take(msa.alen) {
+        if is_match {
             node += 1;
             map[node] = (col + 1) as i32;
         }
@@ -971,7 +968,13 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
             target_re,
             target_sigma,
         } => {
-            crate::eweight::entropy_weight_exp(&mut hmm, bg, prior_strategy, target_re, target_sigma);
+            crate::eweight::entropy_weight_exp(
+                &mut hmm,
+                bg,
+                prior_strategy,
+                target_re,
+                target_sigma,
+            );
             None
         }
         EffectiveSeqNumber::Cluster { identity_cutoff } => {
@@ -1146,7 +1149,7 @@ fn model_mask_from_digitized(
     let missing = abc.missing_code();
     let mut mask = vec![b'.'; msa.alen];
 
-    for col in 0..msa.alen {
+    for (col, mask_col) in mask.iter_mut().enumerate().take(msa.alen) {
         let mut residue_wt = 0.0_f32;
         let mut total_wt = 0.0_f32;
         for seq in 0..msa.nseq {
@@ -1164,7 +1167,7 @@ fn model_mask_from_digitized(
             }
         }
         if residue_wt > 0.0 && total_wt > 0.0 && residue_wt / total_wt >= symfrac {
-            mask[col] = b'x';
+            *mask_col = b'x';
         }
     }
 
@@ -1307,17 +1310,17 @@ fn mark_fragments_old(ax: &mut [Vec<u8>], abc: &Alphabet, alen: usize, fragthres
             .filter(|&&sym| abc.is_residue(sym))
             .count();
         if (rlen as f32) <= fragthresh * alen as f32 {
-            for pos in 1..=alen {
-                if abc.is_residue(row[pos]) {
+            for sym in row.iter_mut().take(alen + 1).skip(1) {
+                if abc.is_residue(*sym) {
                     break;
                 }
-                row[pos] = missing;
+                *sym = missing;
             }
-            for pos in (1..=alen).rev() {
-                if abc.is_residue(row[pos]) {
+            for sym in row[1..=alen].iter_mut().rev() {
+                if abc.is_residue(*sym) {
                     break;
                 }
-                row[pos] = missing;
+                *sym = missing;
             }
         }
     }
@@ -1372,9 +1375,9 @@ fn fcount(abc: &Alphabet, ct: &mut [f32], sym: u8, wt: f32) {
     } else if abc.is_degenerate(sym) {
         let denom = abc.ndegen[sym as usize] as f32;
         if denom > 0.0 {
-            for y in 0..abc.k {
+            for (y, count) in ct.iter_mut().enumerate().take(abc.k) {
                 if abc.degen[sym as usize][y] {
-                    ct[y] += wt / denom;
+                    *count += wt / denom;
                 }
             }
         }

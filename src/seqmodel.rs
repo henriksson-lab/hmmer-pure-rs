@@ -384,10 +384,10 @@ fn score_to_conditional(
         if residue < k {
             row.copy_from_slice(&joint[residue]);
         } else if residue < abc.degen.len() && abc.ndegen[residue] > 0 {
-            for a in 0..k {
+            for (a, joint_row) in joint.iter().enumerate().take(k) {
                 if abc.degen[residue][a] {
-                    for b in 0..k {
-                        row[b] += joint[a][b];
+                    for (b, cell) in row.iter_mut().enumerate().take(k) {
+                        *cell += joint_row[b];
                     }
                 }
             }
@@ -526,6 +526,7 @@ pub fn build_single_seq_hmm(
     .expect("default BLOSUM62 score matrix should be valid")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_single_seq_hmm_with_matrix(
     name: &str,
     dsq: &[Dsq],
@@ -550,6 +551,7 @@ pub fn build_single_seq_hmm_with_matrix(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_single_seq_hmm_with_matrix_and_calibration(
     name: &str,
     dsq: &[Dsq],
@@ -575,25 +577,20 @@ pub fn build_single_seq_hmm_with_matrix_and_calibration(
     // subset of node M's transitions at the end. Rust previously hand-wrote
     // node 0 with t[0][MM]=1-popen and node M with all-zeroed I/D
     // transitions, producing ~21-bit score inflation vs C phmmer.
-    for node in 0..=m {
+    let mut node = 0usize;
+    while node <= m {
         // Match emissions from conditional probability matrix (only for k>0).
         if node > 0 {
             let residue = dsq[node] as usize;
             if residue < cond.len() {
-                for x in 0..k {
-                    hmm.mat[node][x] = cond[residue][x];
-                }
+                hmm.mat[node][..k].copy_from_slice(&cond[residue][..k]);
             } else {
-                for x in 0..k {
-                    hmm.mat[node][x] = bg.f[x];
-                }
+                hmm.mat[node][..k].copy_from_slice(&bg.f[..k]);
             }
         }
 
         // Insert emissions = background, for every node including 0.
-        for x in 0..k {
-            hmm.ins[node][x] = bg.f[x];
-        }
+        hmm.ins[node][..k].copy_from_slice(&bg.f[..k]);
 
         hmm.t[node][MM] = 1.0 - 2.0 * popen;
         hmm.t[node][MI] = popen;
@@ -602,6 +599,7 @@ pub fn build_single_seq_hmm_with_matrix_and_calibration(
         hmm.t[node][II] = pextend;
         hmm.t[node][DM] = 1.0 - pextend;
         hmm.t[node][DD] = pextend;
+        node += 1;
     }
 
     // Special handling at node M (C seqmodel.c:85): overrides MM, MD, DM, DD
@@ -677,9 +675,7 @@ mod tests {
         for (i, &c) in seq.iter().enumerate() {
             dsq[i + 1] = abc.digitize_symbol(c);
         }
-        let hmm = build_single_seq_hmm(
-            "q", &dsq, seq.len(), &abc, &bg, 0.02, 0.4,
-        );
+        let hmm = build_single_seq_hmm("q", &dsq, seq.len(), &abc, &bg, 0.02, 0.4);
         let cons = hmm.consensus.as_ref().expect("consensus set");
         for node in 1..=hmm.m {
             let residue = dsq[node] as usize;

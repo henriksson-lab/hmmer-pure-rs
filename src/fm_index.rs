@@ -11,7 +11,7 @@ const FREQ_CNT_SB: usize = 65536;
 const FREQ_CNT_B: usize = 256;
 
 /// Two-level sampled rank tables over the BWT, mirroring C `FM_DATA`'s
-/// `occCnts_sb` (u32 superblock cumulative) and `occCnts_b` (u16 within-superblock
+/// `occCnts_sb` (superblock cumulative) and `occCnts_b` (u16 within-superblock
 /// block cumulative). They make `Occ(c, pos)` O(`FREQ_CNT_B`) instead of O(pos).
 /// Counts are kept only for the symbols actually present in the BWT.
 #[derive(Debug)]
@@ -21,7 +21,7 @@ struct OccRank {
     /// byte -> index into `symbols`, or -1 if the byte never occurs.
     sym_of: Vec<i16>,
     /// `occ_sb[sb * n_sym + s]` = count of symbol `s` in `bwt[0 .. sb*FREQ_CNT_SB]`.
-    occ_sb: Vec<u32>,
+    occ_sb: Vec<usize>,
     /// `occ_b[b * n_sym + s]` = count of symbol `s` in `bwt[sb_start .. b*FREQ_CNT_B]`
     /// where `sb_start` is the start of the superblock containing block `b`.
     occ_b: Vec<u16>,
@@ -44,10 +44,10 @@ impl OccRank {
         let ns = symbols.len().max(1);
         let nb = bwt.len() / FREQ_CNT_B + 1;
         let nsb = bwt.len() / FREQ_CNT_SB + 1;
-        let mut occ_sb = vec![0u32; nsb * ns];
+        let mut occ_sb = vec![0usize; nsb * ns];
         let mut occ_b = vec![0u16; nb * ns];
-        let mut running = vec![0u32; ns];
-        let mut sb_base = vec![0u32; ns];
+        let mut running = vec![0usize; ns];
+        let mut sb_base = vec![0usize; ns];
         // Iterate inclusively to `bwt.len()` so the trailing sample row(s) at an
         // exact block/superblock boundary are written. Without this, when
         // `bwt.len()` is a multiple of FREQ_CNT_B the last block row stays 0 and
@@ -186,8 +186,8 @@ impl FmIndex {
             return None;
         }
 
-        let lo = self.c[ch as usize] + self.occ(ch, interval.lo);
-        let hi = self.c[ch as usize] + self.occ(ch, interval.hi);
+        let lo = self.c[ch as usize].checked_add(self.occ(ch, interval.lo))?;
+        let hi = self.c[ch as usize].checked_add(self.occ(ch, interval.hi))?;
         (lo < hi).then_some(FmInterval { lo, hi })
     }
 
@@ -225,11 +225,49 @@ impl FmIndex {
         if c.windows(2).any(|pair| pair[0] > pair[1]) {
             return Err("FM-index C table is not monotonic".to_string());
         }
+        let mut counts = [0usize; 256];
+        for &ch in &bwt {
+            counts[ch as usize] += 1;
+        }
+        if counts[0] != 1 {
+            return Err(format!(
+                "FM-index BWT must contain exactly one sentinel byte, found {}",
+                counts[0]
+            ));
+        }
+        let mut cumulative = 0usize;
+        for ch in 0..256 {
+            if c[ch] != cumulative {
+                return Err(format!(
+                    "FM-index C table entry {ch} is {}, expected {cumulative}",
+                    c[ch]
+                ));
+            }
+            cumulative = cumulative
+                .checked_add(counts[ch])
+                .ok_or_else(|| "FM-index C table cumulative count overflows usize".to_string())?;
+        }
+        if cumulative != bwt.len() {
+            return Err(format!(
+                "FM-index C table covers {cumulative} symbols, expected {}",
+                bwt.len()
+            ));
+        }
         if sa
             .iter()
             .any(|&pos| pos < 0 || pos as usize >= expected_len)
         {
             return Err("FM-index suffix-array entry is outside indexed text".to_string());
+        }
+        let mut seen = vec![false; expected_len];
+        for &pos in &sa {
+            let pos = pos as usize;
+            if seen[pos] {
+                return Err(format!(
+                    "FM-index suffix-array is not a permutation: duplicate position {pos}"
+                ));
+            }
+            seen[pos] = true;
         }
 
         let occ_rank = OccRank::build(&bwt);
@@ -317,7 +355,7 @@ impl FmIndex {
         let ns = rank.n_sym();
         let sb = pos / FREQ_CNT_SB;
         let b = pos / FREQ_CNT_B;
-        let mut cnt = rank.occ_sb[sb * ns + s] as usize + rank.occ_b[b * ns + s] as usize;
+        let mut cnt = rank.occ_sb[sb * ns + s] + rank.occ_b[b * ns + s] as usize;
         let block_start = b * FREQ_CNT_B;
         for &x in &self.bwt[block_start..pos] {
             if x == ch {
@@ -340,7 +378,7 @@ impl FmIndex {
         let mut cnt = 0usize;
         for (s, &sym) in rank.symbols.iter().enumerate() {
             if sym < ch {
-                cnt += rank.occ_sb[sb * ns + s] as usize + rank.occ_b[b * ns + s] as usize;
+                cnt += rank.occ_sb[sb * ns + s] + rank.occ_b[b * ns + s] as usize;
             }
         }
         let block_start = b * FREQ_CNT_B;
@@ -366,7 +404,7 @@ impl FmIndex {
             return None;
         }
         let lo = self.c[ch as usize];
-        let hi = lo + self.occ_total(ch);
+        let hi = lo.checked_add(self.occ_total(ch))?;
         (lo < hi).then_some(FmInterval { lo, hi })
     }
 
@@ -391,14 +429,19 @@ impl FmIndex {
         fwd: FmInterval,
         ch: u8,
     ) -> Option<(FmInterval, FmInterval)> {
-        if ch == 0 || bk.is_empty() || bk.hi > self.bwt.len() {
+        if ch == 0
+            || bk.is_empty()
+            || fwd.is_empty()
+            || bk.hi > self.bwt.len()
+            || fwd.hi > self.bwt.len()
+        {
             return None;
         }
         let occ_lo = self.occ(ch, bk.lo);
         let occ_hi = self.occ(ch, bk.hi);
         // New mirror (backward) interval: normal backward-search step on `ch`.
-        let new_bk_lo = self.c[ch as usize] + occ_lo;
-        let new_bk_hi = self.c[ch as usize] + occ_hi;
+        let new_bk_lo = self.c[ch as usize].checked_add(occ_lo)?;
+        let new_bk_hi = self.c[ch as usize].checked_add(occ_hi)?;
         if new_bk_lo >= new_bk_hi {
             return None;
         }
@@ -407,8 +450,13 @@ impl FmIndex {
         // then take the same size as the new mirror range.
         let occ_lt_lo = self.occ_lt(ch, bk.lo);
         let occ_lt_hi = self.occ_lt(ch, bk.hi);
-        let new_fwd_lo = fwd.lo + (occ_lt_hi - occ_lt_lo);
-        let new_fwd_hi = new_fwd_lo + (new_bk_hi - new_bk_lo);
+        let fwd_delta = occ_lt_hi.checked_sub(occ_lt_lo)?;
+        let interval_len = new_bk_hi.checked_sub(new_bk_lo)?;
+        let new_fwd_lo = fwd.lo.checked_add(fwd_delta)?;
+        let new_fwd_hi = new_fwd_lo.checked_add(interval_len)?;
+        if new_fwd_hi > self.bwt.len() {
+            return None;
+        }
         Some((
             FmInterval {
                 lo: new_bk_lo,
@@ -480,6 +528,37 @@ mod tests {
         let err = FmIndex::from_parts(original.bwt, original.sa, original.c, 99).unwrap_err();
 
         assert!(err.contains("BWT length"));
+    }
+
+    #[test]
+    fn fm_index_rejects_c_table_that_does_not_match_bwt_counts() {
+        let original = FmIndex::build(b"ACGT");
+        let mut c = original.c;
+        c[b'C' as usize] += 1;
+
+        let err = FmIndex::from_parts(original.bwt, original.sa, c, original.n).unwrap_err();
+        assert!(err.contains("C table entry"));
+    }
+
+    #[test]
+    fn fm_index_rejects_bwt_without_exactly_one_sentinel() {
+        let original = FmIndex::build(b"ACGT");
+        let mut bwt = original.bwt;
+        let sentinel = bwt.iter().position(|&ch| ch == 0).unwrap();
+        bwt[sentinel] = b'A';
+
+        let err = FmIndex::from_parts(bwt, original.sa, original.c, original.n).unwrap_err();
+        assert!(err.contains("exactly one sentinel"));
+    }
+
+    #[test]
+    fn fm_index_rejects_suffix_array_duplicate_positions() {
+        let original = FmIndex::build(b"ACGT");
+        let mut sa = original.sa;
+        sa[1] = sa[0];
+
+        let err = FmIndex::from_parts(original.bwt, sa, original.c, original.n).unwrap_err();
+        assert!(err.contains("not a permutation"));
     }
 
     #[test]
@@ -559,6 +638,19 @@ mod tests {
         assert!(fmf.locate(b"ACGTACGTACGTAC").is_empty());
     }
 
+    #[test]
+    fn fm_index_forward_update_rejects_invalid_forward_interval() {
+        let text = b"ACGTACGT";
+        let fmb = FmIndex::build(&text.iter().rev().copied().collect::<Vec<_>>());
+        let bk = fmb.char_interval(b'A').unwrap();
+        let invalid_fwd = FmInterval {
+            lo: 0,
+            hi: fmb.bwt.len() + 1,
+        };
+
+        assert!(fmb.update_interval_forward(bk, invalid_fwd, b'C').is_none());
+    }
+
     /// Regression: `occ`/`count`/`locate` must be correct at exact block/
     /// superblock boundaries. Text lengths ≡ 255 (mod 256) make `bwt.len()` a
     /// multiple of FREQ_CNT_B; a missing trailing sample row previously made
@@ -595,7 +687,8 @@ mod tests {
                     .collect();
                 want.sort_unstable();
                 assert_eq!(
-                    got, want,
+                    got,
+                    want,
                     "locate({:?}) wrong at text_len={text_len}",
                     std::str::from_utf8(pat).unwrap()
                 );

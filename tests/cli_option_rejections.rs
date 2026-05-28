@@ -27,7 +27,7 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "--tblout",
                 unwritable_s,
                 "hmmer/testsuite/20aa.hmm",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open tabular per-seq output file",
         ),
@@ -37,7 +37,7 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "--domtblout",
                 unwritable_s,
                 "hmmer/testsuite/20aa.hmm",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open tabular per-dom output file",
         ),
@@ -47,7 +47,7 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "--pfamtblout",
                 unwritable_s,
                 "hmmer/testsuite/20aa.hmm",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open pfam-style tabular output file",
         ),
@@ -57,7 +57,7 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "-A",
                 unwritable_s,
                 "hmmer/testsuite/20aa.hmm",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open alignment file",
         ),
@@ -66,8 +66,8 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "phmmer",
                 "-A",
                 unwritable_s,
-                "hmmer/testsuite/20aa.fa",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open alignment output file",
         ),
@@ -76,8 +76,8 @@ fn search_output_file_open_failures_use_c_style_messages() {
                 "jackhmmer",
                 "--domtblout",
                 unwritable_s,
-                "hmmer/testsuite/20aa.fa",
-                "hmmer/testsuite/20aa.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
+                "hmmer/testsuite/20aa-alitest.fa",
             ],
             "Failed to open tabular per-dom output file",
         ),
@@ -476,6 +476,27 @@ fn nhmmer_qformat_rejects_unknown_query_format() {
 }
 
 #[test]
+fn nhmmer_qformat_rejects_explicit_hmm_like_c() {
+    let output = Command::new(hmmer())
+        .args([
+            "nhmmer",
+            "--qformat",
+            "hmm",
+            "missing-query.hmm",
+            "missing-targets.fa",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("nhmmer --qformat=hmm is not implemented"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn nhmmer_autodetect_rejects_ambiguous_same_length_fasta_query() {
     let dir = tempfile::tempdir().unwrap();
     let query = dir.path().join("ambiguous.fa");
@@ -716,14 +737,7 @@ fn nhmmer_rejects_conflicting_strand_options_before_io() {
 
 #[test]
 fn search_commands_reject_threshold_conflicts_before_io() {
-    for subcmd in [
-        "search",
-        "scan",
-        "nhmmer",
-        "nhmmscan",
-        "phmmer",
-        "jackhmmer",
-    ] {
+    for subcmd in ["search", "scan", "nhmmer", "phmmer", "jackhmmer"] {
         let output = Command::new(hmmer())
             .args([
                 subcmd,
@@ -758,14 +772,7 @@ fn search_commands_reject_threshold_conflicts_before_io() {
 
 #[test]
 fn search_commands_reject_nonpositive_evalue_space_before_io() {
-    for subcmd in [
-        "search",
-        "scan",
-        "nhmmer",
-        "nhmmscan",
-        "phmmer",
-        "jackhmmer",
-    ] {
+    for subcmd in ["search", "scan", "nhmmer", "phmmer", "jackhmmer"] {
         let output = Command::new(hmmer())
             .args([subcmd, "-E", "0", "missing-query.hmm", "missing-targets.fa"])
             .output()
@@ -776,14 +783,7 @@ fn search_commands_reject_nonpositive_evalue_space_before_io() {
         assert!(stderr.contains("value must be > 0"), "{stderr}");
     }
 
-    for subcmd in [
-        "search",
-        "scan",
-        "nhmmer",
-        "nhmmscan",
-        "phmmer",
-        "jackhmmer",
-    ] {
+    for subcmd in ["search", "scan", "nhmmer", "phmmer", "jackhmmer"] {
         let output = Command::new(hmmer())
             .args([
                 subcmd,
@@ -799,6 +799,20 @@ fn search_commands_reject_nonpositive_evalue_space_before_io() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("value must be > 0"), "{stderr}");
     }
+
+    let output = Command::new(hmmer())
+        .args([
+            "nhmmscan",
+            "--domZ",
+            "1",
+            "missing-query.hmm",
+            "missing-targets.fa",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "nhmmscan accepted --domZ");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unexpected argument"), "{stderr}");
 }
 
 #[test]
@@ -1186,7 +1200,14 @@ fn hmmpgmd_accepts_in_range_ports() {
     // happens later (loading the missing DB), not at the port range check.
     for value in ["49152", "65535"] {
         let output = Command::new(hmmer())
-            .args(["pgmd", "--master", "--cport", value, "--seqdb", "missing.fa"])
+            .args([
+                "pgmd",
+                "--master",
+                "--cport",
+                value,
+                "--seqdb",
+                "missing.fa",
+            ])
             .output()
             .unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -1339,7 +1360,17 @@ fn hmmsim_accepts_unranged_tail_options_like_c() {
         vec!["sim", "--fwd", "--tmin", "0", "hmmer/tutorial/fn3.hmm"],
         vec!["sim", "--fwd", "--tmax", "0", "hmmer/tutorial/fn3.hmm"],
         vec!["sim", "--fwd", "--tpoints", "0", "hmmer/tutorial/fn3.hmm"],
-        vec!["sim", "--fwd", "--tmin", "0", "-N", "10", "-L", "10", "hmmer/tutorial/fn3.hmm"],
+        vec![
+            "sim",
+            "--fwd",
+            "--tmin",
+            "0",
+            "-N",
+            "10",
+            "-L",
+            "10",
+            "hmmer/tutorial/fn3.hmm",
+        ],
     ] {
         let output = Command::new(hmmer()).args(&arg).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -1473,7 +1504,10 @@ fn hmmconvert_hmmer2_output_is_supported_and_fails_only_on_missing_input() {
         !stderr.contains("intentionally unsupported"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("Error reading HMM file"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Error reading HMM file"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

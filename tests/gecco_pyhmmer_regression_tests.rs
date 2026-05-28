@@ -49,14 +49,13 @@ fn test_path(relative: &str) -> String {
     format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative)
 }
 
-fn fixture_path_if_present(relative: &str) -> Option<String> {
+fn require_fixture_path(relative: &str) -> String {
     let path = test_path(relative);
-    if std::path::Path::new(&path).exists() {
-        Some(path)
-    } else {
-        eprintln!("skipping test; optional fixture is absent: {relative}");
-        None
-    }
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "required fixture is absent: {relative}; prepare the fixture locally before running this ignored regression test"
+    );
+    path
 }
 
 fn c_hmmconvert_path() -> String {
@@ -357,10 +356,9 @@ fn run_api_full_precision(hmm_path: &str, proteins_path: &str) -> Vec<FullPrecis
 }
 
 #[test]
+#[ignore = "requires --ignored regression run with GECCO cluster1 proteins fixture"]
 fn gecco_cluster1_domain_rows_match_pyhmmer_projection() {
-    let Some(proteins) = fixture_path_if_present("test_data/gecco_cluster1_proteins.faa") else {
-        return;
-    };
+    let proteins = require_fixture_path("test_data/gecco_cluster1_proteins.faa");
     let expected = parse_golden_tsv(&test_path("tests/golden/gecco_cluster1_pyhmmer.tsv"));
     let actual = parse_rust_domtblout(&run_rust_domtblout(
         &test_path("test_data/gecco_cluster1_hmms.hmm"),
@@ -371,10 +369,9 @@ fn gecco_cluster1_domain_rows_match_pyhmmer_projection() {
 }
 
 #[test]
+#[ignore = "requires --ignored regression run with GECCO cluster1 proteins fixture"]
 fn gecco_cluster1_default_filter_rows_match_pyhmmer_projection() {
-    let Some(proteins) = fixture_path_if_present("test_data/gecco_cluster1_proteins.faa") else {
-        return;
-    };
+    let proteins = require_fixture_path("test_data/gecco_cluster1_proteins.faa");
     let expected: Vec<DomainRow> =
         parse_golden_tsv(&test_path("tests/golden/gecco_cluster1_pyhmmer.tsv"))
             .into_iter()
@@ -392,10 +389,9 @@ fn gecco_cluster1_default_filter_rows_match_pyhmmer_projection() {
 }
 
 #[test]
+#[ignore = "requires --ignored regression run with GECCO cluster1 proteins fixture"]
 fn gecco_cluster1_c_binary_h3m_rows_match_pyhmmer_projection() {
-    let Some(proteins) = fixture_path_if_present("test_data/gecco_cluster1_proteins.faa") else {
-        return;
-    };
+    let proteins = require_fixture_path("test_data/gecco_cluster1_proteins.faa");
     let dir = tempfile::tempdir().unwrap();
     let h3m = dir.path().join("gecco_cluster1_hmms.h3m");
     convert_to_c_binary_hmm(&test_path("test_data/gecco_cluster1_hmms.hmm"), &h3m);
@@ -407,18 +403,16 @@ fn gecco_cluster1_c_binary_h3m_rows_match_pyhmmer_projection() {
 }
 
 #[test]
+#[ignore = "requires --ignored regression run with GECCO cluster1 proteins fixture"]
 fn gecco_cluster1_text_hmm_domtblout_matches_c_hmmer() {
-    let Some(proteins) = fixture_path_if_present("test_data/gecco_cluster1_proteins.faa") else {
-        return;
-    };
+    let proteins = require_fixture_path("test_data/gecco_cluster1_proteins.faa");
     assert_domtblout_matches_c_hmmer(&test_path("test_data/gecco_cluster1_hmms.hmm"), &proteins);
 }
 
 #[test]
+#[ignore = "requires --ignored regression run with GECCO cluster1 proteins fixture"]
 fn gecco_cluster1_c_binary_h3m_domtblout_matches_c_hmmer() {
-    let Some(proteins) = fixture_path_if_present("test_data/gecco_cluster1_proteins.faa") else {
-        return;
-    };
+    let proteins = require_fixture_path("test_data/gecco_cluster1_proteins.faa");
     let dir = tempfile::tempdir().unwrap();
     let h3m = dir.path().join("gecco_cluster1_hmms.h3m");
     convert_to_c_binary_hmm(&test_path("test_data/gecco_cluster1_hmms.hmm"), &h3m);
@@ -427,10 +421,9 @@ fn gecco_cluster1_c_binary_h3m_domtblout_matches_c_hmmer() {
 }
 
 #[test]
+#[ignore = "requires generated full-Pfam GECCO H3M fixture; run explicitly after preparing test_data/gecco_full_pfam_selected_hmms.h3m"]
 fn gecco_full_pfam_selected_binary_h3m_rows_match_pyhmmer_projection() {
-    let Some(hmms) = fixture_path_if_present("test_data/gecco_full_pfam_selected_hmms.h3m") else {
-        return;
-    };
+    let hmms = require_fixture_path("test_data/gecco_full_pfam_selected_hmms.h3m");
     let expected = parse_golden_tsv(&test_path(
         "tests/golden/gecco_full_pfam_selected_pyhmmer.tsv",
     ));
@@ -443,10 +436,9 @@ fn gecco_full_pfam_selected_binary_h3m_rows_match_pyhmmer_projection() {
 }
 
 #[test]
+#[ignore = "requires generated full-Pfam GECCO H3M fixture; run explicitly after preparing test_data/gecco_full_pfam_selected_hmms.h3m"]
 fn gecco_full_pfam_selected_binary_h3m_domtblout_matches_c_hmmer() {
-    let Some(hmms) = fixture_path_if_present("test_data/gecco_full_pfam_selected_hmms.h3m") else {
-        return;
-    };
+    let hmms = require_fixture_path("test_data/gecco_full_pfam_selected_hmms.h3m");
     assert_domtblout_matches_c_hmmer(
         &hmms,
         &test_path("test_data/gecco_full_pfam_selected_proteins.faa"),
@@ -454,10 +446,9 @@ fn gecco_full_pfam_selected_binary_h3m_domtblout_matches_c_hmmer() {
 }
 
 #[test]
+#[ignore = "requires generated full-Pfam GECCO H3M fixture; run explicitly after preparing test_data/gecco_full_pfam_selected_hmms.h3m"]
 fn gecco_full_pfam_selected_default_filter_rows_match_pyhmmer_projection() {
-    let Some(hmms) = fixture_path_if_present("test_data/gecco_full_pfam_selected_hmms.h3m") else {
-        return;
-    };
+    let hmms = require_fixture_path("test_data/gecco_full_pfam_selected_hmms.h3m");
     let expected: Vec<DomainRow> = parse_golden_tsv(&test_path(
         "tests/golden/gecco_full_pfam_selected_pyhmmer.tsv",
     ))
@@ -490,7 +481,7 @@ fn gecco_pfam_stochastic_domains_match_pyhmmer_full_precision() {
             35,
             379,
             4.418183328172337e-30,
-            102.12395477294922_f32,
+            102.123955_f32,
         ),
         (
             "CP157504.1_3476",
@@ -500,7 +491,7 @@ fn gecco_pfam_stochastic_domains_match_pyhmmer_full_precision() {
             324,
             473,
             4.6307416971601415e-9,
-            32.98520278930664_f32,
+            32.985203_f32,
         ),
         (
             "CP157504.1_67",
@@ -510,7 +501,7 @@ fn gecco_pfam_stochastic_domains_match_pyhmmer_full_precision() {
             413,
             603,
             4.3720603042074165e-81,
-            268.666259765625_f32,
+            268.66626_f32,
         ),
         (
             "CP157504.1_5311",
@@ -520,7 +511,7 @@ fn gecco_pfam_stochastic_domains_match_pyhmmer_full_precision() {
             61,
             238,
             1.4665650306276348e-66,
-            220.62559509277344_f32,
+            220.6256_f32,
         ),
     ];
 
@@ -537,6 +528,6 @@ fn gecco_pfam_stochastic_domains_match_pyhmmer_full_precision() {
             })
             .unwrap_or_else(|| panic!("missing expected full-precision row: {expected:?}"));
         assert_eq!(row.bitscore.to_bits(), expected.7.to_bits());
-        assert_eq!(row.i_evalue.to_bits(), (expected.6 as f64).to_bits());
+        assert_eq!(row.i_evalue.to_bits(), f64::to_bits(expected.6));
     }
 }

@@ -83,7 +83,7 @@ struct TextMsa {
 /// HMM's map and checksum. Corresponds to `main()` in hmmer/src/hmmalign.c.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
-    if args.hmmfile == PathBuf::from("-") && args.seqfile == PathBuf::from("-") {
+    if args.hmmfile == std::path::Path::new("-") && args.seqfile == std::path::Path::new("-") {
         eprintln!(
             "ERROR: Either <hmmfile> or <seqfile> may be '-' (to read from stdin), but not both."
         );
@@ -331,7 +331,7 @@ fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
     let mut maxgc = 0usize;
     maxgc = maxgc.max(7); // PP_cons
     maxgc = maxgc.max(2); // RF
-    // maxgr: GR tag emitted here is PP (2).
+                          // maxgr: GR tag emitted here is PP (2).
     let maxgr = 2usize;
 
     let mut margin = maxname + 1;
@@ -354,8 +354,7 @@ fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
         for row in &msa.rows {
             if let Some(acc) = &row.acc {
                 if !acc.is_empty() {
-                    writeln!(out, "#=GS {:<width$} AC {}", row.name, acc, width = maxname)
-                        .unwrap();
+                    writeln!(out, "#=GS {:<width$} AC {}", row.name, acc, width = maxname).unwrap();
                 }
             }
         }
@@ -365,8 +364,14 @@ fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
         for row in &msa.rows {
             if let Some(desc) = &row.desc {
                 if !desc.is_empty() {
-                    writeln!(out, "#=GS {:<width$} DE {}", row.name, desc, width = maxname)
-                        .unwrap();
+                    writeln!(
+                        out,
+                        "#=GS {:<width$} DE {}",
+                        row.name,
+                        desc,
+                        width = maxname
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -533,8 +538,8 @@ fn align_traces(
 /// the posterior matrix is still alive, so the O(M*L) matrix can be dropped.
 fn trace_posteriors(tr: &hmmer_pure_rs::trace::Trace, pp: &Gmx) -> Vec<f32> {
     let mut v = vec![0.0_f32; tr.n];
-    for z in 0..tr.n {
-        v[z] = match tr.st[z] {
+    for (z, value) in v.iter_mut().enumerate().take(tr.n) {
+        *value = match tr.st[z] {
             State::M => pp.mmx(tr.i[z], tr.k[z]),
             State::I => pp.imx(tr.i[z], tr.k[z]),
             State::N | State::C => pp.xmx(tr.i[z], state_pp_index(tr.st[z])),
@@ -664,8 +669,7 @@ fn build_text_msa_with_mapali(
     let mut pp_cons_sum = vec![0.0_f32; alen];
     let mut pp_cons_n = vec![0usize; alen];
     for (sq, (tr, pp_z)) in sequences.iter().zip(traces.iter()) {
-        let (mut aseq, mut ppline) =
-            make_text_row(abc, sq, tr, pp_z, &matuse, &matmap, alen, trim);
+        let (mut aseq, mut ppline) = make_text_row(abc, sq, tr, pp_z, &matuse, &matmap, alen, trim);
         rejustify_insertions_text(&mut aseq, &mut ppline, &inscount, &matmap, &matuse, hmm.m);
         for z in 0..tr.n {
             if tr.st[z] == State::M {
@@ -923,6 +927,7 @@ fn map_new_msa(
 /// Render one sequence's trace as text-aligned residues plus the matching PP
 /// (posterior-probability) annotation row, using `matmap` to place match-state
 /// residues and contiguous insert positions for I/N/C states.
+#[allow(clippy::too_many_arguments)]
 fn make_text_row(
     abc: &Alphabet,
     sq: &Sequence,

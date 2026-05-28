@@ -2,7 +2,7 @@
 //! Builds single-seq HMM, searches, collects hits into MSA, rebuilds, repeats.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser};
 
@@ -99,7 +99,11 @@ struct Args {
     incdom_e: f64,
 
     /// Include domains >= this score threshold
-    #[arg(long = "incdomT", conflicts_with = "incdom_e", allow_hyphen_values = true)]
+    #[arg(
+        long = "incdomT",
+        conflicts_with = "incdom_e",
+        allow_hyphen_values = true
+    )]
     incdom_t: Option<f64>,
 
     /// Hidden C-compatible model gathering cutoff flag
@@ -545,7 +549,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error: jackhmmer {e}");
         std::process::exit(1);
     });
-    if args.seqdb == PathBuf::from("-") {
+    if args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: target sequence database may not be '-' for jackhmmer");
         std::process::exit(1);
     }
@@ -979,15 +983,15 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         std::process::exit(1);
                     });
                 let mut sq = Sequence::new();
-                let mut batch = Vec::with_capacity(TARGET_BATCH_SIZE);
+                let mut batch: Vec<(u64, Sequence)> = Vec::with_capacity(TARGET_BATCH_SIZE);
 
                 loop {
                     while batch.len() < TARGET_BATCH_SIZE {
                         match sqf.read(&mut sq) {
                             Ok(true) => {
-                                total_residues += sq.n as u64;
-                                batch.push(sq.clone());
                                 z += 1;
+                                total_residues += sq.n as u64;
+                                batch.push((z as u64, sq.clone()));
                                 sq.reuse();
                             }
                             Ok(false) => break,
@@ -1018,13 +1022,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                                 lpli.new_model(&lgm);
                                 (lb, lgm, lom, lpli)
                             },
-                            |(lb, lgm, lom, lpli), sq| {
+                            |(lb, lgm, lom, lpli), (target_idx, sq)| {
                                 // Mirror C's `p7_pipeline_Reuse`: zero the per-target
                                 // counters before each target so the returned counts
                                 // reflect only this sequence (the outer loop sums them
                                 // into `stats`). DP scratch / profile / oprofile / bg
                                 // are reused across all of this worker's targets.
-                                lpli.n_targets = 0;
+                                lpli.n_targets = target_idx.saturating_sub(1);
                                 lpli.n_past_msv = 0;
                                 lpli.n_past_bias = 0;
                                 lpli.n_past_vit = 0;
@@ -1114,9 +1118,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 args.z_value.is_some(),
                 args.domz_value.is_some(),
                 &stats,
-                args.f1,
-                args.f2,
-                args.f3,
+                if args.max { 1.0 } else { args.f1 },
+                if args.max { 1.0 } else { args.f2 },
+                if args.max { 1.0 } else { args.f3 },
             );
             writeln!(out).unwrap();
             let new_included_names: Vec<String> = th
@@ -1308,7 +1312,7 @@ fn write_jackhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
             out,
             // C jackhmmer prints "<=" here, despite score thresholds being minimums.
             "# sequence reporting threshold:    score <= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1325,7 +1329,7 @@ fn write_jackhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
             out,
             // C jackhmmer prints "<=" here, despite score thresholds being minimums.
             "# domain reporting threshold:      score <= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1341,7 +1345,7 @@ fn write_jackhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# sequence inclusion threshold:    score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1357,7 +1361,7 @@ fn write_jackhmmer_option_header(out: &mut dyn Write, args: &Args, cmdline: &str
         writeln!(
             out,
             "# domain inclusion threshold:      score >= {}",
-            hmmer_pure_rs::output::fmt_g(score as f64)
+            hmmer_pure_rs::output::fmt_g(score)
         )
         .unwrap();
     }
@@ -1465,6 +1469,7 @@ struct PipelineStats {
     n_past_fwd: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_pipeline_stats<W: Write>(
     out: &mut W,
     model_len: usize,
@@ -1581,7 +1586,7 @@ fn exact_match_query_trace(model_len: usize) -> Trace {
 }
 
 /// Write the HMM produced at `iteration` to `<prefix>-<iteration>.hmm`.
-fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs::hmm::Hmm) {
+fn write_hmm_checkpoint(prefix: &Path, iteration: usize, hmm: &hmmer_pure_rs::hmm::Hmm) {
     let path = checkpoint_path(prefix, iteration, "hmm");
     let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
         eprintln!("Error creating HMM checkpoint {}: {}", path.display(), e);
@@ -1594,7 +1599,7 @@ fn write_hmm_checkpoint(prefix: &PathBuf, iteration: usize, hmm: &hmmer_pure_rs:
 }
 
 /// Write the included-hit alignment for `iteration` to `<prefix>-<iteration>.sto`.
-fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
+fn write_msa_checkpoint(prefix: &Path, iteration: usize, msa: &Msa) {
     let path = checkpoint_path(prefix, iteration, "sto");
     let mut file = std::fs::File::create(&path).unwrap_or_else(|e| {
         eprintln!(
@@ -1608,7 +1613,7 @@ fn write_msa_checkpoint(prefix: &PathBuf, iteration: usize, msa: &Msa) {
 }
 
 /// Compose a checkpoint filename of the form `<prefix>-<iteration>.<ext>`.
-fn checkpoint_path(prefix: &PathBuf, iteration: usize, ext: &str) -> PathBuf {
+fn checkpoint_path(prefix: &Path, iteration: usize, ext: &str) -> PathBuf {
     let mut os = prefix.as_os_str().to_os_string();
     os.push(format!("-{}.{}", iteration, ext));
     PathBuf::from(os)
@@ -1774,9 +1779,17 @@ fn configure_pipeline(pli: &mut Pipeline, args: &Args) {
     pli.inc_e = args.inc_e;
     pli.inc_dome = args.incdom_e;
     pli.do_max = args.max;
-    pli.f1 = args.f1;
-    pli.f2 = args.f2;
-    pli.f3 = args.f3;
+    pli.f1 = if args.max { 1.0 } else { args.f1 };
+    pli.f2 = if args.max { 1.0 } else { args.f2 };
+    pli.f3 = if args.max { 1.0 } else { args.f3 };
+    if let Some(z) = args.z_value {
+        pli.z = z;
+        pli.z_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+    }
+    if let Some(domz) = args.domz_value {
+        pli.domz = domz;
+        pli.domz_setby = hmmer_pure_rs::pipeline::ZSetBy::Option;
+    }
 
     if let Some(t) = args.score_threshold {
         pli.t = Some(t);
@@ -1872,7 +1885,15 @@ mod tests {
         // accepted. allow_hyphen_values matches that instead of rejecting
         // "-0.5" as an unknown flag.
         let args = Args::try_parse_from([
-            "jackhmmer", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "query.fa", "targets.fa",
+            "jackhmmer",
+            "--F1",
+            "-0.5",
+            "--F2",
+            "-1e-3",
+            "--F3",
+            "-2",
+            "query.fa",
+            "targets.fa",
         ])
         .unwrap();
         assert_eq!(args.f1, -0.5);

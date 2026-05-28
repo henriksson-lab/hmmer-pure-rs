@@ -151,6 +151,7 @@ fn infernal_testsuite() -> std::path::PathBuf {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn domain_envelope_short_trna_is_tight() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -181,15 +182,18 @@ fn domain_envelope_short_trna_is_tight() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and 1k-tRNA.fa"]
 fn domain_envelope_embedded_trna_is_narrow() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     // Read first sequence from 1k-tRNA.fa (tRNA at ~860-930 in 1000bp)
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() {
-        return;
-    }
+    assert!(
+        fa_path.exists(),
+        "required Infernal fixture is absent: {}",
+        fa_path.display()
+    );
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
@@ -252,6 +256,7 @@ fn domain_envelope_embedded_trna_is_narrow() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn domain_envelope_random_sequence_no_hits() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -292,6 +297,7 @@ fn domain_envelope_random_sequence_no_hits() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn domain_envelope_multiple_hits_separate_envelopes() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -356,6 +362,7 @@ fn domain_envelope_multiple_hits_separate_envelopes() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn domain_scores_positive_for_true_trna() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -397,15 +404,18 @@ fn domain_scores_positive_for_true_trna() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and 1k-tRNA.fa"]
 fn domain_scores_positive_for_embedded_trna() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     // Read first sequence from 1k-tRNA.fa
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() {
-        return;
-    }
+    assert!(
+        fa_path.exists(),
+        "required Infernal fixture is absent: {}",
+        fa_path.display()
+    );
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
@@ -448,6 +458,7 @@ fn domain_scores_positive_for_embedded_trna() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm"]
 fn hit_score_matches_c_hmmer_approximately() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
@@ -486,15 +497,18 @@ fn hit_score_matches_c_hmmer_approximately() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and 1k-tRNA.fa"]
 fn no_false_positive_domains_in_random_flanks() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     // Read first sequence from 1k-tRNA.fa (tRNA at ~860-930 in 1000bp)
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() {
-        return;
-    }
+    assert!(
+        fa_path.exists(),
+        "required Infernal fixture is absent: {}",
+        fa_path.display()
+    );
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();
@@ -547,15 +561,18 @@ fn no_false_positive_domains_in_random_flanks() {
 // ============================================================
 
 #[test]
+#[ignore = "requires host-local Infernal testsuite with tRNA.c.cm and 1k-tRNA.fa"]
 fn embedded_trna_domain_count_matches_c_hmmer() {
     let testsuite = infernal_testsuite();
     let hmm = read_hmm_from_cm(&testsuite.join("tRNA.c.cm"));
 
     // Read first sequence from 1k-tRNA.fa
     let fa_path = testsuite.join("1k-tRNA.fa");
-    if !fa_path.exists() {
-        return;
-    }
+    assert!(
+        fa_path.exists(),
+        "required Infernal fixture is absent: {}",
+        fa_path.display()
+    );
 
     let content = std::fs::read_to_string(&fa_path).unwrap();
     let mut seq = Vec::new();

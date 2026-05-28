@@ -233,6 +233,7 @@ pub struct Pipeline {
     // reconfigure the profile's rest-length per envelope, matching C
     // `rescore_isolated_domain()`'s `if (long_target) ReconfigRestLength(om, j-i+1)`.
     pub long_target: bool,
+    pub long_target_b3: usize,
 
     // Statistics
     pub n_past_msv: u64,
@@ -285,6 +286,7 @@ impl Pipeline {
             do_alignment_display: true,
             seed: 42,
             long_target: false,
+            long_target_b3: 1000,
             n_past_msv: 0,
             n_past_bias: 0,
             n_past_vit: 0,
@@ -356,7 +358,7 @@ impl Pipeline {
 
     fn current_target_z(&self) -> f64 {
         match self.z_setby {
-            ZSetBy::Option => self.z.max(1.0),
+            ZSetBy::Option => self.z,
             ZSetBy::Ntargets => self.z.max(self.n_targets as f64).max(1.0),
         }
     }
@@ -648,8 +650,8 @@ impl Pipeline {
         if self.long_target && self.do_biasfilter {
             let bias_full = bg.filter_score(&sq.dsq, l);
             let bias_delta = bias_full - null_sc;
-            const B3: usize = 1000;
-            let f3_l = l.min(B3);
+            let b3 = self.long_target_b3;
+            let f3_l = l.min(b3);
             let scale = if f3_l == l {
                 1.0_f32
             } else {
@@ -708,6 +710,7 @@ impl Pipeline {
                 self.do_alignment,
                 self.do_alignment_display,
                 self.long_target,
+                self.do_null2,
             );
         #[cfg(not(feature = "tracehash"))]
         let _ = seq_correction_sum;
@@ -833,7 +836,7 @@ impl Pipeline {
             domains.len(),
         );
 
-        if !self.do_null2 {
+        if !self.do_null2 && !self.long_target {
             let tau = gm.evparam[crate::hmm::P7_FTAU] as f64;
             let lambda = gm.evparam[crate::hmm::P7_FLAMBDA] as f64;
             for dom in &mut domains {
@@ -842,6 +845,11 @@ impl Pipeline {
                 dom.dombias = 0.0;
                 dom.bitscore = nats_to_bits_from_scores(dom.envsc + length_correction, null_sc);
                 dom.lnp = crate::stats::exponential::logsurv(dom.bitscore as f64, tau, lambda);
+            }
+        } else if !self.do_null2 {
+            for dom in &mut domains {
+                dom.dombias = 0.0;
+                dom.domcorrection = 0.0;
             }
         }
 
@@ -854,11 +862,14 @@ impl Pipeline {
         // nhmmer (long_target) reports the best per-envelope score as hit.score;
         // it does not aggregate across domains the way hmmsearch does.
         // Mirrors C p7_pipeline.c:1462 `hit->sum_score = hit->score = dom_score`.
+        let mut long_target_best_domain_idx = None;
         let (hit_score, hit_pre_score, hit_bias, hit_lnp, hit_pre_lnp) = if self.long_target {
-            let best = domains
+            let (best_idx, best) = domains
                 .iter()
-                .min_by(|a, b| a.lnp.total_cmp(&b.lnp))
+                .enumerate()
+                .min_by(|a, b| a.1.lnp.total_cmp(&b.1.lnp))
                 .expect("long_target hit must have at least one domain");
+            long_target_best_domain_idx = Some(best_idx);
             let best_bitscore = best.bitscore;
             // dom.dombias is already in bits (see domaindef.rs). C does not clamp
             // the long-target bias (p7_pipeline.c:1455 stores dom_bias raw and
@@ -872,11 +883,17 @@ impl Pipeline {
             (seq_score, pre_score, seq_bias_bits, lnp, pre_lnp)
         };
 
+        if let Some(best_idx) = long_target_best_domain_idx {
+            domains.swap(0, best_idx);
+        }
+
         // Storage gate, matching C p7_pipeline.c:1062: a hit is stored only if it
         // passes p7_pli_TargetReportable against the *current* pli->Z (running
         // target count for Ntargets, fixed -Z for Option). This is a permissive
         // lower bound; final thresholding re-applies with the true Z.
-        if !self.target_reportable(hit_score, hit_lnp) {
+        let apply_early_storage_gate =
+            !(self.long_target && self.use_bit_cutoffs == BitCutoff::None);
+        if apply_early_storage_gate && !self.target_reportable(hit_score, hit_lnp) {
             return false;
         }
 
@@ -949,6 +966,12 @@ impl Pipeline {
         }
 
         true
+    }
+}
+
+impl Default for Pipeline {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

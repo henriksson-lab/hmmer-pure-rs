@@ -48,10 +48,10 @@ impl Default for ClusterParams {
 /// Port of `p7_spensemble_Cluster()`: single-linkage cluster segment pairs by
 /// sequence/HMM overlap and diagonal proximity, keep clusters with posterior
 /// >= `min_posterior`, then pick consensus i,j,k,m endpoints whose count meets
-/// the `min_endpointp` threshold. `ntraces` is the total number of stochastic
-/// traces the ensemble came from. Also drops envelopes dominated (>=80% covered
-/// in sequence coords) by a higher-posterior neighbor, matching the post-cluster
-/// pruning in `region_trace_ensemble()`.
+/// > the `min_endpointp` threshold. `ntraces` is the total number of stochastic
+/// > traces the ensemble came from. Also drops envelopes dominated (>=80% covered
+/// > in sequence coords) by a higher-posterior neighbor, matching the post-cluster
+/// > pruning in `region_trace_ensemble()`.
 pub fn cluster(
     segments: &[SegmentPair],
     ntraces: usize,

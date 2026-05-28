@@ -68,10 +68,6 @@ fn viterbi_overflow_maxsc(base_w: i16, scale_w: f32) -> f32 {
 fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        assert!(
-            is_x86_feature_detected!("sse2"),
-            "calibration requires SSE2 (baseline on x86_64) to match C's quantized MSV filter"
-        );
         match unsafe { crate::simd::msv_filter::msv_filter(dsq, l, om) } {
             crate::simd::msv_filter::MsvResult::Ok(s) => s,
             crate::simd::msv_filter::MsvResult::Overflow => maxsc,
@@ -99,10 +95,6 @@ fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
 fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        assert!(
-            is_x86_feature_detected!("sse2"),
-            "calibration requires SSE2 (baseline on x86_64) to match C's quantized Viterbi filter"
-        );
         match unsafe { crate::simd::vit_filter::viterbi_filter(dsq, l, om) } {
             crate::simd::vit_filter::VitResult::Ok(s) => s,
             crate::simd::vit_filter::VitResult::Overflow => maxsc,
@@ -129,10 +121,6 @@ fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32
 fn forward_filter_score(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        assert!(
-            is_x86_feature_detected!("sse2"),
-            "calibration requires SSE2 (baseline on x86_64) to match C's Forward parser"
-        );
         unsafe { crate::simd::fwd_filter::forward_parser(dsq, l, om) }
     }
     #[cfg(target_arch = "aarch64")]
@@ -316,6 +304,7 @@ fn calibrate_viterbi(
 /// fit a Gumbel to the simulated Forward scores, then back the origin off by
 /// `log(tailp)/lambda` so the right tail of mass `tailp` has origin 1.0.
 /// Returns `(tau, lambda)`. Counterpart to C's `p7_Tau()`.
+#[allow(clippy::too_many_arguments)]
 fn calibrate_forward(
     hmm: &Hmm,
     abc: &crate::alphabet::Alphabet,

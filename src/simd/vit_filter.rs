@@ -1,5 +1,6 @@
 //! SSE2-optimized Viterbi filter (int16 precision).
 //! Direct port of impl_sse/vitfilter.c p7_ViterbiFilter().
+#![allow(clippy::absurd_extreme_comparisons, clippy::needless_range_loop)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

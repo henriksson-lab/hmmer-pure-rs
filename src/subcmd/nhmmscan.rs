@@ -113,26 +113,6 @@ struct Args {
     #[arg(short = 'Z', value_parser = parse_positive_f64)]
     z_value: Option<f64>,
 
-    /// Retained for C command-line compatibility; not used by nhmmscan output
-    #[arg(long = "domZ", value_parser = parse_positive_f64, hide = true)]
-    domz_value: Option<f64>,
-
-    /// Retained for C command-line compatibility
-    #[arg(long = "domE", default_value = "10.0", value_parser = parse_positive_f64, conflicts_with = "dom_t", hide = true)]
-    dom_e: f64,
-
-    /// Retained for C command-line compatibility
-    #[arg(long = "domT", conflicts_with = "dom_e", hide = true, allow_hyphen_values = true)]
-    dom_t: Option<f64>,
-
-    /// Retained for C command-line compatibility
-    #[arg(long = "incdomE", default_value = "0.01", value_parser = parse_positive_f64, conflicts_with = "inc_dom_t", hide = true)]
-    inc_dome: f64,
-
-    /// Retained for C command-line compatibility
-    #[arg(long = "incdomT", conflicts_with = "inc_dome", hide = true, allow_hyphen_values = true)]
-    inc_dom_t: Option<f64>,
-
     /// Random number seed
     #[arg(long = "seed", default_value = "42")]
     seed: u32,
@@ -146,8 +126,8 @@ struct Args {
     crick: bool,
 
     /// Window length (max expected hit length)
-    #[arg(long = "w_length")]
-    w_length: Option<usize>,
+    #[arg(long = "w_length", value_parser = parse_window_length)]
+    w_length: Option<i32>,
 
     /// Tail mass for deriving window length
     #[arg(long = "w_beta", value_parser = parse_window_beta)]
@@ -217,6 +197,17 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
         Ok(value)
     } else {
         Err("value must be > 0".to_string())
+    }
+}
+
+fn parse_window_length(s: &str) -> Result<i32, String> {
+    let value = s
+        .parse::<i32>()
+        .map_err(|e| format!("invalid window length: {e}"))?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err("--w_length must be > 0 and fit in a 32-bit signed integer".to_string())
     }
 }
 
@@ -444,8 +435,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let mut sq = Sequence::new();
     let mut query_idx = 0usize;
-    let search_space = args.z_value.unwrap_or(hmms.len() as f64);
-    let search_space_ln = hmmer_pure_rs::util::cmath::c_log_f64(search_space);
+    let search_space_ln = hmmer_pure_rs::util::cmath::c_log_f64(hmms.len() as f64);
     while sqf.read(&mut sq).unwrap_or_else(|e| {
         eprintln!("Error reading sequence file: {}", e);
         std::process::exit(1);
@@ -483,6 +473,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             };
 
             let max_length = nhmmscan_max_length(hmm, args.w_length, args.w_beta);
+            let effective_f1 = if args.max { 0.3 } else { args.f1 };
+            let effective_f2 = if args.max { 1.0 } else { args.f2 };
+            let effective_f3 = if args.max { 1.0 } else { args.f3 };
+            let effective_nobias = args.max || args.nobias;
             let do_watson = !args.crick;
             let do_crick = !args.watson;
             let mut hits = Vec::new();
@@ -510,11 +504,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     &om,
                     &local_bg,
                     max_length,
-                    args.f1,
-                    args.f2,
-                    args.f3,
+                    effective_f1,
+                    effective_f2,
+                    effective_f3,
                     args.max,
-                    args.nobias,
+                    effective_nobias,
                     args.nonull2,
                     args.seed,
                     bias_windows,
@@ -538,11 +532,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     &om,
                     &local_bg,
                     max_length,
-                    args.f1,
-                    args.f2,
-                    args.f3,
+                    effective_f1,
+                    effective_f2,
+                    effective_f3,
                     args.max,
-                    args.nobias,
+                    effective_nobias,
                     args.nonull2,
                     args.seed,
                     bias_windows,
@@ -689,9 +683,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             th.nreported as u64,
             pos_output,
             &stats,
-            args.f1,
-            args.f2,
-            args.f3,
+            if args.max { 0.3 } else { args.f1 },
+            if args.max { 1.0 } else { args.f2 },
+            if args.max { 1.0 } else { args.f3 },
         );
         writeln!(out, "//").unwrap();
 
@@ -738,7 +732,7 @@ fn write_nhmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str)
         writeln!(
             out,
             "# profile reporting threshold:     score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -754,7 +748,7 @@ fn write_nhmmscan_option_header(out: &mut dyn Write, args: &Args, cmdline: &str)
         writeln!(
             out,
             "# profile inclusion threshold:     score >= {}",
-            fmt_g(score as f64)
+            fmt_g(score)
         )
         .unwrap();
     }
@@ -833,11 +827,11 @@ fn open_query_seq_file(
 
 fn nhmmscan_max_length(
     hmm: &hmmer_pure_rs::hmm::Hmm,
-    w_length: Option<usize>,
+    w_length: Option<i32>,
     w_beta: Option<f64>,
 ) -> i32 {
     if let Some(w_length) = w_length {
-        w_length as i32
+        w_length
     } else if let Some(w_beta) = w_beta.filter(|beta| *beta > 0.0) {
         builder::max_length_from_beta(hmm, w_beta)
     } else if hmm.max_length > 0 {
@@ -927,7 +921,7 @@ fn write_nhmmscan_stdout_hits(
     if !any_reported {
         writeln!(
             out,
-            "   [No targets detected that satisfy reporting thresholds]"
+            "   [No hits detected that satisfy reporting thresholds]"
         )
         .unwrap();
     }
@@ -1044,6 +1038,7 @@ fn write_nhmmscan_stdout_hits(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_nhmmscan_pipeline_stats<W: Write + ?Sized>(
     out: &mut W,
     query_residues: u64,
@@ -1259,6 +1254,13 @@ mod tests {
         let args =
             Args::try_parse_from(["nhmmscan", "--cut_ga", "models.hmm", "queries.fa"]).unwrap();
         assert_eq!(selected_bit_cutoff(&args), Some(BitCutoff::GA));
+
+        assert!(
+            Args::try_parse_from(["nhmmscan", "--domZ", "1", "models.hmm", "queries.fa"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["nhmmscan", "--domE", "1", "models.hmm", "queries.fa"]).is_err()
+        );
     }
 
     #[test]
@@ -1267,7 +1269,15 @@ mod tests {
         // negative form is accepted. allow_hyphen_values matches C instead of
         // treating "-0.5" as an unknown flag.
         let args = Args::try_parse_from([
-            "nhmmscan", "--F1", "-0.5", "--F2", "-1e-3", "--F3", "-2", "models.hmm", "queries.fa",
+            "nhmmscan",
+            "--F1",
+            "-0.5",
+            "--F2",
+            "-1e-3",
+            "--F3",
+            "-2",
+            "models.hmm",
+            "queries.fa",
         ])
         .unwrap();
         assert_eq!(args.f1, -0.5);

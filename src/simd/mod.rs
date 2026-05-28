@@ -10,11 +10,11 @@ pub mod avx2_msv;
 pub mod avx2_vit;
 #[cfg(target_arch = "x86_64")]
 pub mod bck_filter;
+pub mod fm_ssv;
 #[cfg(target_arch = "x86_64")]
 pub mod fwd_filter;
 #[cfg(target_arch = "x86_64")]
 pub mod msv_filter;
-pub mod fm_ssv;
 pub mod probmx;
 #[cfg(target_arch = "x86_64")]
 pub mod ssv_filter;

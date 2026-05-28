@@ -349,10 +349,10 @@ fn hmmlogo_score_mode_zero_emission_matches_c() {
 #[test]
 fn hmmconvert_hmmer2_output_matches_c() {
     let models = [
-        "hmmer/tutorial/fn3.hmm",          // amino, MAP
-        "hmmer/tutorial/MADE1.hmm",        // nucleic (DNA)
-        "test_data/RVT_1_pfam.hmm",        // amino, GA/TC/NC + ACC/DESC
-        "test_data/Pkinase_pfam.hmm",      // larger amino Pfam model
+        "hmmer/tutorial/fn3.hmm",     // amino, MAP
+        "hmmer/tutorial/MADE1.hmm",   // nucleic (DNA)
+        "test_data/RVT_1_pfam.hmm",   // amino, GA/TC/NC + ACC/DESC
+        "test_data/Pkinase_pfam.hmm", // larger amino Pfam model
     ];
     for m in models {
         let path = format!("{}/{}", project_root(), m);
@@ -393,7 +393,10 @@ fn hmmconvert_hmmer2_output_matches_c() {
         .args(["-2", &multi])
         .output()
         .unwrap();
-    assert_eq!(rust.stdout, c.stdout, "multi-model hmmconvert -2 differs from C");
+    assert_eq!(
+        rust.stdout, c.stdout,
+        "multi-model hmmconvert -2 differs from C"
+    );
     let _ = std::fs::remove_file(&multi);
 }
 
@@ -455,8 +458,33 @@ fn hmmsearch_tblout_has_c_style_header_options_and_footer() {
     assert!(tbl.contains("# Pipeline mode:   SEARCH\n"));
     assert!(tbl.contains("# Query file:      hmmer/tutorial/fn3.hmm\n"));
     assert!(tbl.contains("# Target file:     hmmer/tutorial/7LESS_DROME\n"));
-    assert!(tbl.contains("# Option settings: hmmer search --noali --tblout "));
+    assert!(tbl.contains("# Option settings: hmmsearch --noali --tblout "));
     assert!(tbl.ends_with("# [ok]\n"));
+}
+
+#[test]
+fn hmmsearch_noali_still_computes_domain_accuracy_values() {
+    let output = Command::new(hmmer())
+        .args([
+            "search",
+            "--noali",
+            "hmmer/testsuite/20aa.hmm",
+            "hmmer/testsuite/20aa-alitest.fa",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("   1 !   72.1   0.1   4.3e-24   4.3e-24       1      20 []       1      20 []       1      20 [] 0.99"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(" 0.00\n"), "{stdout}");
 }
 
 #[test]
@@ -920,15 +948,18 @@ fn hmmsearch_domtblout_preserves_negative_domain_bias_like_c() {
     // These are the values C HMMER 3.4 emits on this fixture (verified against
     // `hmmer/src/hmmsearch`); they are genuinely negative, not clamped to 0.0.
     assert!(
-        neg.iter().any(|(t, b)| t.contains("ZF69B_HUMAN") && b == "-1.3"),
+        neg.iter()
+            .any(|(t, b)| t.contains("ZF69B_HUMAN") && b == "-1.3"),
         "expected ZF69B_HUMAN dom-bias -1.3, got {neg:?}"
     );
     assert!(
-        neg.iter().any(|(t, b)| t.contains("DYN1_HUMAN") && b == "-2.6"),
+        neg.iter()
+            .any(|(t, b)| t.contains("DYN1_HUMAN") && b == "-2.6"),
         "expected DYN1_HUMAN dom-bias -2.6, got {neg:?}"
     );
     assert!(
-        neg.iter().any(|(t, b)| t.contains("CACO1_HUMAN") && b == "-3.0"),
+        neg.iter()
+            .any(|(t, b)| t.contains("CACO1_HUMAN") && b == "-3.0"),
         "expected CACO1_HUMAN dom-bias -3.0, got {neg:?}"
     );
 
@@ -1441,7 +1472,10 @@ fn phmmer_writes_alignment_output_file() {
     assert!(msa.starts_with("# STOCKHOLM 1.0\n"));
     assert!(msa.contains("#=GF ID test1\n"), "{msa}");
     assert!(msa.contains("#=GF AU phmmer (HMMER 3.4)\n"), "{msa}");
-    assert!(msa.contains("#=GS test1/1-20 DE [subseq from] test1"), "{msa}");
+    assert!(
+        msa.contains("#=GS test1/1-20 DE [subseq from] test1"),
+        "{msa}"
+    );
     assert!(msa.lines().any(|l| l.starts_with("#=GC RF")), "{msa}");
     assert!(msa.trim_end().ends_with("//"));
 }
@@ -1955,8 +1989,9 @@ fn hmmscan_tblout_has_scan_footer_and_pfamtblout_has_search_footer() {
     // whitespace (esl_sqio_ascii.c strips only the 5-char "DE   " prefix +
     // trailing whitespace) and esl_sq_AppendDesc joins with a single space.
     // C therefore emits the wide inter-field spacing, not a single space.
-    assert!(stdout
-        .contains("Description: RecName: Full=Protein sevenless;          EC=2.7.10.1;\n"));
+    assert!(
+        stdout.contains("Description: RecName: Full=Protein sevenless;          EC=2.7.10.1;\n")
+    );
     assert!(stdout.contains("Internal pipeline statistics summary:\n"));
     assert!(stdout.contains("Domain annotation for each model:\n"));
     assert!(stdout.contains(">> fn3  Fibronectin type III domain\n"));
@@ -2472,6 +2507,50 @@ fn nhmmscan_tblout_uses_model_length_and_dfamtblout_has_no_footer_like_c() {
     let dfam = std::fs::read_to_string(dfamtblout).unwrap();
     assert!(!dfam.contains("# Program:         nhmmscan\n"));
     assert!(!dfam.ends_with("# [ok]\n"));
+}
+
+#[test]
+fn nhmmscan_no_reported_hits_uses_c_style_no_hit_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmmdb = dir.path().join("made1.hmm");
+    std::fs::copy("hmmer/tutorial/MADE1.hmm", &hmmdb).unwrap();
+    let press = Command::new(hmmer())
+        .args(["press", "-f", hmmdb.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        press.status.success(),
+        "{}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+
+    let output = Command::new(hmmer())
+        .args([
+            "nhmmscan",
+            "--noali",
+            "-T",
+            "9999",
+            hmmdb.to_str().unwrap(),
+            "hmmer/tutorial/dna_target.fa",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[No hits detected that satisfy reporting thresholds]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Annotation for each hit :\n\n   [No targets detected that satisfy reporting thresholds]"
+        ),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -3162,7 +3241,7 @@ fn nhmmscan_default_cpu_is_serial_and_unreported() {
 }
 
 #[test]
-fn nhmmscan_z_override_is_reported_and_scales_tblout_evalues() {
+fn nhmmscan_z_override_is_reported_without_scaling_longtarget_evalues() {
     let dir = tempfile::tempdir().unwrap();
     let hmmdb = dir.path().join("made1.hmm");
     std::fs::copy("hmmer/tutorial/MADE1.hmm", &hmmdb).unwrap();
@@ -3202,13 +3281,14 @@ fn nhmmscan_z_override_is_reported_and_scales_tblout_evalues() {
 
     let tbl = std::fs::read_to_string(tblout).unwrap();
     assert!(tbl.contains("MADE1                DF0000629.2 humanchr1_frag"));
-    assert!(tbl.contains("    1.2e-08   38.8   7.4"));
-    assert!(tbl.contains("      80    -     1.2e-05   29.2   6.0"));
-    assert!(!tbl.contains("      80    +         1.4    6.3   7.0"));
+    assert!(tbl.contains("    9.6e-11   38.8   7.4"));
+    assert!(tbl.contains("      80    -       1e-07   29.2   6.0"));
+    assert!(tbl.contains("      80    +         1.4    6.3   7.0"));
+    assert!(!tbl.contains("    1.2e-08   38.8   7.4"));
 }
 
 #[test]
-fn nhmmscan_fractional_z_override_scales_evalues_without_clamping() {
+fn nhmmscan_fractional_z_override_is_reported_without_scaling_longtarget_evalues() {
     let dir = tempfile::tempdir().unwrap();
     let hmmdb = dir.path().join("made1.hmm");
     std::fs::copy("hmmer/tutorial/MADE1.hmm", &hmmdb).unwrap();
@@ -3244,10 +3324,10 @@ fn nhmmscan_fractional_z_override_scales_evalues_without_clamping() {
     assert!(stdout.contains("# sequence search space set to:    0\n"));
 
     let tbl = std::fs::read_to_string(tblout).unwrap();
-    assert!(tbl.contains("    4.8e-11   38.8   7.4"));
-    assert!(tbl.contains("      80    -       5e-08   29.2   6.0"));
-    assert!(tbl.contains("      80    +         0.7    6.3   7.0"));
-    assert!(!tbl.contains("    9.6e-11   38.8   7.4"));
+    assert!(tbl.contains("    9.6e-11   38.8   7.4"));
+    assert!(tbl.contains("      80    -       1e-07   29.2   6.0"));
+    assert!(tbl.contains("      80    +         1.4    6.3   7.0"));
+    assert!(!tbl.contains("    4.8e-11   38.8   7.4"));
 }
 
 #[test]
@@ -7049,7 +7129,10 @@ fn hmmfetch_failed_fetch_leaves_empty_output_file() {
         .output()
         .unwrap();
     assert!(!o.status.success());
-    assert!(out.exists(), "-o output file must exist after a failed fetch");
+    assert!(
+        out.exists(),
+        "-o output file must exist after a failed fetch"
+    );
     assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
 
     // -O <key>: the file named after the key exists and is empty.
@@ -7061,7 +7144,10 @@ fn hmmfetch_failed_fetch_leaves_empty_output_file() {
         .unwrap();
     assert!(!big_o.status.success());
     let keyed = workdir.path().join("NOSUCH");
-    assert!(keyed.exists(), "-O output file must exist after a failed fetch");
+    assert!(
+        keyed.exists(),
+        "-O output file must exist after a failed fetch"
+    );
     assert_eq!(std::fs::metadata(&keyed).unwrap().len(), 0);
 }
 
@@ -8526,7 +8612,11 @@ fn alimask_appendmask_masked_msa_byte_identical_to_c() {
         ])
         .output()
         .unwrap();
-    assert!(c0.status.success(), "{}", String::from_utf8_lossy(&c0.stderr));
+    assert!(
+        c0.status.success(),
+        "{}",
+        String::from_utf8_lossy(&c0.stderr)
+    );
     let withmm_s = withmm.to_str().unwrap();
     assert_alimask_masked_byte_identical(&["--appendmask", "--alirange", "9-12"], withmm_s);
 }
@@ -9108,7 +9198,11 @@ fn alimask_summary_header_seed_wid_wgiven_match_c() {
         args.push(sto.to_str().unwrap());
         args.push(post.to_str().unwrap());
         let out = Command::new(hmmer()).args(&args).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap()
     };
 
@@ -9117,7 +9211,10 @@ fn alimask_summary_header_seed_wid_wgiven_match_c() {
     assert!(!s.contains("# random number seed"), "{s}");
     // F5: --seed 0 prints both the arbitrary line and "set to: 0".
     let s = run_summary(&["--alirange", "5-10", "--seed", "0"]);
-    assert!(s.contains("# random number seed:               one-time arbitrary\n"), "{s}");
+    assert!(
+        s.contains("# random number seed:               one-time arbitrary\n"),
+        "{s}"
+    );
     assert!(s.contains("# random number seed set to:        0\n"), "{s}");
     // F5: --seed 7 prints the single resolved line.
     let s = run_summary(&["--alirange", "5-10", "--seed", "7"]);
@@ -9130,11 +9227,17 @@ fn alimask_summary_header_seed_wid_wgiven_match_c() {
 
     // F7: bare --wblosum prints no BLOSUM cutoff line.
     let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum"]);
-    assert!(s.contains("# relative weighting scheme:        BLOSUM filter\n"), "{s}");
+    assert!(
+        s.contains("# relative weighting scheme:        BLOSUM filter\n"),
+        "{s}"
+    );
     assert!(!s.contains("# frac id cutoff for BLOSUM wgts:"), "{s}");
     // F7: --wblosum --wid 0.5 (non-default) prints the cutoff line.
     let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum", "--wid", "0.5"]);
-    assert!(s.contains("# frac id cutoff for BLOSUM wgts:   0.500000\n"), "{s}");
+    assert!(
+        s.contains("# frac id cutoff for BLOSUM wgts:   0.500000\n"),
+        "{s}"
+    );
     // F7: --wblosum --wid 0.62 (explicit default) prints no cutoff line (IsUsed=FALSE).
     let s = run_summary(&["--modelrange", "1-3", "--dna", "--wblosum", "--wid", "0.62"]);
     assert!(!s.contains("# frac id cutoff for BLOSUM wgts:"), "{s}");
@@ -13094,6 +13197,47 @@ fn hmmscan_empty_desc_has_no_dash_and_footer_strips_wrapper() {
     assert!(
         !footer.contains("hmmer hmmscan"),
         "footer must not keep the hmmer wrapper token: {footer}"
+    );
+}
+
+#[test]
+fn hmmscan_no_reported_models_uses_c_style_no_hit_and_no_target_sentinels() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmmdb = dir.path().join("globins4.hmm");
+    std::fs::copy("hmmer/tutorial/globins4.hmm", &hmmdb).unwrap();
+    let press = Command::new(hmmer())
+        .args(["press", "-f", hmmdb.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        press.status.success(),
+        "{}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+    let output = Command::new(hmmer())
+        .args([
+            "scan",
+            "--noali",
+            "-T",
+            "9999",
+            hmmdb.to_str().unwrap(),
+            "hmmer/tutorial/HBB_HUMAN",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[No hits detected that satisfy reporting thresholds]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Domain annotation for each model:\n\n   [No targets detected that satisfy reporting thresholds]"),
+        "{stdout}"
     );
 }
 

@@ -1,4 +1,9 @@
 //! AVX2-optimized Viterbi filter (16x int16 vectors).
+#![allow(
+    clippy::absurd_extreme_comparisons,
+    clippy::missing_safety_doc,
+    clippy::needless_range_loop
+)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -266,8 +271,7 @@ pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -
                         break;
                     }
                     dmx!(q) = _mm256_max_epi16(dcv, dmx!(q));
-                    let tdd =
-                        _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
+                    let tdd = _mm256_loadu_si256(om.twv[dd_offset + q].as_ptr() as *const __m256i);
                     dcv = _mm256_adds_epi16(dmx!(q), tdd);
                 }
                 if broke {
@@ -347,9 +351,7 @@ mod tests {
             return;
         }
         unsafe {
-            let v = _mm256_set_epi16(
-                15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-            );
+            let v = _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
             let shifted = cross_lane_shift_epi16(v);
             let mut out = [0i16; 16];
             _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, shifted);

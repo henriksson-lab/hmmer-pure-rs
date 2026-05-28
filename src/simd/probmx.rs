@@ -1,8 +1,10 @@
 //! Probability-space DP matrix for SIMD Forward/Backward results.
 //! Stores per-position special states (E/N/J/B/C) and cumulative log-scale.
 //! Used for domain decoding without needing full per-M-state DP rows.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 use crate::dp::gmx::*;
+use crate::simd::oprofile::nqf;
 use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
 
 /// Special state indices in xmx array.
@@ -32,9 +34,29 @@ fn aligned_striped_storage(len: usize) -> (Vec<f32>, usize) {
     if len == 0 {
         return (Vec::new(), 0);
     }
-    let v = vec![0.0; len + 4];
+    let storage_len = len
+        .checked_add(4)
+        .expect("ProbMx striped storage length overflow");
+    let v = vec![0.0; storage_len];
     let offset = aligned_f32_offset(&v);
     (v, offset)
+}
+
+fn checked_probmx_shape(m: usize, l: usize) -> (usize, usize, usize, usize, usize) {
+    let rows = l.checked_add(1).expect("ProbMx row count overflow");
+    let nodes = m.checked_add(1).expect("ProbMx node count overflow");
+    let row_width = nodes
+        .checked_mul(DP_CELLS_PER_K)
+        .expect("ProbMx row width overflow");
+    let q = nqf(m);
+    let striped_row_width = q
+        .checked_mul(DP_CELLS_PER_K)
+        .and_then(|v| v.checked_mul(4))
+        .expect("ProbMx striped row width overflow");
+    let striped_cells = rows
+        .checked_mul(striped_row_width)
+        .expect("ProbMx striped matrix size overflow");
+    (rows, row_width, q, striped_row_width, striped_cells)
 }
 
 /// Probability-space DP matrix for SIMD Forward/Backward.
@@ -68,12 +90,16 @@ impl ProbMx {
     /// Counterpart of `p7_omx_Create(allocM, 0, L)` in C — used by `*Parser()`
     /// kernels that only keep special-state scores.
     pub fn new(l: usize) -> Self {
+        let rows = l.checked_add(1).expect("ProbMx row count overflow");
+        let xcells = rows
+            .checked_mul(NXCELLS)
+            .expect("ProbMx special-state matrix size overflow");
         ProbMx {
             m: 0,
             l,
-            xmx: vec![0.0; (l + 1) * NXCELLS],
-            scale: vec![0.0; l + 1],
-            row_scale: vec![1.0; l + 1],
+            xmx: vec![0.0; xcells],
+            scale: vec![0.0; rows],
+            row_scale: vec![1.0; rows],
             dp: Vec::new(),
             striped_dp: Vec::new(),
             striped_dp_offset: 0,
@@ -89,16 +115,17 @@ impl ProbMx {
     /// Counterpart of `p7_omx_Create(M, L, L)` — sized for posterior decoding,
     /// optimal accuracy, or null2 work.
     pub fn new_full(m: usize, l: usize) -> Self {
-        let row_width = (m + 1) * DP_CELLS_PER_K;
-        let q = m.div_ceil(4);
-        let striped_row_width = q * DP_CELLS_PER_K * 4;
-        let (striped_dp, striped_dp_offset) = aligned_striped_storage((l + 1) * striped_row_width);
+        let (rows, row_width, q, striped_row_width, striped_cells) = checked_probmx_shape(m, l);
+        let xcells = rows
+            .checked_mul(NXCELLS)
+            .expect("ProbMx special-state matrix size overflow");
+        let (striped_dp, striped_dp_offset) = aligned_striped_storage(striped_cells);
         ProbMx {
             m,
             l,
-            xmx: vec![0.0; (l + 1) * NXCELLS],
-            scale: vec![0.0; l + 1],
-            row_scale: vec![1.0; l + 1],
+            xmx: vec![0.0; xcells],
+            scale: vec![0.0; rows],
+            row_scale: vec![1.0; rows],
             dp: Vec::new(),
             striped_dp,
             striped_dp_offset,
@@ -113,6 +140,10 @@ impl ProbMx {
     /// Reuse this matrix as parser-only storage (specials + scales, no DP rows).
     /// Analogue of `p7_omx_Reuse` + a parser-shape `p7_omx_GrowTo` in C.
     pub fn resize_parser(&mut self, l: usize) {
+        let rows = l.checked_add(1).expect("ProbMx row count overflow");
+        let xcells = rows
+            .checked_mul(NXCELLS)
+            .expect("ProbMx special-state matrix size overflow");
         self.m = 0;
         self.l = l;
         self.row_width = 0;
@@ -121,9 +152,9 @@ impl ProbMx {
         self.has_dp = false;
         self.has_own_scales = false;
 
-        self.xmx.resize((l + 1) * NXCELLS, 0.0);
-        self.scale.resize(l + 1, 0.0);
-        self.row_scale.resize(l + 1, 1.0);
+        self.xmx.resize(xcells, 0.0);
+        self.scale.resize(rows, 0.0);
+        self.row_scale.resize(rows, 1.0);
         self.dp.clear();
         self.striped_dp.clear();
         self.striped_dp_offset = 0;
@@ -134,9 +165,10 @@ impl ProbMx {
     /// Backward paths overwrite every active DP row; the same-size reuse
     /// fast-path avoids a full memset but always zeros the row-0 invariant.
     pub fn resize_full(&mut self, m: usize, l: usize) {
-        let row_width = (m + 1) * DP_CELLS_PER_K;
-        let q = m.div_ceil(4);
-        let striped_row_width = q * DP_CELLS_PER_K * 4;
+        let (rows, row_width, q, striped_row_width, striped_cells) = checked_probmx_shape(m, l);
+        let xcells = rows
+            .checked_mul(NXCELLS)
+            .expect("ProbMx special-state matrix size overflow");
 
         self.m = m;
         self.l = l;
@@ -146,11 +178,13 @@ impl ProbMx {
         self.has_dp = true;
         self.has_own_scales = false;
 
-        self.xmx.resize((l + 1) * NXCELLS, 0.0);
-        self.scale.resize(l + 1, 0.0);
-        self.row_scale.resize(l + 1, 1.0);
+        self.xmx.resize(xcells, 0.0);
+        self.scale.resize(rows, 0.0);
+        self.row_scale.resize(rows, 1.0);
         self.dp.clear();
-        let needed = (l + 1) * striped_row_width + 4;
+        let needed = striped_cells
+            .checked_add(4)
+            .expect("ProbMx striped storage length overflow");
         // Hot Forward/Backward paths overwrite every active DP row. Avoid the
         // full matrix memset on same-size reuse, but preserve Forward's
         // all-zero row-0 invariant below. Newly grown capacity is still
@@ -311,7 +345,8 @@ impl ProbMx {
         self.striped_row_width
     }
 
-    /// Number of striped stripes `q = ceil(M/4)`.
+    /// Number of striped SIMD stripes, including HMMER's minimum two-stripe
+    /// allocation for short models.
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn q_count(&self) -> usize {
@@ -1093,7 +1128,6 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
             _mm_store_ss(&mut sum, sv);
             null2[x] = sum + xfactor;
         }
-        return;
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -1187,7 +1221,7 @@ pub fn p_null2_odds_from_gmx_reuse(
     exp_i: &mut Vec<f32>,
 ) {
     let ld = pp.l;
-    let q = m.div_ceil(4);
+    let q = nqf(m);
     let pp_w = pp.row_width();
     let pp_stride = pp_w * P7G_NSCELLS;
     let ppdp = pp.dp_mem.as_ptr();
@@ -1612,4 +1646,27 @@ fn p_null2_correction(
         }
     }
     correction
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_matrix_shape_uses_minimum_two_simd_stripes() {
+        let mx = ProbMx::new_full(1, 1);
+        assert_eq!(mx.striped_row_width(), 2 * DP_CELLS_PER_K * 4);
+        assert_eq!(mx.q_count(), 2);
+
+        let mut reused = ProbMx::new(0);
+        reused.resize_full(1, 2);
+        assert_eq!(reused.striped_row_width(), 2 * DP_CELLS_PER_K * 4);
+        assert_eq!(reused.q_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "ProbMx")]
+    fn checked_shape_rejects_size_overflow() {
+        let _ = checked_probmx_shape(usize::MAX / 2, usize::MAX / 2);
+    }
 }

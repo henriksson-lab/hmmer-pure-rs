@@ -33,8 +33,8 @@ pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     }
 
     // DP recursion
-    for i in 1..=l {
-        let xi = dsq[i] as usize;
+    for (i, &xi) in dsq.iter().enumerate().take(l + 1).skip(1) {
+        let xi = xi as usize;
 
         gx.set_mmx(i, 0, f32::NEG_INFINITY);
         gx.set_imx(i, 0, f32::NEG_INFINITY);
@@ -49,10 +49,6 @@ pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
             sc = sc.max(gx.xmx(i - 1, P7G_B) + gm.tsc(k - 1, P7P_BM));
             gx.set_mmx(i, k, sc + gm.msc(k, xi));
 
-            // E state update
-            let e = gx.xmx(i, P7G_E).max(gx.mmx(i, k) + esc);
-            gx.set_xmx(i, P7G_E, e);
-
             // Insert state
             sc = gx.mmx(i - 1, k) + gm.tsc(k, P7P_MI);
             sc = sc.max(gx.imx(i - 1, k) + gm.tsc(k, P7P_II));
@@ -62,6 +58,10 @@ pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
             let dsc = gx.mmx(i, k - 1) + gm.tsc(k - 1, P7P_MD);
             let dsc = dsc.max(gx.dmx(i, k - 1) + gm.tsc(k - 1, P7P_DD));
             gx.set_dmx(i, k, dsc);
+
+            // C p7_GViterbi local-mode recurrence: D_k -> E is not considered
+            // inside the main loop; only the final D_M state may exit below.
+            gx.set_xmx(i, P7G_E, gx.xmx(i, P7G_E).max(gx.mmx(i, k) + esc));
         }
 
         // Unrolled match state M_M

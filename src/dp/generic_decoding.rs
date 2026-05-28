@@ -1,6 +1,8 @@
 //! Generic posterior decoding from Forward+Backward matrices.
 //! Direct port of generic_decoding.c p7_GDecoding().
 
+#![allow(clippy::doc_lazy_continuation, clippy::needless_range_loop)]
+
 use crate::dp::gmx::*;
 use crate::profile::*;
 use crate::util::cmath::{c_exp_to_f32, c_expf_to_f32};

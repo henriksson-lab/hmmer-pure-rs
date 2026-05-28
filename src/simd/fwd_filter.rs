@@ -1,5 +1,6 @@
 //! SSE-optimized Forward parser (float precision, probability space).
 //! Direct port of impl_sse/fwdback.c forward_engine() in parser mode.
+#![allow(clippy::let_and_return, clippy::needless_borrow)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

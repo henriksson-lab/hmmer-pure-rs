@@ -58,7 +58,7 @@ where
             eprintln!("Error: --index takes only <hmmfile>");
             std::process::exit(1);
         }
-        if args.hmmfile == PathBuf::from("-") {
+        if args.hmmfile == std::path::Path::new("-") {
             eprintln!("Can't use - with --index, can't index <stdin>.");
             std::process::exit(1);
         }
@@ -71,22 +71,21 @@ where
         // 0-byte stub, and fail. (Detected by re-using the uniform-alphabet
         // whole-file reader purely as a validator.)
         if !ssi::path_with_appended_suffix(&args.hmmfile, ".ssi").exists() {
-            if let Err(e) = hmmfile::read_hmm_file_auto(&args.hmmfile) {
-                if let hmmer_pure_rs::errors::HmmerError::Format(ref msg) = e {
-                    if msg.contains("mixed alphabets") {
-                        // Match C: create the empty .ssi stub esl_newssi_Open
-                        // would have left behind, then fail.
-                        let ssi_path =
-                            ssi::path_with_appended_suffix(&args.hmmfile, ".ssi");
-                        let _ = std::fs::File::create(&ssi_path);
-                        print!("Working...    ");
-                        let _ = std::io::stdout().flush();
-                        eprintln!(
-                            "\nError: HMM file {} contains different alphabets",
-                            args.hmmfile.display()
-                        );
-                        std::process::exit(1);
-                    }
+            if let Err(hmmer_pure_rs::errors::HmmerError::Format(ref msg)) =
+                hmmfile::read_hmm_file_auto(&args.hmmfile)
+            {
+                if msg.contains("mixed alphabets") {
+                    // Match C: create the empty .ssi stub esl_newssi_Open
+                    // would have left behind, then fail.
+                    let ssi_path = ssi::path_with_appended_suffix(&args.hmmfile, ".ssi");
+                    let _ = std::fs::File::create(&ssi_path);
+                    print!("Working...    ");
+                    let _ = std::io::stdout().flush();
+                    eprintln!(
+                        "\nError: HMM file {} contains different alphabets",
+                        args.hmmfile.display()
+                    );
+                    std::process::exit(1);
                 }
             }
         }
@@ -113,7 +112,7 @@ where
             eprintln!("Usage: hmmfetch -f <hmmfile> <keyfile>");
             std::process::exit(1);
         };
-        if args.hmmfile == PathBuf::from("-") && keyfile == "-" {
+        if args.hmmfile == std::path::Path::new("-") && keyfile == "-" {
             eprintln!("Either <hmmfile> or <keyfile> can be - but not both.");
             std::process::exit(1);
         }
@@ -121,7 +120,7 @@ where
         // before parsing the keyfile — matching C main() ordering.
         precreate_output(output_target(&args, None).as_ref());
         let keys = read_keys(keyfile);
-        if args.hmmfile != PathBuf::from("-") {
+        if args.hmmfile != std::path::Path::new("-") {
             match ssi::read_hmm_ssi(&args.hmmfile) {
                 Ok(Some(index)) => {
                     let mut out = open_output(args.output.as_ref());
@@ -172,7 +171,7 @@ where
     } else if let Some(ref key) = args.key {
         // Open the output file up front (F5: 0-byte file left on failure).
         precreate_output(output_target(&args, Some(key)).as_ref());
-        if args.hmmfile == PathBuf::from("-") {
+        if args.hmmfile == std::path::Path::new("-") {
             let hmms = read_hmms_maybe_stdin(&args.hmmfile).unwrap_or_else(|e| {
                 eprintln!("Error reading HMM file: {}", e);
                 std::process::exit(1);
