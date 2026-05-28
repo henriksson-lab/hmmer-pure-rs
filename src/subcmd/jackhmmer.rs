@@ -861,10 +861,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let mut final_z: Option<f64> = None;
         let mut final_domz: Option<f64> = None;
         let mut final_model_len: Option<usize> = None;
-        let mut final_iteration: Option<usize> = None;
+        // MSA of included hits from the previous round. Built once at the
+        // bottom of each iteration (matching C jackhmmer.c:683) and reused at
+        // the top of the next iteration to rebuild the HMM, by `--chkali` at
+        // the bottom of the current iteration, and (after the loop) by `-A`.
+        // C builds the same `msa` once per round (jackhmmer.c:683-691, 723).
+        let mut final_msa: Option<Msa> = None;
 
         for iteration in 1..=args.max_iterations {
-            final_iteration = Some(iteration);
             // Build HMM for this iteration
             let hmm = if iteration == 1 {
                 // First iteration: single-sequence HMM (phmmer-style)
@@ -885,28 +889,29 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     std::process::exit(1);
                 })
             } else {
-                let prev_hmm = prev_hmm
-                    .as_ref()
-                    .expect("jackhmmer rebuild requested without previous-round HMM");
-                let prev_hits = final_hits
-                    .as_ref()
-                    .expect("jackhmmer rebuild requested without previous-round hits");
-                let msa = hmmer_pure_rs::tophits::included_alignment(
-                    prev_hits,
-                    &abc,
-                    prev_hmm.m,
-                    Some((&query_sq, &query_tr)),
-                    &format!("{}-i{}", query_sq.name, iteration - 1),
-                );
+                // C jackhmmer.c:683 builds the round's MSA once at end of
+                // iteration; the same `msa` object is then handed to
+                // `p7_Builder` at the top of the next round (line 605) and
+                // freed at line 620. Mirror that: the MSA built at end of
+                // the prior iteration is stashed in `final_msa`; take it
+                // here so the rebuild consumes it and the storage is freed
+                // before the new round's pipeline allocates `all_hits`.
+                let msa = final_msa.take();
+                // Match C jackhmmer.c:595's "destroy info->th at top of round":
+                // the prior round's tophits (with all alidisplay payloads) is
+                // no longer needed once its MSA has been materialized. Drop it
+                // before the new round's all_hits accumulator and pipeline
+                // scratch start growing.
+                final_hits = None;
 
-                let Some(mut msa) = msa else {
+                let Some(msa) = msa else {
                     writeln!(out, "@@ No hits to build MSA from. Stopping.").unwrap();
                     break;
                 };
-                if !query_sq.desc.is_empty() {
-                    msa.desc = Some(query_sq.desc.clone());
-                }
-                msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+                let prev_included_count = prev_included_names.len();
+                let _ = prev_hmm
+                    .as_ref()
+                    .expect("jackhmmer rebuild requested without previous-round HMM");
                 let mut hmm = builder::build_hmm_from_msa_with_prior(
                     &msa,
                     &abc,
@@ -924,6 +929,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     calibration_config,
                     args.seed,
                 );
+                // Stash counts needed for the header banner, then drop the
+                // MSA — C does the equivalent at jackhmmer.c:620 right after
+                // the builder consumes it.
+                let msa_nseq_for_banner = msa.nseq;
+                drop(msa);
                 if !query_sq.desc.is_empty() {
                     hmm.desc = Some(query_sq.desc.clone());
                     hmm.flags |= hmmer_pure_rs::hmm::P7H_DESC;
@@ -933,9 +943,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 writeln!(
                 out,
                 "@@ Included in MSA:        {} subsequences (query + {} subseqs from {} targets)",
-                msa.nseq,
-                msa.nseq.saturating_sub(1),
-                prev_included_names.len()
+                msa_nseq_for_banner,
+                msa_nseq_for_banner.saturating_sub(1),
+                prev_included_count
             )
                 .unwrap();
                 writeln!(out, "@@ Model size:             {} positions", hmm.m).unwrap();
@@ -994,34 +1004,49 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
                     let batch_hits: Vec<(Option<Hit>, u64, u64, u64, u64)> = batch
                         .par_iter()
-                        .map(|sq| {
-                            hmmer_pure_rs::util::simd_env::init();
-                            let mut lb = local_bg.clone();
-                            let mut lgm = gm.clone();
-                            let mut lom = om.clone();
-                            let mut lpli = Pipeline::new();
-                            configure_pipeline(&mut lpli, &args);
-                            lpli.do_biasfilter = !args.nobias;
-                            lpli.do_null2 = !args.nonull2;
-                            lpli.seed = args.seed;
-                            lpli.new_model(&lgm);
+                        .map_init(
+                            || {
+                                hmmer_pure_rs::util::simd_env::init();
+                                let lb = local_bg.clone();
+                                let lgm = gm.clone();
+                                let lom = om.clone();
+                                let mut lpli = Pipeline::new();
+                                configure_pipeline(&mut lpli, &args);
+                                lpli.do_biasfilter = !args.nobias;
+                                lpli.do_null2 = !args.nonull2;
+                                lpli.seed = args.seed;
+                                lpli.new_model(&lgm);
+                                (lb, lgm, lom, lpli)
+                            },
+                            |(lb, lgm, lom, lpli), sq| {
+                                // Mirror C's `p7_pipeline_Reuse`: zero the per-target
+                                // counters before each target so the returned counts
+                                // reflect only this sequence (the outer loop sums them
+                                // into `stats`). DP scratch / profile / oprofile / bg
+                                // are reused across all of this worker's targets.
+                                lpli.n_targets = 0;
+                                lpli.n_past_msv = 0;
+                                lpli.n_past_bias = 0;
+                                lpli.n_past_vit = 0;
+                                lpli.n_past_fwd = 0;
 
-                            lb.set_length(sq.n);
+                                lb.set_length(sq.n);
 
-                            let mut lth = TopHits::new();
-                            let hit = if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
-                                lth.hits.into_iter().next()
-                            } else {
-                                None
-                            };
-                            (
-                                hit,
-                                lpli.n_past_msv,
-                                lpli.n_past_bias,
-                                lpli.n_past_vit,
-                                lpli.n_past_fwd,
-                            )
-                        })
+                                let mut lth = TopHits::new();
+                                let hit = if lpli.run(lgm, lom, lb, &hmm, sq, &mut lth) {
+                                    lth.hits.into_iter().next()
+                                } else {
+                                    None
+                                };
+                                (
+                                    hit,
+                                    lpli.n_past_msv,
+                                    lpli.n_past_bias,
+                                    lpli.n_past_vit,
+                                    lpli.n_past_fwd,
+                                )
+                            },
+                        )
                         .collect();
                     for (hit, msv, bias, vit, fwd) in batch_hits {
                         stats.n_past_msv += msv;
@@ -1111,21 +1136,33 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             final_model_len = Some(hmm.m);
             prev_hmm = Some(hmm.clone());
 
-            if let Some(prefix) = &args.chkali {
-                if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
-                    final_hits.as_ref().unwrap(),
-                    &abc,
-                    hmm.m,
-                    Some((&query_sq, &query_tr)),
-                    &format!("{}-i{}", query_sq.name, iteration),
-                ) {
-                    if !query_sq.desc.is_empty() {
-                        msa.desc = Some(query_sq.desc.clone());
-                    }
-                    msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
-                    write_msa_checkpoint(prefix, iteration, &msa);
+            // Build the round MSA ONCE (matching C jackhmmer.c:683's single
+            // `p7_tophits_Alignment` call per round). The same object is then
+            // reused by `--chkali` below, by the next iteration's HMM build
+            // (taken via `final_msa.take()` at the top of the loop), and by
+            // `-A` after the loop ends. The previous round's MSA was either
+            // consumed by this round's rebuild or dropped at the top of this
+            // iteration, so the stash holds at most one MSA at a time.
+            let msa = hmmer_pure_rs::tophits::included_alignment(
+                final_hits.as_ref().unwrap(),
+                &abc,
+                hmm.m,
+                Some((&query_sq, &query_tr)),
+                &format!("{}-i{}", query_sq.name, iteration),
+            )
+            .map(|mut msa| {
+                if !query_sq.desc.is_empty() {
+                    msa.desc = Some(query_sq.desc.clone());
                 }
+                msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
+                msa
+            });
+
+            if let (Some(prefix), Some(ref msa)) = (&args.chkali, &msa) {
+                write_msa_checkpoint(prefix, iteration, msa);
             }
+
+            final_msa = msa;
 
             // Check convergence
             let n_new = new_included_names
@@ -1195,29 +1232,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             }
         }
         if let Some(ref mut f) = ali_file {
-            if let (Some(ref th), Some(qlen), Some(iteration)) =
-                (&final_hits, final_model_len, final_iteration)
-            {
-                if let Some(mut msa) = hmmer_pure_rs::tophits::included_alignment(
-                    th,
-                    &abc,
-                    qlen,
-                    Some((&query_sq, &query_tr)),
-                    &format!("{}-i{}", query_sq.name, iteration),
-                ) {
-                    if !query_sq.desc.is_empty() {
-                        msa.desc = Some(query_sq.desc.clone());
-                    }
-                    msa.author = Some("jackhmmer (HMMER 3.4)".to_string());
-                    write_stockholm_msa(f, &msa);
-                    writeln!(
-                        out,
-                        "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
-                        msa.nseq,
-                        args.ali_outfile.as_ref().unwrap().display()
-                    )
-                    .unwrap();
-                }
+            // Reuse the MSA already built at the end of the final iteration
+            // (matching C jackhmmer.c:723's reuse of the single per-round
+            // `msa`). When no rounds ran or no hits were found, `final_msa`
+            // is None and no `-A` block is emitted.
+            if let Some(ref msa) = final_msa {
+                write_stockholm_msa(f, msa);
+                writeln!(
+                    out,
+                    "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
+                    msa.nseq,
+                    args.ali_outfile.as_ref().unwrap().display()
+                )
+                .unwrap();
             }
             f.flush().unwrap();
         }

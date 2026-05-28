@@ -42,6 +42,30 @@ profile/bg/logsum/calibrate, fm_index, dsqdata, and tophits were all audited and
 **Cleanup:** deleted ~20 stale standalone per-subcommand binaries under `target/release/` (only
 `hmmer` is a build target); they had misled four audit agents into phantom score/domain divergences.
 
+## phmmer / jackhmmer RSS audit + fixes - 2026-05-28
+
+Audit of `reports/audit-20260528-rss/` found per-target cloning patterns matching the hmmalign
+issue (Pipeline+Profile+OProfile+bg cloned PER TARGET inside `par_iter().map(...)`), where
+hmmsearch already uses the C-faithful `par_iter().map_init(...)` pattern (clone once per worker,
+reuse across that worker's targets). Plus an upfront load-all-sequences pattern in phmmer.
+
+- **phmmer (`src/subcmd/phmmer.rs`)**: ported the `map_init` per-worker reuse and the
+  `TARGET_BATCH_SIZE=4096` batched streaming from hmmsearch. Result: **RSS 51.9 MB → 28.4 MB**
+  (-45%) and SPEED *improved* from 2.05s → 1.28s (faster than C's 3.67s). Output byte-identical
+  to C across stdout/tblout/domtblout. All tests green.
+- **jackhmmer (`src/subcmd/jackhmmer.rs`)**: J1 same `map_init` refactor; J2 drop prior-round
+  `final_hits` at top of next iteration (mirrors C `jackhmmer.c:595`); J3 build per-round MSA
+  exactly once. Result: speed 5.00s → 4.10s (-18%), output byte-identical to C across `-N 1`
+  and `-N 2` incl. all chkali/chkhmm goldens, scalability slope improved (+26→+20 MB/thread).
+  **CPU=1 RSS regressed 37.1 → 48.7 MB on the bench under default glibc malloc** (an allocator
+  arena-retention artifact: with `MALLOC_TRIM_THRESHOLD_=131072` RSS drops to 27 MB, close to
+  C's 21 MB — the actual working set is smaller, the allocator just doesn't trim). The fix is
+  structurally C-faithful (per-thread reuse like hmmsearch); the bench number is misleading.
+- **hmmscan**: REVERTED. The attempted streaming pressed-DB read + Pipeline reuse caused a 3×
+  wall-time regression (70s → 204s) for only ~2.4 MB RSS gain — net loss. The audit's F2
+  (Pipeline reuse) and F3 (rfv_a/tfv_a dedup) remain genuine wins but need a more careful
+  design (the streaming reader's per-call Vec allocs negate the savings). Deferred.
+
 ## hmmalign memory/speed fix - 2026-05-28
 
 A speed+RSS benchmark vs C flagged hmmalign as the one outlier: **199 MB RSS (28× C)** and

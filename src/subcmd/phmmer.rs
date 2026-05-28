@@ -17,6 +17,11 @@ use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::{Hit, TopHits};
 
+/// Number of target sequences read into memory per batch in the multi-threaded
+/// search loop. Mirrors `hmmsearch::TARGET_BATCH_SIZE` so phmmer's peak resident
+/// set is bounded by the batch rather than the entire target database.
+const TARGET_BATCH_SIZE: usize = 4096;
+
 #[derive(Parser)]
 #[command(
     name = "phmmer",
@@ -691,9 +696,23 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         });
 
-        // Read target sequences
-        let mut sequences = Vec::new();
-        let mut total_residues: u64 = 0; // used for statistics
+        // Stream target sequences through the pipeline in batches (mirrors
+        // hmmsearch). With `--cpu <= 1` we use a single in-place `Sequence`
+        // reader; with `--cpu > 1` we read up to `TARGET_BATCH_SIZE` records,
+        // process them in parallel via `par_iter().map_init(...)` (so each
+        // rayon worker reuses its `(bg, gm, om, pli)` state), drain the
+        // results into the merged TopHits/stats, and refill — bounding peak
+        // memory to one batch rather than the whole DB.
+        let mut th = TopHits::new();
+        let mut stats = PipelineStats::default();
+        let mut total_residues: u64 = 0;
+        let mut n_targets: u64 = 0;
+        let wants_alignment_file = args.ali_outfile.is_some();
+        let do_alignment = !args.noali
+            || args.domtblout.is_some()
+            || args.pfamtblout.is_some()
+            || wants_alignment_file;
+        let do_alignment_display = !args.noali || wants_alignment_file;
         {
             let mut sqf = open_sequence_file(&args.seqdb, &abc, args.tformat.as_deref())
                 .unwrap_or_else(|e| {
@@ -715,47 +734,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 });
                 restrict_started = true;
             }
-            let mut sq = Sequence::new();
             let mut restrict_seen = 0usize;
-            while sqf.read(&mut sq).unwrap_or_else(|e| {
-                eprintln!("Error reading target database: {}", e);
-                std::process::exit(1);
-            }) {
-                if !restrict_started {
-                    if args
-                        .restrictdb_stkey
-                        .as_deref()
-                        .is_some_and(|key| sq.name == key)
-                    {
-                        restrict_started = true;
-                    } else {
-                        sq.reuse();
-                        continue;
-                    }
-                }
-                if args
-                    .restrictdb_n
-                    .is_some_and(|limit| restrict_seen >= limit)
-                {
-                    break;
-                }
-                restrict_seen += 1;
-                total_residues += sq.n as u64;
-                sequences.push(sq.clone());
-                sq.reuse();
-            }
-        }
-        if sequences.is_empty() {
-            eprintln!("Error: no sequences found in {}", args.seqdb.display());
-            std::process::exit(1);
-        }
+            let mut restrict_done = false;
 
-        // Search in parallel
-        use rayon::prelude::*;
-        let scored: Vec<(Option<Hit>, u64, u64, u64, u64)> = sequences
-            .par_iter()
-            .map(|sq| {
-                hmmer_pure_rs::util::simd_env::init();
+            if args.cpu <= 1 {
+                // Single-threaded: one alive `Sequence`, reused per target.
+                // The pipeline + per-thread profiles are also constructed once
+                // and reused across every target via `Pipeline::run`'s in-place
+                // grow-to-fit scratches.
                 let mut lb = local_bg.clone();
                 let mut lgm = gm.clone();
                 let mut lom = om.clone();
@@ -766,47 +752,200 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 lpli.do_max = args.max;
                 lpli.do_biasfilter = !args.nobias;
                 lpli.do_null2 = !args.nonull2;
-                let wants_alignment_file = args.ali_outfile.is_some();
-                lpli.do_alignment = !args.noali
-                    || args.domtblout.is_some()
-                    || args.pfamtblout.is_some()
-                    || wants_alignment_file;
-                lpli.do_alignment_display = !args.noali || wants_alignment_file;
+                lpli.do_alignment = do_alignment;
+                lpli.do_alignment_display = do_alignment_display;
                 lpli.seed = args.seed;
                 lpli.new_model(&lgm);
                 configure_thresholds(&mut lpli, &args);
 
-                lb.set_length(sq.n);
+                let mut sq = Sequence::new();
+                while sqf.read(&mut sq).unwrap_or_else(|e| {
+                    eprintln!("Error reading target database: {}", e);
+                    std::process::exit(1);
+                }) {
+                    if !restrict_started {
+                        if args
+                            .restrictdb_stkey
+                            .as_deref()
+                            .is_some_and(|key| sq.name == key)
+                        {
+                            restrict_started = true;
+                        } else {
+                            sq.reuse();
+                            continue;
+                        }
+                    }
+                    if args
+                        .restrictdb_n
+                        .is_some_and(|limit| restrict_seen >= limit)
+                    {
+                        break;
+                    }
+                    restrict_seen += 1;
+                    total_residues += sq.n as u64;
+                    n_targets += 1;
 
-                let mut lth = TopHits::new();
-                let hit = if lpli.run(&mut lgm, &mut lom, &lb, &hmm, sq, &mut lth) {
-                    lth.hits.into_iter().next()
-                } else {
-                    None
-                };
-                (
-                    hit,
-                    lpli.n_past_msv,
-                    lpli.n_past_bias,
-                    lpli.n_past_vit,
-                    lpli.n_past_fwd,
-                )
-            })
-            .collect();
+                    // Reset per-target pipeline counters; the scratch matrices
+                    // inside `lpli` are kept and grown as needed.
+                    lpli.n_targets = 0;
+                    lpli.n_past_msv = 0;
+                    lpli.n_past_bias = 0;
+                    lpli.n_past_vit = 0;
+                    lpli.n_past_fwd = 0;
+                    lb.set_length(sq.n);
 
-        let mut th = TopHits::new();
-        let mut stats = PipelineStats::default();
-        th.hits = scored
-            .into_iter()
-            .filter_map(|(hit, msv, bias, vit, fwd)| {
-                stats.n_past_msv += msv;
-                stats.n_past_bias += bias;
-                stats.n_past_vit += vit;
-                stats.n_past_fwd += fwd;
-                hit
-            })
-            .collect();
-        let z = args.z_value.unwrap_or(sequences.len() as f64);
+                    let mut lth = TopHits::new();
+                    if lpli.run(&mut lgm, &mut lom, &lb, &hmm, &sq, &mut lth) {
+                        if let Some(hit) = lth.hits.into_iter().next() {
+                            th.hits.push(hit);
+                        }
+                    }
+                    stats.n_past_msv += lpli.n_past_msv;
+                    stats.n_past_bias += lpli.n_past_bias;
+                    stats.n_past_vit += lpli.n_past_vit;
+                    stats.n_past_fwd += lpli.n_past_fwd;
+                    sq.reuse();
+                }
+            } else {
+                // Multi-threaded: batched streaming + `par_iter().map_init(...)`.
+                // Per-thread `(bg, gm, om, pli)` state is constructed once per
+                // worker (in the init closure) and reused across every target
+                // that worker processes — within a batch and across batches
+                // for the same query.
+                use rayon::prelude::*;
+                use std::sync::Arc;
+                let shared_gm = Arc::new(gm.clone());
+                let shared_om = Arc::new(om.clone());
+                let shared_bg = Arc::new(local_bg.clone());
+
+                let f1 = args.f1;
+                let f2 = args.f2;
+                let f3 = args.f3;
+                let do_max = args.max;
+                let do_biasfilter = !args.nobias;
+                let do_null2 = !args.nonull2;
+                let seed = args.seed;
+                let cli_args = &args;
+
+                let mut sq = Sequence::new();
+                let mut batch: Vec<Sequence> = Vec::with_capacity(TARGET_BATCH_SIZE);
+
+                loop {
+                    while batch.len() < TARGET_BATCH_SIZE {
+                        match sqf.read(&mut sq) {
+                            Ok(true) => {
+                                if !restrict_started {
+                                    if args
+                                        .restrictdb_stkey
+                                        .as_deref()
+                                        .is_some_and(|key| sq.name == key)
+                                    {
+                                        restrict_started = true;
+                                    } else {
+                                        sq.reuse();
+                                        continue;
+                                    }
+                                }
+                                if args
+                                    .restrictdb_n
+                                    .is_some_and(|limit| restrict_seen >= limit)
+                                {
+                                    restrict_done = true;
+                                    break;
+                                }
+                                restrict_seen += 1;
+                                total_residues += sq.n as u64;
+                                n_targets += 1;
+                                batch.push(sq.clone());
+                                sq.reuse();
+                            }
+                            Ok(false) => break,
+                            Err(e) => {
+                                eprintln!("Error reading target database: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+
+                    if batch.is_empty() {
+                        break;
+                    }
+
+                    let results: Vec<(Option<Hit>, u64, u64, u64, u64)> = batch
+                        .par_iter()
+                        .map_init(
+                            || {
+                                hmmer_pure_rs::util::simd_env::init();
+                                let local_bg = (*shared_bg).clone();
+                                let local_gm = (*shared_gm).clone();
+                                let local_om = (*shared_om).clone();
+                                let mut local_pli = Pipeline::new();
+                                local_pli.f1 = f1;
+                                local_pli.f2 = f2;
+                                local_pli.f3 = f3;
+                                local_pli.do_max = do_max;
+                                local_pli.do_biasfilter = do_biasfilter;
+                                local_pli.do_null2 = do_null2;
+                                local_pli.do_alignment = do_alignment;
+                                local_pli.do_alignment_display = do_alignment_display;
+                                local_pli.seed = seed;
+                                local_pli.new_model(&local_gm);
+                                configure_thresholds(&mut local_pli, cli_args);
+                                (local_bg, local_gm, local_om, local_pli)
+                            },
+                            |(local_bg, local_gm, local_om, local_pli), sq| {
+                                // Reset per-target pipeline counters; the
+                                // scratch matrices inside `local_pli` are
+                                // kept and grown as needed.
+                                local_pli.n_targets = 0;
+                                local_pli.n_past_msv = 0;
+                                local_pli.n_past_bias = 0;
+                                local_pli.n_past_vit = 0;
+                                local_pli.n_past_fwd = 0;
+                                local_bg.set_length(sq.n);
+
+                                let mut local_th = TopHits::new();
+                                let hit = if local_pli.run(
+                                    local_gm, local_om, local_bg, &hmm, sq, &mut local_th,
+                                ) {
+                                    local_th.hits.into_iter().next()
+                                } else {
+                                    None
+                                };
+                                (
+                                    hit,
+                                    local_pli.n_past_msv,
+                                    local_pli.n_past_bias,
+                                    local_pli.n_past_vit,
+                                    local_pli.n_past_fwd,
+                                )
+                            },
+                        )
+                        .collect();
+
+                    for (hit, msv, bias, vit, fwd) in results {
+                        stats.n_past_msv += msv;
+                        stats.n_past_bias += bias;
+                        stats.n_past_vit += vit;
+                        stats.n_past_fwd += fwd;
+                        if let Some(h) = hit {
+                            th.hits.push(h);
+                        }
+                    }
+
+                    batch.clear();
+                    if restrict_done {
+                        break;
+                    }
+                }
+            }
+        }
+        if n_targets == 0 {
+            eprintln!("Error: no sequences found in {}", args.seqdb.display());
+            std::process::exit(1);
+        }
+
+        let z = args.z_value.unwrap_or(n_targets as f64);
         th.sort_by_sortkey();
         {
             let mut tmp_pli = Pipeline::new();
@@ -838,7 +977,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         write_pipeline_stats(
             &mut out,
             hmm.m,
-            sequences.len() as u64,
+            n_targets,
             total_residues,
             th.nreported as u64,
             z,

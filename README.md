@@ -71,38 +71,66 @@ See `REAL_WORLD_FIXTURES.md` for dataset sources and fixture layout. Small
 checked-in fixtures remain useful for parity tests and smoke tests, but they
 are not representative performance evidence.
 
-### Fresh Local Real-World Run
+### Fresh Local Benchmark Run
 
 These numbers are from one local run on one dirty worktree. Treat them as
-current evidence for this checkout and machine only; rerun
-`scripts/benchmark_real_world.sh` before relying on them elsewhere.
+current evidence for this checkout and machine only; rerun the benchmark
+harnesses before relying on them elsewhere.
 
-- Artifact directory: `reports/benchmarks/20260526T-speed-rss-bitwise-realdata-after-hmmscan-fix`
-- Command: `THREADS=1 ROUNDS=1 ALLOW_MISMATCH=1 SKIP_BUILD=1 OUT_DIR=reports/benchmarks/20260526T-speed-rss-bitwise-realdata-after-hmmscan-fix scripts/benchmark_real_world.sh`
+- Date: 2026-05-28
+- Search artifacts: `reports/benchmarks/20260528T090834Z/`
+- Utility artifacts: `reports/benchmarks/all-subtools-20260528T091518Z/`
 - Rust: `target/release/hmmer`, `hmmer-pure-rs 0.7.2`
 - C: bundled `hmmer/src`, HMMER 3.4
 - Host: `Linux beagle 6.8.0-58-generic`, `x86_64`
-- Rust commit: `1ea72254f33d85f947874194cfb996c78621c9ae`
-- Worktree status hash: `f3b1f3fd66b79a635a4d39f24cc3e77c3847eae3bf4938c9c473c61420f9125d`
+- Rust commit: `cb47c3b68225ec67143152ea13a78c69aa96d270`
+- Rounds: 3 per implementation
+- Threads: `--cpu 1` where supported
 
-Speedup is `C wall / Rust wall`; RSS ratio is `Rust max RSS / C max RSS`.
+Speedup is `C wall / Rust wall`, so values above `1.0x` mean Rust was faster.
+RSS ratio is `Rust max RSS / C max RSS`, so values below `1.0x` mean Rust used
+less memory.
 
-| Case | Target | Rows Checked | Agreement | Rust Wall | C Wall | Speedup | Rust RSS | C RSS | RSS Ratio |
-|------|--------|--------------|-----------|----------:|-------:|--------:|---------:|------:|----------:|
-| `hmmsearch_human_pkinase` | human proteome, 20,659 seqs / 11,456,702 residues | `484` tblout / `526` domtblout | normalized full outputs byte-identical | `4.45s` | `6.08s` | `1.37x` | `13.9 MB` | `15.2 MB` | `0.91x` |
-| `hmmsearch_sprot_pkinase` | Swiss-Prot, 574,627 seqs / 208,482,574 residues | `4543` tblout / `4898` domtblout | normalized full outputs byte-identical | `20.88s` | `64.32s` | `3.08x` | `22.2 MB` | `38.9 MB` | `0.57x` |
-| `phmmer_human_cyh3` | human proteome, 20,659 seqs / 11,456,702 residues | `86` tblout | normalized full outputs byte-identical | `1.87s` | `3.18s` | `1.70x` | `35.9 MB` | `12.8 MB` | `2.80x` |
-| `jackhmmer_human_cyh3_N2` | human proteome, 20,659 seqs / 11,456,702 residues | `162` tblout / `235` domtblout | normalized full outputs byte-identical | `4.73s` | `8.47s` | `1.79x` | `17.9 MB` | `14.6 MB` | `1.22x` |
-| `hmmscan_gecco_cluster1` | GECCO cluster proteins, 6 seqs / 2,739 residues | `24` tblout / `35` domtblout | normalized full outputs byte-identical | `0.17s` | `0.29s` | `1.71x` | `22.5 MB` | `9.8 MB` | `2.28x` |
-| `nhmmer_3box_dna_target` | tutorial DNA target, 1 seq / 330,000 residues | `2` tblout | normalized full outputs byte-identical | `0.04s` | `0.06s` | `1.50x` | `5.9 MB` | `5.6 MB` | `1.06x` |
-| `nhmmscan_3box_dna_target` | tutorial DNA target, 1 seq / 330,000 residues | `2` tblout | normalized full outputs byte-identical | `0.03s` | `0.06s` | `2.00x` | `5.6 MB` | `4.1 MB` | `1.38x` |
+#### Search Tools
 
-The `jackhmmer` case uses the uncompressed human proteome because bundled C
-`jackhmmer -N 2` requires a rewindable target database. Raw Rust and C output
-files are not byte-identical because HMMER writes volatile metadata such as
-the executable path, output paths, and date into headers/footers; after
-normalizing those fields, every compared `stdout`, `tblout`, and `domtblout`
-file is byte-identical.
+| Case | Rust wall s | C wall s | Speedup | Rust RSS KB | C RSS KB | RSS ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `hmmsearch_human_pkinase` | 1.637 | 6.003 | 3.67x | 14,641 | 15,387 | 0.95x |
+| `hmmsearch_sprot_pkinase` | 17.350 | 61.467 | 3.54x | 22,820 | 39,227 | 0.58x |
+| `phmmer_human_cyh3` | 1.050 | 3.437 | 3.27x | 18,520 | 12,587 | 1.47x |
+| `jackhmmer_human_cyh3_N2` | 3.290 | 7.760 | 2.36x | 20,401 | 14,988 | 1.36x |
+| `hmmscan_gecco_cluster1` | 0.143 | 0.313 | 2.19x | 22,955 | 9,863 | 2.33x |
+| `nhmmer_3box_dna_target` | 0.040 | 0.053 | 1.33x | 6,080 | 5,867 | 1.04x |
+| `nhmmscan_3box_dna_target` | 0.027 | 0.053 | 2.00x | 5,973 | 4,160 | 1.44x |
+
+The search benchmark used realistic protein data where available: human
+proteome for `hmmsearch`, `phmmer`, and `jackhmmer`, and Swiss-Prot for the
+large `hmmsearch` case. All search cases had matching `tblout`/`domtblout`
+row counts. The `jackhmmer` case uses the uncompressed human proteome because
+bundled C `jackhmmer -N 2` requires a rewindable target database.
+
+#### Utility Tools
+
+| Case | Tool | Rust wall s | C wall s | Speedup | Rust RSS KB | C RSS KB | RSS ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `hmmbuild_20aa` | `hmmbuild` | 0.033 | 0.053 | 1.60x | 5,013 | 3,200 | 1.57x |
+| `hmmalign_20aa` | `hmmalign` | 0.000 | 0.000 | n/a | 4,480 | 2,987 | 1.50x |
+| `hmmstat_gecco_cluster1` | `hmmstat` | 0.037 | 0.060 | 1.64x | 5,120 | 2,560 | 2.00x |
+| `hmmconvert_gecco_cluster1` | `hmmconvert` | 0.123 | 0.103 | 0.84x | 4,907 | 2,560 | 1.92x |
+| `hmmlogo_pkinase` | `hmmlogo` | 0.007 | 0.010 | 1.50x | 4,053 | 2,560 | 1.58x |
+| `hmmemit_pkinase_N100` | `hmmemit` | 0.017 | 0.020 | 1.20x | 4,160 | 2,773 | 1.50x |
+| `hmmsim_pkinase_N10000` | `hmmsim` | 7.363 | 25.113 | 3.41x | 5,361 | 3,520 | 1.52x |
+| `alimask_20aa_modelrange` | `alimask` | 0.000 | 0.000 | n/a | 3,840 | 2,560 | 1.50x |
+| `makehmmerdb_dna_target` | `makehmmerdb` | 0.083 | 0.200 | 2.40x | 7,415 | 80,640 | 0.09x |
+| `hmmpress_gecco_cluster1` | `hmmpress` | 0.033 | 0.067 | 2.00x | 5,760 | 2,880 | 2.00x |
+| `hmmfetch_gecco_cluster1_valid` | `hmmfetch` | 0.020 | 0.020 | 1.00x | 4,160 | 2,560 | 1.62x |
+
+`hmmalign` and `alimask` completed below `/usr/bin/time` wall-time resolution,
+so only RSS is meaningful for those cases. The documented large DNA fixture
+was not present locally, so nucleotide and `makehmmerdb` workloads used the
+available in-tree DNA target instead of a large external dataset. `hmmpgmd`
+was not benchmarked because it is a daemon rather than a finite single-run
+command.
 
 ## Features
 
