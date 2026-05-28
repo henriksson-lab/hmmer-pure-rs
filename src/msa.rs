@@ -959,15 +959,11 @@ pub fn read_stockholm_from_reader<R: Read>(reader: BufReader<R>) -> HmmerResult<
 /// Read all Stockholm-format alignments from an open reader, preserving body
 /// lines for writers that need to round-trip annotations.
 pub fn read_stockholm_preserved_from_reader<R: Read>(
-    reader: BufReader<R>,
+    mut reader: BufReader<R>,
 ) -> HmmerResult<Vec<StockholmMsa>> {
     let mut msas = Vec::new();
-    let mut lines: Vec<String> = Vec::new();
-
-    for line in reader.lines() {
-        let line = line.map_err(HmmerError::Io)?;
-        lines.push(line);
-    }
+    let text = read_text_msa_to_string(&mut reader)?;
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
 
     let mut i = 0;
     while i < lines.len() {

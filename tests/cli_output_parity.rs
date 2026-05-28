@@ -906,6 +906,7 @@ fn hmmsearch_parallel_workers_honor_sequence_reporting_thresholds() {
 /// rather than flooring at 0.0. Guards against re-introducing a `.max(0.0)` clamp on the
 /// bias fed to the domtblout writer.
 #[test]
+#[ignore = "requires local human_swissprot_2k fixture and bundled C hmmsearch"]
 fn hmmsearch_domtblout_preserves_negative_domain_bias_like_c() {
     let hmm = format!("{}/test_data/RVT_1_pfam.hmm", project_root());
     let db = format!("{}/test_data/human_swissprot_2k.fasta", project_root());
@@ -4607,7 +4608,7 @@ fn nhmmer_tblout_footer_uses_normalized_option_settings() {
     );
     let text = std::fs::read_to_string(tbl).unwrap();
     assert!(
-        text.contains("# Option settings: hmmer nhmmer --dna --tblout "),
+        text.contains("# Option settings: nhmmer --dna --tblout "),
         "{text}"
     );
     assert!(!text.contains("# Option settings: target/"), "{text}");

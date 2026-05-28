@@ -1765,6 +1765,7 @@ fn score_domain_envelope(
         );
     }
     let null2_is_done = null2_is_done || !do_null2;
+    let do_longtarget_length = long_target;
     let do_longtarget_reparam = long_target && do_null2;
 
     // Forward score for the envelope.
@@ -1814,15 +1815,20 @@ fn score_domain_envelope(
             // reparameterized against envelope-local residue frequency.
             // Matches C p7_domaindef.c:2108 `ReconfigRestLength(om, j-i+1)` and
             // p7_domaindef.c:2115 `reparameterize_model(bg, om, sq, i, j-i+1, ...)`.
-            let (env_om, pre_trim_local_bg_f_inner) = if do_longtarget_reparam {
-                let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
-                let local_bg = long_target_local_bg(dsq, ienv, jenv, bg, &abc_lt, seq_len);
-                let fwd_emissions = env_om.get_fwd_emissions(bg, &abc_lt);
+            let (env_om, pre_trim_local_bg_f_inner) = if do_longtarget_length {
                 let mut clone = env_om.clone();
                 clone.reconfig_length(env_len as i32);
-                clone.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                let local_bg_f = if do_longtarget_reparam {
+                    let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
+                    let local_bg = long_target_local_bg(dsq, ienv, jenv, bg, &abc_lt, seq_len);
+                    let fwd_emissions = env_om.get_fwd_emissions(bg, &abc_lt);
+                    clone.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                    Some(local_bg.f.clone())
+                } else {
+                    None
+                };
                 long_target_om_storage = clone;
-                (&long_target_om_storage, Some(local_bg.f.clone()))
+                (&long_target_om_storage, local_bg_f)
             } else {
                 (env_om, None)
             };
@@ -2219,7 +2225,7 @@ fn score_domain_envelope(
     // domcorrection (nats) = default - envsc.
     #[cfg(target_arch = "x86_64")]
     let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) =
-        if do_longtarget_reparam {
+        if do_longtarget_length {
             if let Some(base_om) = env_om {
                 const MAX_ENV_EXTRA: i64 = 20;
                 let mut new_ienv = ienv;
@@ -2240,15 +2246,20 @@ fn score_domain_envelope(
                         new_env_len = new_jenv - new_ienv + 1;
                         new_dsq_offset = new_ienv - 1;
 
-                        // Reparameterize env_om for the trimmed region and re-run
+                        // Reconfigure env_om for the trimmed region and re-run
                         // Forward (mirrors p7_domaindef.c:2168-2176).
-                        let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
-                        let local_bg =
-                            long_target_local_bg(dsq, new_ienv, new_jenv, bg, &abc_lt, seq_len);
-                        let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
                         let mut trim_om = base_om.clone();
                         trim_om.reconfig_length(new_env_len as i32);
-                        trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                        let trim_local_bg_f = if do_longtarget_reparam {
+                            let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
+                            let local_bg =
+                                long_target_local_bg(dsq, new_ienv, new_jenv, bg, &abc_lt, seq_len);
+                            let fwd_emissions = base_om.get_fwd_emissions(bg, &abc_lt);
+                            trim_om.update_fwd_emission_scores(&local_bg, &fwd_emissions, &abc_lt);
+                            Some(local_bg.f)
+                        } else {
+                            None
+                        };
 
                         // Match C p7_domaindef.c:2180-2200: after trim Forward, also
                         // re-run Backward, Decoding, OA, OATrace and REBUILD the
@@ -2362,7 +2373,7 @@ fn score_domain_envelope(
                                     hmm,
                                     &abc,
                                     Some(&scratch.trim_pp_gmx),
-                                    Some(&local_bg.f),
+                                    trim_local_bg_f.as_deref(),
                                     Some(&trim_emission_odds),
                                 )
                             {
@@ -2395,37 +2406,41 @@ fn score_domain_envelope(
                     }
                 }
 
-                // Default-model Forward on the (possibly trimmed) region.
-                let mut default_om = base_om.clone();
-                default_om.reconfig_length(new_env_len as i32);
-                let default_fwd_sc = {
-                    let scratch = &mut *simd_scratch;
-                    scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
-                    let canonical_default =
-                        is_canonical_window(dsq, new_dsq_offset, new_env_len, default_om.abc_k);
-                    unsafe {
-                        if canonical_default {
-                            crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
-                                dsq,
-                                new_dsq_offset,
-                                new_env_len,
-                                &default_om,
-                                &mut scratch.trim_fwd_pmx,
-                            )
-                        } else {
-                            crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
-                                dsq,
-                                new_dsq_offset,
-                                new_env_len,
-                                &default_om,
-                                &mut scratch.trim_fwd_pmx,
-                                &mut scratch.fwd_dp,
-                            )
+                let (envsc_min, lt_domcorrection, default_fwd_sc) = if do_longtarget_reparam {
+                    // Default-model Forward on the (possibly trimmed) region.
+                    let mut default_om = base_om.clone();
+                    default_om.reconfig_length(new_env_len as i32);
+                    let default_fwd_sc = {
+                        let scratch = &mut *simd_scratch;
+                        scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                        let canonical_default =
+                            is_canonical_window(dsq, new_dsq_offset, new_env_len, default_om.abc_k);
+                        unsafe {
+                            if canonical_default {
+                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                    dsq,
+                                    new_dsq_offset,
+                                    new_env_len,
+                                    &default_om,
+                                    &mut scratch.trim_fwd_pmx,
+                                )
+                            } else {
+                                crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
+                                    dsq,
+                                    new_dsq_offset,
+                                    new_env_len,
+                                    &default_om,
+                                    &mut scratch.trim_fwd_pmx,
+                                    &mut scratch.fwd_dp,
+                                )
+                            }
                         }
-                    }
+                    };
+                    let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
+                    (envsc_min, default_fwd_sc - envsc_min, default_fwd_sc)
+                } else {
+                    (env_fwd_sc_current, 0.0, env_fwd_sc_current)
                 };
-                let envsc_min = env_fwd_sc_current.min(default_fwd_sc);
-                let lt_domcorrection = default_fwd_sc - envsc_min;
                 if std::env::var("NHMMER_DEBUG_IN").is_ok() && seq_len > 1000 {
                     eprintln!(
                     "  env=[{}..{}] env_len={} iali={} jali={} reparam={:.3} default={:.3} envsc_min={:.3}",

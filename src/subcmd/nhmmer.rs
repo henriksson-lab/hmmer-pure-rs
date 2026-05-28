@@ -1041,6 +1041,7 @@ fn write_stockholm_msa<W: std::io::Write>(out: &mut W, msa: &hmmer_pure_rs::msa:
 /// long_target text report plus optional `--tblout`.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
+    let table_cmdline = normalize_nhmmer_table_cmdline(&cmdline);
     let matrix_was_requested = args
         .iter()
         .any(|arg| arg == "--mx" || arg.starts_with("--mx="));
@@ -2207,7 +2208,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &th,
                 &args.hmmfile,
                 &args.seqdb,
-                &cmdline,
+                &table_cmdline,
                 query_idx == 0,
                 query_idx + 1 == hmms.len(),
                 1.0,
@@ -2343,6 +2344,21 @@ fn command_line_has_option(cmdline: &str, option: &str) -> bool {
             || compact_short
                 .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
     })
+}
+
+fn normalize_nhmmer_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some(_wrapper), Some("nhmmer")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "nhmmer".to_string()
+            } else {
+                format!("nhmmer {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
 }
 
 fn read_hmms(

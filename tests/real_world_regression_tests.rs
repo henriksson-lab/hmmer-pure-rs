@@ -801,7 +801,7 @@ fn normalize_nhmmer_stdout(stdout: &str) -> Vec<String> {
 fn normalize_nhmmer_tblout_with_fixture(content: &str, hmm: &str, target: &str) -> Vec<String> {
     let root_prefix = format!("{}/", env!("CARGO_MANIFEST_DIR"));
     let option_line = format!(
-        "# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE {} {} ",
+        "# Option settings: nhmmer --dna --tblout /tmp/TMPFILE {} {}",
         hmm, target
     );
     content
@@ -965,6 +965,21 @@ fn test_nhmmer_3box_preserves_c_longtarget_minimum_alignment_span() {
     assert!(
         rust_rows.iter().all(|row| span(row) >= 8),
         "Rust nhmmer emitted a long-target alignment shorter than C's span floor: {rust_rows:?}"
+    );
+}
+
+#[test]
+fn test_nhmmer_nonull2_longtarget_tblout_matches_bundled_c_rows() {
+    let hmm = test_path("hmmer/tutorial/MADE1.hmm");
+    let seqdb = test_path("hmmer/tutorial/dna_target.fa");
+    let args = ["--dna", "--nonull2", "--noali"];
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer(&hmm, &seqdb, &args).1);
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout_with_args(&hmm, &seqdb, &args));
+
+    assert!(!c_rows.is_empty(), "bundled C fixture should produce rows");
+    assert_eq!(
+        rust_rows, c_rows,
+        "nhmmer --nonull2 long-target rows diverged from bundled C"
     );
 }
 

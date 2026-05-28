@@ -410,7 +410,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     }
     if args.singlemx {
         if let Some(path) = args.mxfile.as_ref() {
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
+            std::fs::File::open(path).unwrap_or_else(|e| {
                 eprintln!(
                     "Error: failed to read score matrix file {}: {e}",
                     path.display()

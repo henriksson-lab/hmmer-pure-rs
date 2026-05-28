@@ -7,7 +7,7 @@ use crate::alphabet::{Alphabet, Dsq, DSQ_IGNORED, DSQ_ILLEGAL, DSQ_SENTINEL};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::msa;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 
 const MAX_SEQUENCE_LINE_LEN: usize = 1 << 20;
 
@@ -202,12 +202,9 @@ impl<R: Read> SeqFile<R> {
         let mut allow_zero_length = false;
 
         if trimmed.starts_with("# STOCKHOLM") {
-            let mut text = first_line;
-            self.reader
-                .read_to_string(&mut text)
-                .map_err(HmmerError::Io)?;
+            let reader = Cursor::new(first_line.into_bytes()).chain(&mut self.reader);
             self.at_eof = true;
-            let msas = msa::read_stockholm_from_reader(BufReader::new(text.as_bytes()))?;
+            let msas = msa::read_stockholm_from_reader(BufReader::new(reader))?;
             for alignment in msas {
                 for idx in 0..alignment.nseq {
                     self.pending_msa_sequences

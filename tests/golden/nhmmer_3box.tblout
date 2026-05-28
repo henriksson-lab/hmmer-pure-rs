@@ -8,7 +8,7 @@ random               -          3box                 -                1      20 
 # Pipeline mode:   SEARCH
 # Query file:      hmmer/testsuite/3box.hmm
 # Target file:     hmmer/testsuite/3box-alitest.fa
-# Option settings: hmmer nhmmer --dna --tblout /tmp/TMPFILE hmmer/testsuite/3box.hmm hmmer/testsuite/3box-alitest.fa 
+# Option settings: nhmmer --dna --tblout /tmp/TMPFILE hmmer/testsuite/3box.hmm hmmer/testsuite/3box-alitest.fa
 # Current dir:     /data/henriksson/github/claude/newhmmer
 # Date:            Wed Apr 22 07:45:28 2026
 # [ok]

@@ -6,9 +6,11 @@ use crate::bg::Bg;
 use crate::calibrate::CalibrationConfig;
 use crate::hmm::*;
 use crate::util::cmath::c_exp_f64;
+use std::io::Read;
 use std::path::Path;
 
 const BUILTIN_SCOREMATRIX_SOURCE: &str = include_str!("../hmmer/easel/esl_scorematrix.c");
+const MAX_SCORE_MATRIX_FILE_BYTES: usize = 1024 * 1024;
 const BUILTIN_MATRIX_NAMES: &[&str] = &[
     "PAM30", "PAM70", "PAM120", "PAM240", "BLOSUM45", "BLOSUM50", "BLOSUM62", "BLOSUM80",
     "BLOSUM90",
@@ -179,8 +181,26 @@ impl ScoreMatrix {
     }
 
     pub fn from_file_for_alphabet(path: &Path, abc: &Alphabet) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
+        let mut file = std::fs::File::open(path)
             .map_err(|e| format!("failed to read score matrix file {}: {e}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take((MAX_SCORE_MATRIX_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read score matrix file {}: {e}", path.display()))?;
+        if bytes.len() > MAX_SCORE_MATRIX_FILE_BYTES {
+            return Err(format!(
+                "failed to read score matrix file {}: file exceeds {} bytes",
+                path.display(),
+                MAX_SCORE_MATRIX_FILE_BYTES
+            ));
+        }
+        let text = String::from_utf8(bytes).map_err(|e| {
+            format!(
+                "failed to read score matrix file {}: invalid UTF-8: {e}",
+                path.display()
+            )
+        })?;
         let scores = parse_score_matrix_file(&text, abc)
             .map_err(|e| format!("failed to parse score matrix file {}: {e}", path.display()))?;
         Ok(Self {
@@ -701,5 +721,16 @@ mod tests {
             (1..=hmm.m).any(|k| cons[k].is_ascii_lowercase()),
             "expected at least one lower-cased consensus residue"
         );
+    }
+
+    #[test]
+    fn score_matrix_reader_rejects_oversized_file_before_full_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.mx");
+        std::fs::write(&path, vec![b'A'; MAX_SCORE_MATRIX_FILE_BYTES + 1]).unwrap();
+
+        let err = ScoreMatrix::from_file_for_alphabet(&path, &Alphabet::amino()).unwrap_err();
+
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
     }
 }

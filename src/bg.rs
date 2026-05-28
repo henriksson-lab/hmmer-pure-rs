@@ -4,7 +4,10 @@
 use crate::alphabet::{Alphabet, AlphabetType, Dsq};
 use crate::errors::{HmmerError, HmmerResult};
 use crate::util::cmath::{c_log_f64, c_log_to_f32, c_logf_to_f32};
+use std::io::Read;
 use std::path::Path;
+
+const MAX_BG_FILE_BYTES: usize = 1024 * 1024;
 
 /// Default amino acid background frequencies from Swiss-Prot 50.8 (Oct 2006).
 /// Order: ACDEFGHIKLMNPQRSTVWY (Easel canonical amino acid order).
@@ -113,7 +116,7 @@ impl Bg {
     /// `p7_bg_Read()` style file.
     pub fn read_file<P: AsRef<Path>>(&mut self, abc: &Alphabet, path: P) -> HmmerResult<()> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| {
+        let mut file = std::fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HmmerError::NotFound(format!(
                     "couldn't open bg file  {} for reading",
@@ -122,6 +125,21 @@ impl Bg {
             } else {
                 HmmerError::Io(e)
             }
+        })?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take((MAX_BG_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(HmmerError::Io)?;
+        if bytes.len() > MAX_BG_FILE_BYTES {
+            return Err(HmmerError::Format(format!(
+                "bg file {} exceeds {} bytes",
+                path.display(),
+                MAX_BG_FILE_BYTES
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|e| {
+            HmmerError::Format(format!("invalid UTF-8 in bg file {}: {e}", path.display()))
         })?;
         let mut records = Vec::new();
         for (line_idx, raw_line) in text.lines().enumerate() {
@@ -443,5 +461,21 @@ mod tests {
         let expected = (100.0 * crate::util::cmath::c_log_f64(bg.p1 as f64)
             + crate::util::cmath::c_log_f64((1.0 - bg.p1) as f64)) as f32;
         assert!((sc - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bg_reader_rejects_oversized_file_before_full_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.bg");
+        std::fs::write(&path, vec![b'A'; MAX_BG_FILE_BYTES + 1]).unwrap();
+
+        let abc = Alphabet::amino();
+        let mut bg = Bg::new(&abc);
+        let err = bg.read_file(&abc, &path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err}"
+        );
     }
 }
