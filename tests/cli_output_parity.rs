@@ -6037,13 +6037,20 @@ fn hmmsim_is_deterministic_and_supports_c_scoring_option_names() {
     );
     assert_eq!(out1.stdout, out2.stdout);
     let stdout = String::from_utf8(out1.stdout).unwrap();
-    assert!(stdout.contains("# hmmsim: 3 random sequences of length 12 against fn3"));
+    assert!(!stdout.contains("# hmmsim:"));
     assert_eq!(
         stdout
             .lines()
             .filter(|line| line.split_whitespace().count() == 1)
             .count(),
-        3
+        0
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("fn3 "))
+            .count(),
+        1
     );
 }
 
@@ -6071,7 +6078,14 @@ fn hmmsim_accepts_negative_seed_like_c() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("# hmmsim: 2 random sequences of length 10 against fn3"));
+    assert!(!stdout.contains("# hmmsim:"));
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("fn3 "))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -6097,12 +6111,12 @@ fn hmmsim_supports_forward_hybrid_msv_aliases_and_output_file() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("# hmmsim: 2 random sequences of length 10 against fn3"));
+        assert!(!stdout.contains("# hmmsim:"));
         let score_rows = stdout
             .lines()
             .filter(|line| line.split_whitespace().count() == 1)
             .count();
-        assert_eq!(score_rows, 2);
+        assert_eq!(score_rows, 0);
     }
 
     let fast = Command::new(hmmer())
@@ -6127,7 +6141,6 @@ fn hmmsim_supports_forward_hybrid_msv_aliases_and_output_file() {
         String::from_utf8_lossy(&fast.stderr)
     );
     let stdout = String::from_utf8(fast.stdout).unwrap();
-    assert!(stdout.contains("# hmmsim: 2 random sequences of length 10 against fn3"));
     assert_eq!(
         stdout
             .lines()
@@ -6161,7 +6174,14 @@ fn hmmsim_supports_forward_hybrid_msv_aliases_and_output_file() {
     );
     assert!(output.stdout.is_empty());
     let written = std::fs::read_to_string(out).unwrap();
-    assert!(written.contains("# hmmsim: 2 random sequences of length 10 against fn3"));
+    assert!(!written.contains("# hmmsim:"));
+    assert_eq!(
+        written
+            .lines()
+            .filter(|line| line.starts_with("fn3 "))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -6212,7 +6232,7 @@ fn hmmsim_writes_statistical_output_artifacts() {
             .lines()
             .filter(|line| line.split_whitespace().count() == 1)
             .count(),
-        6
+        0
     );
 
     let ptext = std::fs::read_to_string(&pfile).unwrap();
@@ -6526,7 +6546,7 @@ fn hmmsim_viterbi_msv_and_hybrid_print_c_shaped_gumbel_summary_row() {
                 .lines()
                 .filter(|line| line.split_whitespace().count() == 1)
                 .count(),
-            30,
+            0,
             "{mode}: {stdout}"
         );
         let rows: Vec<_> = stdout

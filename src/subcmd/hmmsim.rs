@@ -32,10 +32,11 @@ use hmmer_pure_rs::profile::{
     self, Profile, P7P_C, P7P_J, P7P_LOOP, P7P_MOVE, P7P_N, P7_GLOCAL, P7_LOCAL, P7_UNIGLOCAL,
     P7_UNILOCAL,
 };
+use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::stats::{exponential, gumbel};
 use hmmer_pure_rs::trace::{g_trace, State};
 use hmmer_pure_rs::util::cmath::{c_log_f64, c_logf_to_f32, c_sqrt_f64, ESL_CONST_LOG2};
-use hmmer_pure_rs::util::random::MersenneTwister;
+use hmmer_pure_rs::util::random::Mt19937;
 
 #[derive(Parser)]
 #[command(name = "hmmsim", about = "Score random sequences against an HMM")]
@@ -302,8 +303,8 @@ pub fn run(args: Vec<String>) -> ExitCode {
 
     // Match C esl_randomness_Create(uint32_t): a negative int seed is
     // reinterpreted as its wrapping u32; only an exact 0 picks an arbitrary
-    // clock seed (handled inside MersenneTwister::new via resolve_seed).
-    let mut rng = MersenneTwister::new(args.seed as u32);
+    // clock seed (handled inside Mt19937::new via resolve_seed).
+    let mut rng = Mt19937::new(args.seed as u32);
 
     let score_mode = if args.forward {
         ScoreMode::Forward
@@ -323,14 +324,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
         })),
         None => Box::new(std::io::stdout()),
     };
-
-    writeln!(
-        out,
-        "# hmmsim: {} random sequences of length {} against {}",
-        args.n, args.l, hmm.name
-    )
-    .unwrap();
-    writeln!(out, "# seed={}", args.seed).unwrap();
 
     let mut scores = Vec::with_capacity(args.n);
     let mut alilens = Vec::with_capacity(args.n);
@@ -370,7 +363,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
         };
         scores.push(bits as f64);
         alilens.push(alilen);
-        writeln!(out, "{}", fmt_fixed4(bits as f64)).unwrap();
+        if args.verbose {
+            writeln!(out, "{:.3}", bits as f64).unwrap();
+        }
     }
 
     let histogram = ScoreHistogram::from_scores(&scores, -50.0, 50.0, 0.2);
@@ -430,20 +425,22 @@ fn calibrated_model_params(
     abc: &Alphabet,
     bg: &Bg,
     args: &Args,
-    rng: &mut MersenneTwister,
+    rng: &mut Mt19937,
 ) -> ModelParams {
     let lambda = p7_lambda(hmm, bg) as f64;
     match score_mode {
         ScoreMode::Msv => ModelParams {
-            mu: calibrate_msv_mu(hmm, abc, bg, args.em_l, args.em_n, lambda, rng),
+            mu: calibrate_msv_mu(hmm, abc, bg, args.l, args.em_l, args.em_n, lambda, rng),
             lambda,
         },
         ScoreMode::Viterbi => ModelParams {
-            mu: calibrate_viterbi_mu(hmm, abc, bg, args.ev_l, args.ev_n, lambda, rng),
+            mu: calibrate_viterbi_mu(hmm, abc, bg, args.l, args.ev_l, args.ev_n, lambda, rng),
             lambda,
         },
         ScoreMode::Forward => ModelParams {
-            mu: calibrate_forward_tau(hmm, abc, bg, args.ef_l, args.ef_n, args.eft, lambda, rng),
+            mu: calibrate_forward_tau(
+                hmm, abc, bg, args.l, args.ef_l, args.ef_n, args.eft, lambda, rng,
+            ),
             lambda,
         },
         ScoreMode::Hybrid => ModelParams { mu: 0.0, lambda },
@@ -454,14 +451,22 @@ fn calibrate_msv_mu(
     hmm: &Hmm,
     abc: &Alphabet,
     bg: &Bg,
+    sim_l: usize,
     l: usize,
     n: usize,
     lambda: f64,
-    rng: &mut MersenneTwister,
+    rng: &mut Mt19937,
 ) -> f64 {
-    let scores = simulate_calibration_scores(hmm, abc, bg, l, n, rng, |dsq, gm, gx| {
-        g_msv(dsq, l, gm, gx, 2.0)
-    });
+    let scores = simulate_optimized_calibration_scores(
+        hmm,
+        abc,
+        bg,
+        sim_l,
+        l,
+        n,
+        rng,
+        OptimizedCalibrationMode::Msv,
+    );
     gumbel::fit_complete_loc(&scores, lambda).unwrap_or_else(|_| fallback_gumbel(&scores).0)
 }
 
@@ -469,14 +474,22 @@ fn calibrate_viterbi_mu(
     hmm: &Hmm,
     abc: &Alphabet,
     bg: &Bg,
+    sim_l: usize,
     l: usize,
     n: usize,
     lambda: f64,
-    rng: &mut MersenneTwister,
+    rng: &mut Mt19937,
 ) -> f64 {
-    let scores = simulate_calibration_scores(hmm, abc, bg, l, n, rng, |dsq, gm, gx| {
-        g_viterbi(dsq, l, gm, gx)
-    });
+    let scores = simulate_optimized_calibration_scores(
+        hmm,
+        abc,
+        bg,
+        sim_l,
+        l,
+        n,
+        rng,
+        OptimizedCalibrationMode::Viterbi,
+    );
     gumbel::fit_complete_loc(&scores, lambda).unwrap_or_else(|_| fallback_gumbel(&scores).0)
 }
 
@@ -484,15 +497,23 @@ fn calibrate_forward_tau(
     hmm: &Hmm,
     abc: &Alphabet,
     bg: &Bg,
+    sim_l: usize,
     l: usize,
     n: usize,
     tailp: f64,
     lambda: f64,
-    rng: &mut MersenneTwister,
+    rng: &mut Mt19937,
 ) -> f64 {
-    let scores = simulate_calibration_scores(hmm, abc, bg, l, n, rng, |dsq, gm, gx| {
-        g_forward(dsq, l, gm, gx)
-    });
+    let scores = simulate_optimized_calibration_scores(
+        hmm,
+        abc,
+        bg,
+        sim_l,
+        l,
+        n,
+        rng,
+        OptimizedCalibrationMode::Forward,
+    );
     let (gmu, glam) = gumbel::fit_complete(&scores).unwrap_or_else(|_| fallback_gumbel(&scores));
     let tau = gumbel::invcdf(1.0 - tailp, gmu, glam) + c_log_f64(tailp) / lambda;
     if tau.is_finite() {
@@ -502,22 +523,31 @@ fn calibrate_forward_tau(
     }
 }
 
-fn simulate_calibration_scores<F>(
+enum OptimizedCalibrationMode {
+    Msv,
+    Viterbi,
+    Forward,
+}
+
+fn simulate_optimized_calibration_scores(
     hmm: &Hmm,
     abc: &Alphabet,
     bg: &Bg,
+    sim_l: usize,
     l: usize,
     n: usize,
-    rng: &mut MersenneTwister,
-    mut score_fn: F,
-) -> Vec<f64>
-where
-    F: FnMut(&[u8], &Profile, &mut Gmx) -> f32,
-{
+    rng: &mut Mt19937,
+    mode: OptimizedCalibrationMode,
+) -> Vec<f64> {
     let mut bg = bg.clone();
-    bg.set_length(l);
+    bg.set_length(sim_l);
     let mut gm = Profile::new(hmm.m, abc);
-    profile::profile_config(hmm, &bg, &mut gm, l as i32, P7_LOCAL);
+    profile::profile_config(hmm, &bg, &mut gm, sim_l as i32, P7_LOCAL);
+    let mut om = OProfile::convert(&gm);
+    om.reconfig_length(l as i32);
+    bg.set_length(l);
+    let msv_maxsc = (255.0 - om.base_b as f32) / om.scale_b;
+    let vit_maxsc = (32767.0 - om.base_w as f32) / om.scale_w;
     let mut scores = Vec::with_capacity(n);
 
     for _ in 0..n {
@@ -528,8 +558,13 @@ where
         }
         dsq.push(hmmer_pure_rs::alphabet::DSQ_SENTINEL);
 
-        let mut gx = Gmx::new(gm.m, l);
-        let sc = score_fn(&dsq, &gm, &mut gx);
+        let sc = match mode {
+            OptimizedCalibrationMode::Msv => optimized_msv_filter_score(&dsq, l, &om, msv_maxsc),
+            OptimizedCalibrationMode::Viterbi => {
+                optimized_viterbi_filter_score(&dsq, l, &om, vit_maxsc)
+            }
+            OptimizedCalibrationMode::Forward => optimized_forward_parser_score(&dsq, l, &om),
+        };
         let null_sc = bg.null_one(l);
         let bits = (sc as f64 - null_sc as f64) / ESL_CONST_LOG2;
         if bits.is_finite() {
@@ -541,6 +576,51 @@ where
         scores.push(0.0);
     }
     scores
+}
+
+fn optimized_msv_filter_score(dsq: &[u8], l: usize, om: &OProfile, maxsc: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match unsafe { hmmer_pure_rs::simd::msv_filter::msv_filter(dsq, l, om) } {
+            hmmer_pure_rs::simd::msv_filter::MsvResult::Ok(s) => s,
+            hmmer_pure_rs::simd::msv_filter::MsvResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        match unsafe { hmmer_pure_rs::simd::neon_msv::neon_msv_filter(dsq, l, om) } {
+            hmmer_pure_rs::simd::neon_msv::NeonMsvResult::Ok(s) => s,
+            hmmer_pure_rs::simd::neon_msv::NeonMsvResult::Overflow => maxsc,
+        }
+    }
+}
+
+fn optimized_viterbi_filter_score(dsq: &[u8], l: usize, om: &OProfile, maxsc: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match unsafe { hmmer_pure_rs::simd::vit_filter::viterbi_filter(dsq, l, om) } {
+            hmmer_pure_rs::simd::vit_filter::VitResult::Ok(s) => s,
+            hmmer_pure_rs::simd::vit_filter::VitResult::Overflow => maxsc,
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        match unsafe { hmmer_pure_rs::simd::neon_vit::neon_viterbi_filter(dsq, l, om) } {
+            hmmer_pure_rs::simd::neon_vit::NeonVitResult::Ok(s) => s,
+            hmmer_pure_rs::simd::neon_vit::NeonVitResult::Overflow => maxsc,
+        }
+    }
+}
+
+fn optimized_forward_parser_score(dsq: &[u8], l: usize, om: &OProfile) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { hmmer_pure_rs::simd::fwd_filter::forward_parser(dsq, l, om) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { hmmer_pure_rs::simd::neon_fwd::neon_forward_parser(dsq, l, om) }
+    }
 }
 
 fn write_optional_outputs(
@@ -1116,7 +1196,7 @@ mod tests {
         // 0 — or a negative value mapping to 0 — would draw an arbitrary clock seed
         // and is intentionally not pinned here.)
         let mk = || {
-            let mut rng = MersenneTwister::new(42i32 as u32);
+            let mut rng = Mt19937::new(42i32 as u32);
             (0..8).map(|_| rng.next_u32()).collect::<Vec<_>>()
         };
         assert_eq!(mk(), mk());
@@ -1128,11 +1208,11 @@ mod tests {
         // nonzero, the RNG uses it directly (no clock seed), so it stays
         // deterministic and matches seeding with the wrapped u32 value.
         let from_neg = {
-            let mut rng = MersenneTwister::new((-5i32) as u32);
+            let mut rng = Mt19937::new((-5i32) as u32);
             (0..8).map(|_| rng.next_u32()).collect::<Vec<_>>()
         };
         let from_wrapped = {
-            let mut rng = MersenneTwister::new(0xFFFF_FFFBu32);
+            let mut rng = Mt19937::new(0xFFFF_FFFBu32);
             (0..8).map(|_| rng.next_u32()).collect::<Vec<_>>()
         };
         assert_eq!(from_neg, from_wrapped);

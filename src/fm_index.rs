@@ -2,6 +2,11 @@
 //! Used by nhmmer for long-target scanning.
 
 use divsufsort::sort_in_place;
+use std::fmt;
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Superblock sampling interval for the cumulative occurrence counts (C
 /// `FM_METADATA.freq_cnt_sb`; makehmmerdb default 65536).
@@ -9,6 +14,106 @@ const FREQ_CNT_SB: usize = 65536;
 /// Block sampling interval for the within-superblock occurrence counts (C
 /// `FM_METADATA.freq_cnt_b`; makehmmerdb default 256).
 const FREQ_CNT_B: usize = 256;
+const DEFAULT_SA_SAMPLE_RATE: usize = 32;
+
+pub struct MmapBytes {
+    ptr: *const u8,
+    len: usize,
+}
+
+unsafe impl Send for MmapBytes {}
+unsafe impl Sync for MmapBytes {}
+
+impl MmapBytes {
+    pub fn open(path: &Path, max_len: u64) -> Result<Arc<Self>, String> {
+        let file = File::open(path).map_err(|e| {
+            format!(
+                "failed to open FM-index target database {}: {e}",
+                path.display()
+            )
+        })?;
+        let len = file
+            .metadata()
+            .map_err(|e| {
+                format!(
+                    "failed to stat FM-index target database {}: {e}",
+                    path.display()
+                )
+            })?
+            .len();
+        if len > max_len {
+            return Err(format!(
+                "FM-index target database {} is too large for the current in-memory reader ({} bytes > {} bytes)",
+                path.display(),
+                len,
+                max_len
+            ));
+        }
+        let len = usize::try_from(len)
+            .map_err(|_| "FM-index target database size overflows usize".to_string())?;
+        if len == 0 {
+            return Ok(Arc::new(Self {
+                ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                len,
+            }));
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(format!(
+                "failed to mmap FM-index target database {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Arc::new(Self {
+            ptr: ptr.cast::<u8>(),
+            len,
+        }))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for MmapBytes {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            unsafe {
+                libc::munmap(self.ptr.cast::<libc::c_void>().cast_mut(), self.len);
+            }
+        }
+    }
+}
+
+impl fmt::Debug for MmapBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MmapBytes").field("len", &self.len).finish()
+    }
+}
+
+#[derive(Debug)]
+struct MappedSa {
+    bytes: Arc<MmapBytes>,
+    offset: usize,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct MappedBwt {
+    bytes: Arc<MmapBytes>,
+    offset: usize,
+    len: usize,
+}
 
 /// Two-level sampled rank tables over the BWT, mirroring C `FM_DATA`'s
 /// `occCnts_sb` (superblock cumulative) and `occCnts_b` (u16 within-superblock
@@ -87,6 +192,66 @@ impl OccRank {
     fn n_sym(&self) -> usize {
         self.symbols.len().max(1)
     }
+
+    fn from_makehmmerdb_dna_tables(
+        bwt_len: usize,
+        term_loc: usize,
+        freq_cnt_b: usize,
+        occ_b_codes: &[u16],
+        occ_sb_codes: &[u32],
+    ) -> Result<Self, String> {
+        if freq_cnt_b == 0 {
+            return Err("FM-index occurrence sampling frequency is zero".to_string());
+        }
+        let nb = bwt_len / freq_cnt_b + 1;
+        let nsb = bwt_len / FREQ_CNT_SB + 1;
+        if occ_b_codes.len() != nb * 4 {
+            return Err("FM-index occurrence block table has unexpected length".to_string());
+        }
+        if occ_sb_codes.len() != nsb * 4 {
+            return Err("FM-index occurrence superblock table has unexpected length".to_string());
+        }
+
+        let symbols = vec![0, b'A', b'C', b'G', b'T'];
+        let mut sym_of = vec![-1i16; 256];
+        for (idx, &sym) in symbols.iter().enumerate() {
+            sym_of[sym as usize] = idx as i16;
+        }
+
+        let ns = symbols.len();
+        let mut occ_b = vec![0u16; nb * ns];
+        let mut occ_sb = vec![0usize; nsb * ns];
+
+        for row in 0..nb {
+            let pos = (row * freq_cnt_b).min(bwt_len);
+            let sb_start = (pos / FREQ_CNT_SB) * FREQ_CNT_SB;
+            let terminal_in_block = sb_start <= term_loc && term_loc < pos;
+            occ_b[row * ns] = terminal_in_block as u16;
+            let code0 = occ_b_codes[row * 4];
+            occ_b[row * ns + 1] = code0.saturating_sub(terminal_in_block as u16);
+            occ_b[row * ns + 2] = occ_b_codes[row * 4 + 1];
+            occ_b[row * ns + 3] = occ_b_codes[row * 4 + 2];
+            occ_b[row * ns + 4] = occ_b_codes[row * 4 + 3];
+        }
+
+        for row in 0..nsb {
+            let pos = (row * FREQ_CNT_SB).min(bwt_len);
+            let terminal_in_prefix = term_loc < pos;
+            occ_sb[row * ns] = terminal_in_prefix as usize;
+            let code0 = occ_sb_codes[row * 4] as usize;
+            occ_sb[row * ns + 1] = code0.saturating_sub(terminal_in_prefix as usize);
+            occ_sb[row * ns + 2] = occ_sb_codes[row * 4 + 1] as usize;
+            occ_sb[row * ns + 3] = occ_sb_codes[row * 4 + 2] as usize;
+            occ_sb[row * ns + 4] = occ_sb_codes[row * 4 + 3] as usize;
+        }
+
+        Ok(Self {
+            symbols,
+            sym_of,
+            occ_sb,
+            occ_b,
+        })
+    }
 }
 
 /// A simple FM-index for DNA sequences. Field layout mirrors a reduced C
@@ -96,8 +261,12 @@ impl OccRank {
 pub struct FmIndex {
     /// Burrows-Wheeler transform
     pub bwt: Vec<u8>,
+    mapped_bwt: Option<MappedBwt>,
     /// Suffix array
     pub sa: Vec<i32>,
+    /// Sparse suffix-array samples as `(BWT row, text position)`.
+    sa_samples: Vec<(i32, i32)>,
+    mapped_sa: Option<MappedSa>,
     /// Count of each character in BWT prefix (C array)
     pub c: [usize; 256],
     /// Length of the indexed text
@@ -160,7 +329,10 @@ impl FmIndex {
         let occ_rank = OccRank::build(&bwt);
         FmIndex {
             bwt,
+            mapped_bwt: None,
             sa,
+            sa_samples: Vec::new(),
+            mapped_sa: None,
             c,
             n: orig_n,
             occ_rank,
@@ -169,10 +341,28 @@ impl FmIndex {
 
     /// Return the full suffix-array interval before any pattern characters are
     /// applied.
+    pub fn bwt_len(&self) -> usize {
+        self.mapped_bwt
+            .as_ref()
+            .map_or(self.bwt.len(), |mapped| mapped.len)
+    }
+
+    fn bwt_slice(&self) -> &[u8] {
+        if let Some(mapped) = &self.mapped_bwt {
+            &mapped.bytes.as_slice()[mapped.offset..mapped.offset + mapped.len]
+        } else {
+            &self.bwt
+        }
+    }
+
+    fn bwt_at(&self, pos: usize) -> Option<u8> {
+        self.bwt_slice().get(pos).copied()
+    }
+
     pub fn root_interval(&self) -> FmInterval {
         FmInterval {
             lo: 0,
-            hi: self.bwt.len(),
+            hi: self.bwt_len(),
         }
     }
 
@@ -182,7 +372,7 @@ impl FmIndex {
     /// bases and pruning empty suffix-array intervals before exploring deeper
     /// seeds.
     pub fn prepend_interval(&self, interval: FmInterval, ch: u8) -> Option<FmInterval> {
-        if ch == 0 || interval.is_empty() || interval.hi > self.bwt.len() {
+        if ch == 0 || interval.is_empty() || interval.hi > self.bwt_len() {
             return None;
         }
 
@@ -202,21 +392,277 @@ impl FmIndex {
         c: [usize; 256],
         text_len: usize,
     ) -> Result<Self, String> {
+        Self::from_parts_inner(bwt, sa, c, text_len, None)
+    }
+
+    /// Reconstruct an FM-index while retaining only sampled suffix-array rows.
+    ///
+    /// This preserves FM locate semantics and trades up to `sample_rate - 1`
+    /// LF steps per located row for substantially lower resident memory when
+    /// loading makehmmerdb container records.
+    pub fn from_parts_sampled(
+        bwt: Vec<u8>,
+        sa: Vec<i32>,
+        c: [usize; 256],
+        text_len: usize,
+    ) -> Result<Self, String> {
+        Self::from_parts_inner(bwt, sa, c, text_len, Some(DEFAULT_SA_SAMPLE_RATE))
+    }
+
+    pub fn from_mapped_parts(
+        bwt: Vec<u8>,
+        sa_len: usize,
+        mapped_bytes: Arc<MmapBytes>,
+        sa_offset: usize,
+        c: [usize; 256],
+        text_len: usize,
+    ) -> Result<Self, String> {
         let expected_len = text_len
             .checked_add(1)
             .ok_or_else(|| "FM-index text length overflows usize".to_string())?;
-        if bwt.len() != expected_len {
+        Self::validate_parts_common(&bwt, c, text_len, expected_len)?;
+        if sa_len != bwt.len() {
             return Err(format!(
-                "FM-index BWT length {} does not match text length {} plus sentinel",
-                bwt.len(),
-                text_len
+                "FM-index suffix-array length {} does not match BWT length {}",
+                sa_len,
+                bwt.len()
             ));
         }
+        let sa_bytes = sa_len
+            .checked_mul(4)
+            .ok_or_else(|| "FM-index mapped suffix-array span overflows usize".to_string())?;
+        sa_offset
+            .checked_add(sa_bytes)
+            .filter(|&end| end <= mapped_bytes.as_slice().len())
+            .ok_or_else(|| "FM-index mapped suffix-array is outside mapped file".to_string())?;
+        let occ_rank = OccRank::build(&bwt);
+        Ok(FmIndex {
+            bwt,
+            mapped_bwt: None,
+            sa: Vec::new(),
+            sa_samples: Vec::new(),
+            mapped_sa: Some(MappedSa {
+                bytes: mapped_bytes,
+                offset: sa_offset,
+                len: sa_len,
+            }),
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
+    pub fn from_mapped_file_parts(
+        mapped_bytes: Arc<MmapBytes>,
+        bwt_offset: usize,
+        bwt_len: usize,
+        sa_offset: usize,
+        sa_len: usize,
+        c: [usize; 256],
+        text_len: usize,
+    ) -> Result<Self, String> {
+        Self::from_mapped_file_parts_with_occ(
+            mapped_bytes,
+            bwt_offset,
+            bwt_len,
+            sa_offset,
+            sa_len,
+            c,
+            text_len,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_mapped_file_parts_with_makehmmerdb_occ(
+        mapped_bytes: Arc<MmapBytes>,
+        bwt_offset: usize,
+        bwt_len: usize,
+        sa_offset: usize,
+        sa_len: usize,
+        c: [usize; 256],
+        text_len: usize,
+        term_loc: usize,
+        freq_cnt_b: usize,
+        occ_b_offset: usize,
+        occ_b_count: usize,
+        occ_sb_offset: usize,
+        occ_sb_count: usize,
+    ) -> Result<Self, String> {
+        let mapped_slice = mapped_bytes.as_slice();
+        let occ_b_bytes = occ_b_count
+            .checked_mul(2)
+            .ok_or_else(|| "FM-index occurrence block table span overflows usize".to_string())?;
+        let occ_sb_bytes = occ_sb_count.checked_mul(4).ok_or_else(|| {
+            "FM-index occurrence superblock table span overflows usize".to_string()
+        })?;
+        let occ_b_slice = mapped_slice
+            .get(occ_b_offset..occ_b_offset + occ_b_bytes)
+            .ok_or_else(|| "FM-index occurrence block table is outside mapped file".to_string())?;
+        let occ_sb_slice = mapped_slice
+            .get(occ_sb_offset..occ_sb_offset + occ_sb_bytes)
+            .ok_or_else(|| {
+                "FM-index occurrence superblock table is outside mapped file".to_string()
+            })?;
+        let mut occ_b = Vec::with_capacity(occ_b_count);
+        for chunk in occ_b_slice.chunks_exact(2) {
+            occ_b.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        let mut occ_sb = Vec::with_capacity(occ_sb_count);
+        for chunk in occ_sb_slice.chunks_exact(4) {
+            occ_sb.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        let occ_rank =
+            OccRank::from_makehmmerdb_dna_tables(bwt_len, term_loc, freq_cnt_b, &occ_b, &occ_sb)?;
+        Self::from_mapped_file_parts_with_occ(
+            mapped_bytes,
+            bwt_offset,
+            bwt_len,
+            sa_offset,
+            sa_len,
+            c,
+            text_len,
+            Some(occ_rank),
+        )
+    }
+
+    fn from_mapped_file_parts_with_occ(
+        mapped_bytes: Arc<MmapBytes>,
+        bwt_offset: usize,
+        bwt_len: usize,
+        sa_offset: usize,
+        sa_len: usize,
+        c: [usize; 256],
+        text_len: usize,
+        occ_rank: Option<OccRank>,
+    ) -> Result<Self, String> {
+        let expected_len = text_len
+            .checked_add(1)
+            .ok_or_else(|| "FM-index text length overflows usize".to_string())?;
+        let mapped_slice = mapped_bytes.as_slice();
+        let bwt = mapped_slice
+            .get(bwt_offset..bwt_offset + bwt_len)
+            .ok_or_else(|| "FM-index mapped BWT is outside mapped file".to_string())?;
+        Self::validate_parts_common(bwt, c, text_len, expected_len)?;
+        if sa_len != bwt_len {
+            return Err(format!(
+                "FM-index suffix-array length {} does not match BWT length {}",
+                sa_len, bwt_len
+            ));
+        }
+        let sa_bytes = sa_len
+            .checked_mul(4)
+            .ok_or_else(|| "FM-index mapped suffix-array span overflows usize".to_string())?;
+        sa_offset
+            .checked_add(sa_bytes)
+            .filter(|&end| end <= mapped_slice.len())
+            .ok_or_else(|| "FM-index mapped suffix-array is outside mapped file".to_string())?;
+        let occ_rank = occ_rank.unwrap_or_else(|| OccRank::build(bwt));
+        Ok(FmIndex {
+            bwt: Vec::new(),
+            mapped_bwt: Some(MappedBwt {
+                bytes: Arc::clone(&mapped_bytes),
+                offset: bwt_offset,
+                len: bwt_len,
+            }),
+            sa: Vec::new(),
+            sa_samples: Vec::new(),
+            mapped_sa: Some(MappedSa {
+                bytes: mapped_bytes,
+                offset: sa_offset,
+                len: sa_len,
+            }),
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
+    fn from_parts_inner(
+        bwt: Vec<u8>,
+        sa: Vec<i32>,
+        c: [usize; 256],
+        text_len: usize,
+        sample_rate: Option<usize>,
+    ) -> Result<Self, String> {
+        let expected_len = text_len
+            .checked_add(1)
+            .ok_or_else(|| "FM-index text length overflows usize".to_string())?;
+        Self::validate_parts_common(&bwt, c, text_len, expected_len)?;
         if sa.len() != bwt.len() {
             return Err(format!(
                 "FM-index suffix-array length {} does not match BWT length {}",
                 sa.len(),
                 bwt.len()
+            ));
+        }
+        if sa
+            .iter()
+            .any(|&pos| pos < 0 || pos as usize >= expected_len)
+        {
+            return Err("FM-index suffix-array entry is outside indexed text".to_string());
+        }
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = vec![false; expected_len];
+            for &pos in &sa {
+                let pos = pos as usize;
+                if seen[pos] {
+                    return Err(format!(
+                        "FM-index suffix-array is not a permutation: duplicate position {pos}"
+                    ));
+                }
+                seen[pos] = true;
+            }
+        }
+
+        let sa_samples = if let Some(sample_rate) = sample_rate {
+            if sample_rate == 0 {
+                return Err("FM-index suffix-array sample rate is zero".to_string());
+            }
+            let mut samples = Vec::with_capacity(sa.len().div_ceil(sample_rate));
+            for (row, &pos) in sa.iter().enumerate() {
+                if (pos as usize) % sample_rate == 0 {
+                    samples.push((
+                        i32::try_from(row)
+                            .map_err(|_| "FM-index row exceeds i32 range".to_string())?,
+                        pos,
+                    ));
+                }
+            }
+            samples
+        } else {
+            Vec::new()
+        };
+        let sa = if sample_rate.is_some() {
+            Vec::new()
+        } else {
+            sa
+        };
+        let occ_rank = OccRank::build(&bwt);
+        Ok(FmIndex {
+            bwt,
+            mapped_bwt: None,
+            sa,
+            sa_samples,
+            mapped_sa: None,
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
+    fn validate_parts_common(
+        bwt: &[u8],
+        c: [usize; 256],
+        text_len: usize,
+        expected_len: usize,
+    ) -> Result<(), String> {
+        if bwt.len() != expected_len {
+            return Err(format!(
+                "FM-index BWT length {} does not match text length {} plus sentinel",
+                bwt.len(),
+                text_len
             ));
         }
         if c[0] != 0 {
@@ -226,7 +672,7 @@ impl FmIndex {
             return Err("FM-index C table is not monotonic".to_string());
         }
         let mut counts = [0usize; 256];
-        for &ch in &bwt {
+        for &ch in bwt {
             counts[ch as usize] += 1;
         }
         if counts[0] != 1 {
@@ -253,31 +699,7 @@ impl FmIndex {
                 bwt.len()
             ));
         }
-        if sa
-            .iter()
-            .any(|&pos| pos < 0 || pos as usize >= expected_len)
-        {
-            return Err("FM-index suffix-array entry is outside indexed text".to_string());
-        }
-        let mut seen = vec![false; expected_len];
-        for &pos in &sa {
-            let pos = pos as usize;
-            if seen[pos] {
-                return Err(format!(
-                    "FM-index suffix-array is not a permutation: duplicate position {pos}"
-                ));
-            }
-            seen[pos] = true;
-        }
-
-        let occ_rank = OccRank::build(&bwt);
-        Ok(FmIndex {
-            bwt,
-            sa,
-            c,
-            n: text_len,
-            occ_rank,
-        })
+        Ok(())
     }
 
     /// Count exact occurrences of `pattern` in the indexed text by BWT
@@ -288,7 +710,7 @@ impl FmIndex {
             return 0;
         }
 
-        let bwt_len = self.bwt.len();
+        let bwt_len = self.bwt_len();
         let mut lo = 0usize;
         let mut hi = bwt_len;
 
@@ -332,14 +754,51 @@ impl FmIndex {
 
     /// Locate all text positions in an already-computed suffix-array interval.
     pub fn locate_interval(&self, interval: FmInterval) -> Vec<usize> {
-        if interval.is_empty() || interval.hi > self.sa.len() {
+        if interval.is_empty() || interval.hi > self.bwt_len() {
             return Vec::new();
         }
 
         (interval.lo..interval.hi)
-            .map(|i| self.sa[i] as usize)
+            .filter_map(|i| self.suffix_position(i))
             .filter(|&pos| pos < self.n)
             .collect()
+    }
+
+    fn suffix_position(&self, row: usize) -> Option<usize> {
+        if !self.sa.is_empty() {
+            return self.sa.get(row).map(|&pos| pos as usize);
+        }
+        if let Some(mapped) = &self.mapped_sa {
+            return self.mapped_suffix_position(mapped, row);
+        }
+
+        let mut row = row;
+        let mut steps = 0usize;
+        let limit = self.bwt_len();
+        while steps <= limit {
+            let row_i32 = i32::try_from(row).ok()?;
+            if let Ok(idx) = self
+                .sa_samples
+                .binary_search_by_key(&row_i32, |&(sample_row, _)| sample_row)
+            {
+                let sampled_pos = self.sa_samples[idx].1 as usize;
+                return Some((sampled_pos + steps) % self.bwt_len());
+            }
+            let ch = self.bwt_at(row)?;
+            row = self.c[ch as usize].checked_add(self.occ(ch, row))?;
+            steps += 1;
+        }
+        None
+    }
+
+    fn mapped_suffix_position(&self, mapped: &MappedSa, row: usize) -> Option<usize> {
+        if row >= mapped.len {
+            return None;
+        }
+        let offset = mapped.offset.checked_add(row.checked_mul(4)?)?;
+        let bytes = mapped.bytes.as_slice().get(offset..offset + 4)?;
+        let pos = i32::from_le_bytes(bytes.try_into().ok()?);
+        (pos >= 0).then_some(pos as usize)
     }
 
     /// `Occ(ch, pos)`: counts `ch` in `bwt[0..pos]`, using the two-level sampled
@@ -357,8 +816,8 @@ impl FmIndex {
         let b = pos / FREQ_CNT_B;
         let mut cnt = rank.occ_sb[sb * ns + s] + rank.occ_b[b * ns + s] as usize;
         let block_start = b * FREQ_CNT_B;
-        for &x in &self.bwt[block_start..pos] {
-            if x == ch {
+        for idx in block_start..pos {
+            if self.bwt_at(idx) == Some(ch) {
                 cnt += 1;
             }
         }
@@ -382,8 +841,8 @@ impl FmIndex {
             }
         }
         let block_start = b * FREQ_CNT_B;
-        for &x in &self.bwt[block_start..pos] {
-            if x < ch {
+        for idx in block_start..pos {
+            if self.bwt_at(idx).is_some_and(|x| x < ch) {
                 cnt += 1;
             }
         }
@@ -393,7 +852,7 @@ impl FmIndex {
     /// Total occurrences of `ch` across the whole BWT (= count of `ch` in the
     /// indexed text). Used to seed a single-character interval.
     fn occ_total(&self, ch: u8) -> usize {
-        self.occ(ch, self.bwt.len())
+        self.occ(ch, self.bwt_len())
     }
 
     /// Half-open interval over the suffix array for a single character `ch`
@@ -432,8 +891,8 @@ impl FmIndex {
         if ch == 0
             || bk.is_empty()
             || fwd.is_empty()
-            || bk.hi > self.bwt.len()
-            || fwd.hi > self.bwt.len()
+            || bk.hi > self.bwt_len()
+            || fwd.hi > self.bwt_len()
         {
             return None;
         }
@@ -454,7 +913,7 @@ impl FmIndex {
         let interval_len = new_bk_hi.checked_sub(new_bk_lo)?;
         let new_fwd_lo = fwd.lo.checked_add(fwd_delta)?;
         let new_fwd_hi = new_fwd_lo.checked_add(interval_len)?;
-        if new_fwd_hi > self.bwt.len() {
+        if new_fwd_hi > self.bwt_len() {
             return None;
         }
         Some((
@@ -523,6 +982,26 @@ mod tests {
     }
 
     #[test]
+    fn sampled_fm_index_locates_like_full_suffix_array() {
+        let original = FmIndex::build(b"ACGTACGTGCAACGTACGT");
+        let sampled = FmIndex::from_parts_sampled(
+            original.bwt.clone(),
+            original.sa.clone(),
+            original.c,
+            original.n,
+        )
+        .unwrap();
+
+        for pattern in [b"ACG".as_slice(), b"TGC".as_slice(), b"CGTA".as_slice()] {
+            let mut expected = original.locate(pattern);
+            let mut got = sampled.locate(pattern);
+            expected.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(got, expected, "sampled locate mismatch for {pattern:?}");
+        }
+    }
+
+    #[test]
     fn fm_index_rejects_inconsistent_serialized_parts() {
         let original = FmIndex::build(b"ACGT");
         let err = FmIndex::from_parts(original.bwt, original.sa, original.c, 99).unwrap_err();
@@ -551,6 +1030,7 @@ mod tests {
         assert!(err.contains("exactly one sentinel"));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn fm_index_rejects_suffix_array_duplicate_positions() {
         let original = FmIndex::build(b"ACGT");
@@ -645,7 +1125,7 @@ mod tests {
         let bk = fmb.char_interval(b'A').unwrap();
         let invalid_fwd = FmInterval {
             lo: 0,
-            hi: fmb.bwt.len() + 1,
+            hi: fmb.bwt_len() + 1,
         };
 
         assert!(fmb.update_interval_forward(bk, invalid_fwd, b'C').is_none());

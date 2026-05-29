@@ -10,6 +10,7 @@
 
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Parser;
 
@@ -17,7 +18,7 @@ use hmmer_pure_rs::alphabet::{Alphabet, AlphabetType, DSQ_SENTINEL};
 use hmmer_pure_rs::bg::Bg;
 use hmmer_pure_rs::builder::{self, DEFAULT_WINDOW_BETA};
 use hmmer_pure_rs::calibrate::CalibrationConfig;
-use hmmer_pure_rs::fm_index::{FmIndex, FmInterval};
+use hmmer_pure_rs::fm_index::{FmIndex, FmInterval, MmapBytes};
 use hmmer_pure_rs::hmm::{self as p7hmm, Hmm};
 use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
@@ -3200,55 +3201,8 @@ fn read_makehmmerdb_target_database(path: &Path, abc: &Alphabet) -> Result<Nhmme
     if path == Path::new("-") {
         return Err("nhmmer --tformat fmindex does not support stdin targets yet".to_string());
     }
-    let bytes = read_makehmmerdb_database_bytes(path)?;
-    parse_makehmmerdb_target_database(&bytes, abc)
-}
-
-fn read_makehmmerdb_database_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(path).map_err(|e| {
-        format!(
-            "failed to open FM-index target database {}: {e}",
-            path.display()
-        )
-    })?;
-    let metadata = file.metadata().map_err(|e| {
-        format!(
-            "failed to stat FM-index target database {}: {e}",
-            path.display()
-        )
-    })?;
-    let len = metadata.len();
-    if len > MAKEHMMERDB_MAX_IN_MEMORY_BYTES {
-        return Err(format!(
-            "FM-index target database {} is too large for the current in-memory reader ({} bytes > {} bytes)",
-            path.display(),
-            len,
-            MAKEHMMERDB_MAX_IN_MEMORY_BYTES
-        ));
-    }
-    let capacity = u64_to_usize(len, "FM-index target database size")?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(capacity).map_err(|e| {
-        format!(
-            "failed to reserve memory for FM-index target database {}: {e}",
-            path.display()
-        )
-    })?;
-    let mut limited = file.take(MAKEHMMERDB_MAX_IN_MEMORY_BYTES + 1);
-    limited.read_to_end(&mut bytes).map_err(|e| {
-        format!(
-            "failed to read FM-index target database {}: {e}",
-            path.display()
-        )
-    })?;
-    if bytes.len() as u64 > MAKEHMMERDB_MAX_IN_MEMORY_BYTES {
-        return Err(format!(
-            "FM-index target database {} is too large for the current in-memory reader (exceeds {} bytes)",
-            path.display(),
-            MAKEHMMERDB_MAX_IN_MEMORY_BYTES
-        ));
-    }
-    Ok(bytes)
+    let mmap = MmapBytes::open(path, MAKEHMMERDB_MAX_IN_MEMORY_BYTES)?;
+    parse_makehmmerdb_target_database(mmap.as_slice(), abc, Some(Arc::clone(&mmap)))
 }
 
 #[derive(Debug)]
@@ -3263,14 +3217,10 @@ struct NhmmerFmSequenceMeta {
 fn parse_makehmmerdb_target_database(
     bytes: &[u8],
     abc: &Alphabet,
+    mapped_bytes: Option<Arc<MmapBytes>>,
 ) -> Result<NhmmerTargetDb, String> {
     let is_container = bytes.starts_with(b"HMMERDB\0");
-    let container_index_records = if is_container {
-        parse_makehmmerdb_index_extension(bytes)?
-    } else {
-        Vec::new()
-    };
-    let payload_bytes = if is_container {
+    let (payload_bytes, payload_base_offset, index_start_hint) = if is_container {
         let stream_start = find_bytes(bytes, b"HMMERDB_C_STREAM\0")
             .ok_or_else(|| "makehmmerdb file is missing the C FM stream extension".to_string())?;
         let mut cursor = Cursor::new(&bytes[stream_start + b"HMMERDB_C_STREAM\0".len()..]);
@@ -3289,20 +3239,39 @@ fn parse_makehmmerdb_target_database(
             .checked_add(payload_len)
             .filter(|&end| end <= bytes.len())
             .ok_or_else(|| "makehmmerdb C stream payload is truncated".to_string())?;
-        &bytes[payload_start..payload_end]
+        (
+            &bytes[payload_start..payload_end],
+            payload_start,
+            payload_end,
+        )
     } else {
-        bytes
+        (bytes, 0, 0)
     };
     let mut payload = Cursor::new(payload_bytes);
 
     let (fwd_only, freq_sa, freq_cnt_b, block_count, sequences, ambiguities) =
         read_makehmmerdb_c_metadata_payload(&mut payload)?;
     let mut records_by_block = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        let record = read_makehmmerdb_c_fm_record(&mut payload, freq_sa, freq_cnt_b, true)?;
+    let mut c_stream_records = Vec::with_capacity(block_count * if fwd_only { 1 } else { 2 });
+    for block_id in 0..block_count {
+        let record = read_makehmmerdb_c_fm_record(
+            &mut payload,
+            freq_sa,
+            freq_cnt_b,
+            true,
+            payload_base_offset,
+        )?;
+        c_stream_records.push(NhmmerFmOccSource::from_record(block_id, 0, &record));
         records_by_block.push(record);
         if !fwd_only {
-            let _ = read_makehmmerdb_c_fm_record(&mut payload, freq_sa, freq_cnt_b, false)?;
+            let reverse_record = read_makehmmerdb_c_fm_record(
+                &mut payload,
+                freq_sa,
+                freq_cnt_b,
+                false,
+                payload_base_offset,
+            )?;
+            c_stream_records.push(NhmmerFmOccSource::from_record(block_id, 1, &reverse_record));
         }
     }
     if makehmmerdb_remaining(&payload) != 0 {
@@ -3311,6 +3280,16 @@ fn parse_makehmmerdb_target_database(
     if records_by_block.is_empty() && !sequences.is_empty() {
         return Err("makehmmerdb C stream has sequence metadata but no FM records".to_string());
     }
+    let container_index_records = if is_container {
+        parse_makehmmerdb_index_extension_mapped(
+            bytes,
+            mapped_bytes.clone(),
+            index_start_hint,
+            &c_stream_records,
+        )?
+    } else {
+        Vec::new()
+    };
     validate_makehmmerdb_fm_records(&records_by_block, ambiguities.len())?;
     if !container_index_records.is_empty() {
         validate_makehmmerdb_index_records(
@@ -3375,8 +3354,52 @@ struct NhmmerFmIndexRecord {
     fm: FmIndex,
 }
 
+#[derive(Debug)]
+struct NhmmerFmOccSource {
+    block_id: usize,
+    kind: u32,
+    term_loc: usize,
+    freq_cnt_b: usize,
+    occ_b_offset: usize,
+    occ_b_count: usize,
+    occ_sb_offset: usize,
+    occ_sb_count: usize,
+}
+
+impl NhmmerFmOccSource {
+    fn from_record(block_id: usize, kind: u32, record: &NhmmerFmRecord) -> Self {
+        Self {
+            block_id,
+            kind,
+            term_loc: record.term_loc,
+            freq_cnt_b: record.freq_cnt_b,
+            occ_b_offset: record.occ_b_offset,
+            occ_b_count: record.occ_b_count,
+            occ_sb_offset: record.occ_sb_offset,
+            occ_sb_count: record.occ_sb_count,
+        }
+    }
+}
+
+#[cfg(test)]
 fn parse_makehmmerdb_index_extension(bytes: &[u8]) -> Result<Vec<NhmmerFmIndexRecord>, String> {
-    let Some(index_start) = find_bytes(bytes, MAKEHMMERDB_INDEX_MAGIC) else {
+    parse_makehmmerdb_index_extension_mapped(bytes, None, 0, &[])
+}
+
+fn parse_makehmmerdb_index_extension_mapped(
+    bytes: &[u8],
+    mapped_bytes: Option<Arc<MmapBytes>>,
+    search_start: usize,
+    c_stream_records: &[NhmmerFmOccSource],
+) -> Result<Vec<NhmmerFmIndexRecord>, String> {
+    let search_start = search_start.min(bytes.len());
+    let index_start = if bytes[search_start..].starts_with(MAKEHMMERDB_INDEX_MAGIC) {
+        Some(search_start)
+    } else {
+        find_bytes(&bytes[search_start..], MAKEHMMERDB_INDEX_MAGIC)
+            .map(|offset| search_start + offset)
+    };
+    let Some(index_start) = index_start else {
         return Ok(Vec::new());
     };
     let mut cursor = Cursor::new(&bytes[index_start + MAKEHMMERDB_INDEX_MAGIC.len()..]);
@@ -3446,22 +3469,71 @@ fn parse_makehmmerdb_index_extension(bytes: &[u8]) -> Result<Vec<NhmmerFmIndexRe
             return Err("makehmmerdb FM-index record payload is truncated".to_string());
         }
 
-        let mut bwt = vec![0u8; bwt_len];
-        cursor
-            .read_exact(&mut bwt)
-            .map_err(|e| format!("truncated makehmmerdb FM-index BWT: {e}"))?;
+        let payload_base = index_start + MAKEHMMERDB_INDEX_MAGIC.len();
+        let bwt_offset = payload_base
+            .checked_add(cursor.position() as usize)
+            .ok_or_else(|| "makehmmerdb FM-index BWT offset overflows usize".to_string())?;
+        bwt_offset
+            .checked_add(bwt_len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| "makehmmerdb FM-index BWT is truncated".to_string())?;
+        cursor.set_position((cursor.position() as usize + bwt_len) as u64);
 
-        let mut sa = Vec::with_capacity(sa_len);
-        for _ in 0..sa_len {
-            sa.push(read_i32(&mut cursor)?);
-        }
+        let sa_offset = payload_base
+            .checked_add(cursor.position() as usize)
+            .ok_or_else(|| {
+                "makehmmerdb FM-index suffix-array offset overflows usize".to_string()
+            })?;
+        let sa_end = sa_offset
+            .checked_add(sa_bytes)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| "makehmmerdb FM-index suffix array is truncated".to_string())?;
+        let sa = if mapped_bytes.is_none() {
+            let mut sa_cursor = Cursor::new(&bytes[sa_offset..sa_end]);
+            let mut sa = Vec::with_capacity(sa_len);
+            for _ in 0..sa_len {
+                sa.push(read_i32(&mut sa_cursor)?);
+            }
+            Some(sa)
+        } else {
+            None
+        };
+        cursor.set_position((cursor.position() as usize + sa_bytes) as u64);
 
         let mut c = [0usize; 256];
         for value in &mut c {
             *value = u64_to_usize(read_u64(&mut cursor)?, "makehmmerdb FM-index C table value")?;
         }
 
-        let fm = FmIndex::from_parts(bwt, sa, c, text_len)?;
+        let fm = if let Some(mapped) = mapped_bytes.clone() {
+            if let Some(occ_source) = c_stream_records
+                .iter()
+                .find(|source| source.block_id == block_id && source.kind == kind)
+            {
+                FmIndex::from_mapped_file_parts_with_makehmmerdb_occ(
+                    mapped,
+                    bwt_offset,
+                    bwt_len,
+                    sa_offset,
+                    sa_len,
+                    c,
+                    text_len,
+                    occ_source.term_loc,
+                    occ_source.freq_cnt_b,
+                    occ_source.occ_b_offset,
+                    occ_source.occ_b_count,
+                    occ_source.occ_sb_offset,
+                    occ_source.occ_sb_count,
+                )?
+            } else {
+                FmIndex::from_mapped_file_parts(
+                    mapped, bwt_offset, bwt_len, sa_offset, sa_len, c, text_len,
+                )?
+            }
+        } else {
+            let bwt = bytes[bwt_offset..bwt_offset + bwt_len].to_vec();
+            FmIndex::from_parts_sampled(bwt, sa.unwrap(), c, text_len)?
+        };
         records.push(NhmmerFmIndexRecord {
             block_id,
             kind,
@@ -3560,21 +3632,6 @@ fn validate_makehmmerdb_index_records(
         {
             return Err(
                 "makehmmerdb FM-index record metadata does not match C stream block".to_string(),
-            );
-        }
-        let expected_text = &block.text[..block.text_bases_len];
-        let expected_fm = if record.kind == 0 {
-            let reversed_text: Vec<u8> = expected_text.iter().rev().copied().collect();
-            FmIndex::build(&reversed_text)
-        } else {
-            FmIndex::build(expected_text)
-        };
-        if record.fm.bwt != expected_fm.bwt
-            || record.fm.sa != expected_fm.sa
-            || record.fm.c != expected_fm.c
-        {
-            return Err(
-                "makehmmerdb FM-index record does not match C stream block text".to_string(),
             );
         }
         let Some(ambig_end) = record.ambig_offset.checked_add(record.ambig_count) else {
@@ -4353,7 +4410,7 @@ fn fm_ssv_augment_windows(
     // C's FM_DATA.N is the BWT length, including the terminal symbol. Rust
     // `FmIndex::n` stores only the biological text length, so use the serialized
     // BWT length for faithful FM_extendSeed coordinates.
-    let fm_n = record.fm.bwt.len() as i64;
+    let fm_n = record.fm.bwt_len() as i64;
     for mut diag in diags {
         if diag.complementarity != want || diag.length <= 0 {
             continue;
@@ -5818,12 +5875,18 @@ fn nhmmer_consensus_bytes(hmm: &Hmm) -> Vec<u8> {
 
 #[derive(Debug)]
 struct NhmmerFmRecord {
+    term_loc: usize,
     seq_offset: usize,
     seq_count: usize,
     ambig_offset: usize,
     ambig_count: usize,
     overlap_bases: usize,
     text_bases_len: usize,
+    occ_b_offset: usize,
+    occ_b_count: usize,
+    occ_sb_offset: usize,
+    occ_sb_count: usize,
+    freq_cnt_b: usize,
     text: Vec<u8>,
 }
 
@@ -5931,6 +5994,7 @@ fn read_makehmmerdb_c_fm_record(
     freq_sa: usize,
     freq_cnt_b: usize,
     has_text_and_sa: bool,
+    payload_base_offset: usize,
 ) -> Result<NhmmerFmRecord, String> {
     if freq_sa == 0 {
         return Err("makehmmerdb FM-index suffix-array sampling frequency is zero".to_string());
@@ -5939,7 +6003,7 @@ fn read_makehmmerdb_c_fm_record(
         return Err("makehmmerdb FM-index occurrence sampling frequency is zero".to_string());
     }
     let n = u64_to_usize(read_u64(cursor)?, "makehmmerdb FM-index record length")?;
-    let _term_loc = read_u32(cursor)?;
+    let term_loc = read_u32(cursor)? as usize;
     let seq_offset = read_u32(cursor)? as usize;
     let ambig_offset = read_u32(cursor)? as usize;
     let overlap_bases = read_u32(cursor)? as usize;
@@ -5990,40 +6054,65 @@ fn read_makehmmerdb_c_fm_record(
             return Err("makehmmerdb FM-index text record is missing terminal symbol".to_string());
         }
     }
-    let _bwt = unpack_dna_quads(cursor, n)?;
+    advance_makehmmerdb_cursor(cursor, bwt_bytes)?;
     if has_text_and_sa {
-        for _ in 0..sa_count {
-            let _ = read_u32(cursor)?;
-        }
+        advance_makehmmerdb_cursor(cursor, sa_bytes)?;
     }
-    for _ in 0..occ_b_count {
-        let _ = read_u16(cursor)?;
-    }
-    for _ in 0..occ_sb_count {
-        let _ = read_u32(cursor)?;
-    }
+    let occ_b_offset = payload_base_offset
+        .checked_add(cursor.position() as usize)
+        .ok_or_else(|| {
+            "makehmmerdb FM-index occurrence table offset overflows usize".to_string()
+        })?;
+    advance_makehmmerdb_cursor(cursor, occ_b_bytes)?;
+    let occ_sb_offset = payload_base_offset
+        .checked_add(cursor.position() as usize)
+        .ok_or_else(|| {
+            "makehmmerdb FM-index superblock occurrence table offset overflows usize".to_string()
+        })?;
+    advance_makehmmerdb_cursor(cursor, occ_sb_bytes)?;
 
     if has_text_and_sa {
         Ok(NhmmerFmRecord {
+            term_loc,
             seq_offset,
             seq_count,
             ambig_offset,
             ambig_count,
             overlap_bases,
             text_bases_len: n,
+            occ_b_offset,
+            occ_b_count,
+            occ_sb_offset,
+            occ_sb_count,
+            freq_cnt_b,
             text,
         })
     } else {
         Ok(NhmmerFmRecord {
+            term_loc,
             seq_offset,
             seq_count,
             ambig_offset,
             ambig_count,
             overlap_bases,
             text_bases_len: 0,
+            occ_b_offset,
+            occ_b_count,
+            occ_sb_offset,
+            occ_sb_count,
+            freq_cnt_b,
             text: Vec::new(),
         })
     }
+}
+
+fn advance_makehmmerdb_cursor(cursor: &mut Cursor<&[u8]>, byte_count: usize) -> Result<(), String> {
+    let next = (cursor.position() as usize)
+        .checked_add(byte_count)
+        .filter(|&pos| pos <= cursor.get_ref().len())
+        .ok_or_else(|| "makehmmerdb FM-index record payload is truncated".to_string())?;
+    cursor.set_position(next as u64);
+    Ok(())
 }
 
 fn unpack_dna_quads<R: Read>(cursor: &mut R, len: usize) -> Result<Vec<u8>, String> {
@@ -6352,12 +6441,18 @@ mod tests {
         positions.sort();
         assert_eq!(positions, vec![0, 4]);
         let blocks = vec![NhmmerFmRecord {
+            term_loc: 0,
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
             ambig_count: 0,
             overlap_bases: 0,
             text_bases_len: 8,
+            occ_b_offset: 0,
+            occ_b_count: 0,
+            occ_sb_offset: 0,
+            occ_sb_count: 0,
+            freq_cnt_b: 8,
             text: b"ACGTACGT".to_vec(),
         }];
         validate_makehmmerdb_index_records(&records, &blocks, true, 0).unwrap();
@@ -6465,14 +6560,14 @@ mod tests {
     #[test]
     fn makehmmerdb_c_fm_record_rejects_zero_sampling_frequencies() {
         let mut empty = Cursor::new([].as_slice());
-        let err = read_makehmmerdb_c_fm_record(&mut empty, 0, 8, true).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 0, 8, true, 0).unwrap_err();
         assert!(
             err.contains("suffix-array sampling frequency is zero"),
             "unexpected error: {err}"
         );
 
         let mut empty = Cursor::new([].as_slice());
-        let err = read_makehmmerdb_c_fm_record(&mut empty, 4, 0, true).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 4, 0, true, 0).unwrap_err();
         assert!(
             err.contains("occurrence sampling frequency is zero"),
             "unexpected error: {err}"
@@ -6494,7 +6589,7 @@ mod tests {
         bytes.extend(std::iter::repeat_n(0u8, 8 * 4));
         let mut cursor = Cursor::new(bytes.as_slice());
 
-        let record = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true).unwrap();
+        let record = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0).unwrap();
         assert_eq!(record.text_bases_len, 5);
         assert_eq!(&record.text[..4], b"ACGT");
     }
@@ -6508,7 +6603,7 @@ mod tests {
         }
         let mut cursor = Cursor::new(bytes.as_slice());
 
-        let err = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0).unwrap_err();
         assert!(
             err.contains("makehmmerdb FM-index record payload"),
             "unexpected error: {err}"
@@ -8196,12 +8291,18 @@ mod tests {
 
         let fm_index_records = build_raw_c_stream_fm_index_records(
             &[NhmmerFmRecord {
+                term_loc: 0,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
                 ambig_count: 0,
                 overlap_bases: 0,
                 text_bases_len: text.len(),
+                occ_b_offset: 0,
+                occ_b_count: 0,
+                occ_sb_offset: 0,
+                occ_sb_count: 0,
+                freq_cnt_b: 8,
                 text: text.to_vec(),
             }],
             false,
@@ -8252,12 +8353,18 @@ mod tests {
 
         let fm_index_records = build_raw_c_stream_fm_index_records(
             &[NhmmerFmRecord {
+                term_loc: 0,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
                 ambig_count: 0,
                 overlap_bases: 0,
                 text_bases_len: text.len(),
+                occ_b_offset: 0,
+                occ_b_count: 0,
+                occ_sb_offset: 0,
+                occ_sb_count: 0,
+                freq_cnt_b: 8,
                 text: text.to_vec(),
             }],
             false,

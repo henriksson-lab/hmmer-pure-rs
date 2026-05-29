@@ -389,8 +389,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         // the input through esl_msafile_Open(&abc, ...) with an explicit or
         // autodetected alphabet (digital mode), so stockholm_write textizes the
         // sequences: gap chars normalize to '-' and residues become canonical.
-        // We mirror that by setting MM on the full-fidelity model and writing it
-        // through the faithful writer with that alphabet.
+        // For model-coordinate modes, C first calls esl_msa_MarkFragments_old(),
+        // which rewrites leading/trailing non-residues in short fragments to
+        // missing data '~'. We apply the same mutation to the full-fidelity
+        // text model before writing.
         let write_abc = inferred_abc.clone().unwrap_or_else(|| {
             if args.dna {
                 Alphabet::dna()
@@ -406,6 +408,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             }
         });
         let mut full = full.clone();
+        if needs_model_map {
+            mark_fragments_old_full(&mut full, &write_abc, args.fragthresh);
+        }
         if let Some(mask) = range_mask.as_deref() {
             full.mm = Some(mask.to_vec());
         }
@@ -641,6 +646,44 @@ fn guess_msa_alphabet(msa: &msa::Msa) -> Result<AlphabetType, String> {
     }
 
     Err("could not determine alignment alphabet".to_string())
+}
+
+fn mark_fragments_old_full(msa: &mut msa::FullStockholm, abc: &Alphabet, fragthresh: f64) {
+    for row in &mut msa.aseq {
+        let rlen = row
+            .iter()
+            .filter(|&&ch| {
+                let code = abc.digitize_symbol(ch);
+                code != hmmer_pure_rs::alphabet::DSQ_ILLEGAL
+                    && code != hmmer_pure_rs::alphabet::DSQ_IGNORED
+                    && abc.is_residue(code)
+            })
+            .count();
+        if (rlen as f64) > fragthresh * (msa.alen as f64) {
+            continue;
+        }
+
+        for ch in row.iter_mut() {
+            let code = abc.digitize_symbol(*ch);
+            if code != hmmer_pure_rs::alphabet::DSQ_ILLEGAL
+                && code != hmmer_pure_rs::alphabet::DSQ_IGNORED
+                && abc.is_residue(code)
+            {
+                break;
+            }
+            *ch = b'~';
+        }
+        for ch in row.iter_mut().rev() {
+            let code = abc.digitize_symbol(*ch);
+            if code != hmmer_pure_rs::alphabet::DSQ_ILLEGAL
+                && code != hmmer_pure_rs::alphabet::DSQ_IGNORED
+                && abc.is_residue(code)
+            {
+                break;
+            }
+            *ch = b'~';
+        }
+    }
 }
 
 fn model_ranges_to_alignment_ranges(

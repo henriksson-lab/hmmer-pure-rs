@@ -287,7 +287,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error reading HMM database: {}", e);
         std::process::exit(1);
     });
-    let pressed_oprofiles = pressed::read_pressed_oprofiles(&args.hmmdb).unwrap_or_else(|e| {
+    let mut pressed_oprofiles = pressed::read_pressed_oprofiles(&args.hmmdb).unwrap_or_else(|e| {
         eprintln!("Error reading pressed optimized profiles: {}", e);
         std::process::exit(1);
     });
@@ -421,6 +421,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         std::process::exit(1);
     });
     let bg = Bg::new(&abc);
+    let mut profiles: Vec<Profile> = hmms
+        .iter()
+        .map(|hmm| {
+            let mut gm = Profile::new(hmm.m, &abc);
+            profile::profile_config(hmm, &bg, &mut gm, 100, P7_LOCAL);
+            gm
+        })
+        .collect();
 
     let mut sqf =
         open_query_seq_file(&args.seqfile, &abc, args.qformat.as_deref()).unwrap_or_else(|e| {
@@ -445,18 +453,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         let scored: Vec<(Option<hmmer_pure_rs::tophits::Hit>, PipelineStats)> = if !use_parallel {
             hmms.iter()
+                .zip(pressed_oprofiles.iter_mut())
+                .zip(profiles.iter_mut())
                 .enumerate()
-                .map(|(idx, hmm)| {
-                    score_hmmscan_model(
-                        hmm,
-                        &pressed_oprofiles[idx],
-                        &bg,
-                        &abc,
-                        &sq,
-                        &args,
-                        bit_cutoff,
-                        idx,
-                    )
+                .map(|(idx, ((hmm, oprofile), profile))| {
+                    score_hmmscan_model(hmm, profile, oprofile, &bg, &sq, &args, bit_cutoff, idx)
                 })
                 .collect()
         } else {
@@ -464,11 +465,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             hmms.par_iter()
                 .enumerate()
                 .map(|(idx, hmm)| {
+                    let mut profile = profiles[idx].clone();
+                    let mut oprofile = pressed_oprofiles[idx].clone();
                     score_hmmscan_model(
                         hmm,
-                        &pressed_oprofiles[idx],
+                        &mut profile,
+                        &mut oprofile,
                         &bg,
-                        &abc,
                         &sq,
                         &args,
                         bit_cutoff,
@@ -1050,9 +1053,9 @@ fn hmmscan_model_cs_for_hit<'a>(
 
 fn score_hmmscan_model(
     hmm: &hmmer_pure_rs::Hmm,
-    oprofile: &OProfile,
+    gm: &mut Profile,
+    oprofile: &mut OProfile,
     bg: &Bg,
-    abc: &Alphabet,
     sq: &Sequence,
     args: &Args,
     bit_cutoff: Option<BitCutoff>,
@@ -1062,12 +1065,8 @@ fn score_hmmscan_model(
     local_bg.set_filter(hmm.m, &hmm.compo);
     local_bg.set_length(sq.n);
 
-    let mut gm = Profile::new(hmm.m, abc);
-    profile::profile_config(hmm, &local_bg, &mut gm, sq.n as i32, P7_LOCAL);
-    let mut om = oprofile.clone();
-
     let mut pli = Pipeline::new();
-    pli.new_model(&gm);
+    pli.new_model(gm);
     configure_thresholds(&mut pli, args);
     configure_acceleration(&mut pli, args);
     if let Some(z) = args.z_value {
@@ -1089,7 +1088,7 @@ fn score_hmmscan_model(
     pli.n_targets = model_idx as u64;
 
     let mut th = TopHits::new();
-    let hit = if pli.run(&mut gm, &mut om, &local_bg, hmm, sq, &mut th) {
+    let hit = if pli.run(gm, oprofile, &local_bg, hmm, sq, &mut th) {
         th.hits.into_iter().next().map(|mut hit| {
             hit.name = hmm.name.clone();
             hit.acc = hmm.acc.clone().unwrap_or_default();

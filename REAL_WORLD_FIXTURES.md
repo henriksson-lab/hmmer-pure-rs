@@ -20,6 +20,19 @@ external/
   dna_large/
     ensembl_homo_sapiens_GRCh38_primary_assembly.fa.gz
     queries/
+  new_real/
+    protein/
+    dna/
+    pfam/
+    rfam/
+    derived/
+    queries/
+  realistic/
+    protein/
+    dna/
+    pfam/
+    rfam/
+    queries/
 ```
 
 ## Datasets
@@ -131,6 +144,86 @@ executable metadata, and compares normalized outputs for utility cases where
 exact text-output parity is expected. `hmmsim` and `makehmmerdb` are
 intentionally timing/status checks only until their known output/container
 format gaps are closed.
+
+## New Real-Data All-Tools Smoke Fixtures
+
+To exercise every Rust CLI subcommand on real data separate from the existing
+human/Swiss-Prot/GECCO/tutorial fixtures, prepare:
+
+```bash
+scripts/download_new_real_world_fixtures.sh
+```
+
+The downloader writes under `external/new_real/`, records source URLs in
+`external/new_real/sources.tsv`, and records file checksums in
+`external/new_real/SHA256SUMS`. The selected fixture sources are:
+
+- UniProt E. coli K-12 proteome `UP000000625`
+- NCBI RefSeq E. coli K-12 assembly `GCF_000005845.2_ASM584v2`
+- Pfam current-release seed alignment archive, extracting `PF02518`
+  (`HATPase_c`)
+- Rfam current seed alignment archive, extracting `RF00005` (`tRNA`) and
+  deriving a DNA alphabet copy for nucleotide-tool smoke tests
+
+Run all Rust tools against these fixtures with:
+
+```bash
+scripts/benchmark_new_real_all_tools.sh
+```
+
+The all-tools harness builds protein and nucleotide HMMs from the downloaded
+seed alignments, presses/fetches/converts/stats/logos/emits/simulates them,
+aligns emitted sequences, masks the real Pfam alignment, builds an FM-index for
+the real E. coli DNA subset, runs `hmmsearch`, `hmmscan`, `phmmer`,
+`jackhmmer`, `nhmmer`, and `nhmmscan`, and probes `hmmpgmd` startup with a
+short timeout. Results and command/status files are written under
+`reports/benchmarks/new-real-all-tools-<timestamp>/`.
+
+## Realistic Eukaryotic All-Tools Fixtures
+
+The `new_real` fixtures are a quick smoke tier. For a heavier and more
+realistic all-tools run, prepare:
+
+```bash
+scripts/download_realistic_fixtures.sh
+```
+
+This downloader writes under `external/realistic/`, records sources in
+`external/realistic/sources.tsv`, and records checksums in
+`external/realistic/SHA256SUMS`. The selected fixture sources are:
+
+- UniProt S. cerevisiae proteome `UP000002311`
+- Ensembl Genomes S. cerevisiae `R64-1-1` top-level DNA FASTA
+- Pfam current-release `Pfam-A.hmm.gz`, extracting a configurable first-N
+  multi-model panel (`PFAM_PANEL_COUNT`, default `12`)
+- Pfam current-release seed alignment archive, extracting `PF00226` (`DnaJ`)
+- Rfam current seed alignment archive, extracting `RF00005` (`tRNA`) and
+  deriving a DNA alphabet copy for nucleotide-tool runs
+
+Run the heavier all-tools workflow with:
+
+```bash
+scripts/benchmark_realistic_all_tools.sh
+```
+
+The realistic harness builds a fresh `DnaJ` HMM from Pfam seed alignment,
+presses a multi-model Pfam panel for `hmmscan`/`hmmfetch`/`hmmpgmd`, searches
+the full yeast proteome, runs `phmmer`/`jackhmmer` against the full yeast
+proteome, builds an FM-index for the full yeast genome, and runs
+`nhmmer`/`nhmmscan` against the full yeast genome. Results are written under
+`reports/benchmarks/realistic-all-tools-<timestamp>/`.
+
+Compare speed and maximum RSS against the bundled original C HMMER tools with:
+
+```bash
+scripts/benchmark_realistic_compare_c.sh
+```
+
+The comparison harness writes paired Rust/C command logs, `/usr/bin/time -v`
+files, `results.tsv`, and `summary.tsv` under
+`reports/benchmarks/realistic-compare-c-<timestamp>/`. For multi-model
+`hmmsearch`, it uses the uncompressed yeast proteome for both implementations
+because C HMMER must rewind the target sequence file between query models.
 
 ### Medium `phmmer`
 

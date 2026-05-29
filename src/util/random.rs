@@ -12,6 +12,86 @@ pub struct MersenneTwister {
     pub seed: u32,
 }
 
+/// Easel's standard 32-bit Mersenne Twister (`esl_randomness_Create`).
+///
+/// This is distinct from [`MersenneTwister`], which preserves Easel's deprecated
+/// fast LCG path (`esl_randomness_CreateFast`). Tools such as `hmmsim` and
+/// `makehmmerdb` use the standard generator behind `esl_random()`.
+pub struct Mt19937 {
+    mt: [u32; 624],
+    mti: usize,
+    pub seed: u32,
+}
+
+impl Mt19937 {
+    /// Seed exactly as Easel `esl_randomness_Init` / `mersenne_seed_table`.
+    pub fn new(seed: u32) -> Self {
+        let seed = resolve_seed(seed);
+        let mut mt = [0u32; 624];
+        mt[0] = seed;
+        for z in 1..624 {
+            mt[z] = 69069u32.wrapping_mul(mt[z - 1]);
+        }
+        Mt19937 { mt, mti: 624, seed }
+    }
+
+    fn fill_table(&mut self) {
+        const MAG01: [u32; 2] = [0x0, 0x9908_b0df];
+        for z in 0..227 {
+            let y = (self.mt[z] & 0x8000_0000) | (self.mt[z + 1] & 0x7fff_ffff);
+            self.mt[z] = self.mt[z + 397] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        }
+        for z in 227..623 {
+            let y = (self.mt[z] & 0x8000_0000) | (self.mt[z + 1] & 0x7fff_ffff);
+            self.mt[z] = self.mt[z - 227] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        }
+        let y = (self.mt[623] & 0x8000_0000) | (self.mt[0] & 0x7fff_ffff);
+        self.mt[623] = self.mt[396] ^ (y >> 1) ^ MAG01[(y & 0x1) as usize];
+        self.mti = 0;
+    }
+
+    /// Draw a tempered 32-bit variate (`mersenne_twister`).
+    pub fn next_u32(&mut self) -> u32 {
+        if self.mti >= 624 {
+            self.fill_table();
+        }
+        let mut x = self.mt[self.mti];
+        self.mti += 1;
+        x ^= x >> 11;
+        x ^= (x << 7) & 0x9d2c_5680;
+        x ^= (x << 15) & 0xefc6_0000;
+        x ^= x >> 18;
+        x
+    }
+
+    /// `esl_random(r)`: uniform double on [0,1).
+    pub fn next_f64(&mut self) -> f64 {
+        self.next_u32() as f64 / 4294967296.0
+    }
+
+    /// Sample an index using Easel `esl_rnd_FChoose` semantics.
+    pub fn sample_discrete(&mut self, p: &[f32]) -> usize {
+        let roll = self.next_f64();
+        let mut norm = 0.0_f64;
+        for &pi in p {
+            norm += pi as f64;
+        }
+
+        let mut sum = 0.0_f64;
+        for (i, &pi) in p.iter().enumerate() {
+            sum += pi as f64;
+            if roll < sum / norm {
+                return i;
+            }
+        }
+        p.len() - 1
+    }
+
+    pub fn sample_residue(&mut self, bg_f: &[f32]) -> u8 {
+        self.sample_discrete(bg_f) as u8
+    }
+}
+
 impl MersenneTwister {
     /// Create a new fast LCG RNG seeded identically to `esl_randomness_CreateFast`.
     ///

@@ -4,6 +4,7 @@ A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis u
 
 Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
 
+* 2026-05-29: Further regressions fixed. Expecting more to land
 * 2026-05-28: A slur of further edits have landed. More testing to be done but audits have converged for now
 * 2026-05-26: Features now appears to be in. Initial testing suggests parity but **further audit is likely needed**
 * 2026-05-23: **New audit strategy has uncovered a large number of problems, being fixed.**
@@ -94,6 +95,32 @@ CASES=hmmsearch_human_pkinase,phmmer_human_cyh3 ALLOW_MISMATCH=1 scripts/benchma
 SKIP_BUILD=1 OUT_DIR=reports/benchmarks/manual scripts/benchmark_real_world.sh
 CASES=hmmstat_gecco_cluster1,hmmfetch_gecco_cluster1_valid scripts/benchmark_utilities.sh
 ```
+
+To smoke-test every Rust subcommand on a separate set of newly gathered real
+fixtures, first download the fixtures and then run the all-tools harness:
+
+```bash
+scripts/download_new_real_world_fixtures.sh
+scripts/benchmark_new_real_all_tools.sh
+```
+
+That workflow uses E. coli K-12 UniProt/RefSeq data plus extracted Pfam/Rfam
+seed alignments, keeps large files under ignored `external/new_real/`, and
+writes command/status artifacts under `reports/benchmarks/`.
+
+For a heavier, more realistic eukaryotic workload, use:
+
+```bash
+scripts/download_realistic_fixtures.sh
+scripts/benchmark_realistic_all_tools.sh
+scripts/benchmark_realistic_compare_c.sh
+```
+
+That workflow uses the S. cerevisiae UniProt proteome, full Ensembl yeast
+genome FASTA, a multi-model panel extracted from the current Pfam-A HMM
+archive, and Pfam/Rfam seed alignments. It writes fixtures under ignored
+`external/realistic/`. The comparison harness runs matching Rust and bundled C
+HMMER commands and records wall time, user/system time, and maximum RSS.
 
 See `REAL_WORLD_FIXTURES.md` for dataset sources and fixture layout. Small
 checked-in fixtures remain useful for parity tests and smoke tests, but they
