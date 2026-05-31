@@ -68,7 +68,7 @@ fn viterbi_overflow_maxsc(base_w: i16, scale_w: f32) -> f32 {
 fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        match unsafe { crate::simd::msv_filter::msv_filter(dsq, l, om) } {
+        match unsafe { crate::simd::msv_filter::p7_msv_filter(dsq, l, om) } {
             crate::simd::msv_filter::MsvResult::Ok(s) => s,
             crate::simd::msv_filter::MsvResult::Overflow => maxsc,
         }
@@ -95,7 +95,7 @@ fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
 fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        match unsafe { crate::simd::vit_filter::viterbi_filter(dsq, l, om) } {
+        match unsafe { crate::simd::vit_filter::p7_viterbi_filter(dsq, l, om) } {
             crate::simd::vit_filter::VitResult::Ok(s) => s,
             crate::simd::vit_filter::VitResult::Overflow => maxsc,
         }

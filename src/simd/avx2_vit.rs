@@ -384,7 +384,7 @@ mod tests {
         let avx_om = OProfileAvx2Vit::from_oprofile(&om);
         let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY");
         let l = dsq.len() - 2;
-        let sse = match unsafe { crate::simd::vit_filter::viterbi_filter(&dsq, l, &om) } {
+        let sse = match unsafe { crate::simd::vit_filter::p7_viterbi_filter(&dsq, l, &om) } {
             crate::simd::vit_filter::VitResult::Ok(sc) => sc,
             crate::simd::vit_filter::VitResult::Overflow => return,
         };

@@ -583,7 +583,7 @@ fn simulate_optimized_calibration_scores(
 fn optimized_msv_filter_score(dsq: &[u8], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        match unsafe { hmmer_pure_rs::simd::msv_filter::msv_filter(dsq, l, om) } {
+        match unsafe { hmmer_pure_rs::simd::msv_filter::p7_msv_filter(dsq, l, om) } {
             hmmer_pure_rs::simd::msv_filter::MsvResult::Ok(s) => s,
             hmmer_pure_rs::simd::msv_filter::MsvResult::Overflow => maxsc,
         }
@@ -600,7 +600,7 @@ fn optimized_msv_filter_score(dsq: &[u8], l: usize, om: &OProfile, maxsc: f32) -
 fn optimized_viterbi_filter_score(dsq: &[u8], l: usize, om: &OProfile, maxsc: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        match unsafe { hmmer_pure_rs::simd::vit_filter::viterbi_filter(dsq, l, om) } {
+        match unsafe { hmmer_pure_rs::simd::vit_filter::p7_viterbi_filter(dsq, l, om) } {
             hmmer_pure_rs::simd::vit_filter::VitResult::Ok(s) => s,
             hmmer_pure_rs::simd::vit_filter::VitResult::Overflow => maxsc,
         }

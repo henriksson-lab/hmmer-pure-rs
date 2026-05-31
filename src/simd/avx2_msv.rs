@@ -246,7 +246,7 @@ mod tests {
         // the AVX2 striped recurrence and its cross-lane shift.
         let mut scratch = vec![unsafe { _mm_setzero_si128() }; 1];
         let sse = match unsafe {
-            crate::simd::msv_filter::msv_filter_dp_only(&dsq, l, &om, &mut scratch)
+            crate::simd::msv_filter::p7_msv_filter_dp_only_rust_helper(&dsq, l, &om, &mut scratch)
         } {
             crate::simd::msv_filter::MsvResult::Ok(sc) => sc,
             crate::simd::msv_filter::MsvResult::Overflow => return,

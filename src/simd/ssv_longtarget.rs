@@ -122,7 +122,7 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
 /// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-pub unsafe fn ssv_filter_longtarget(
+pub unsafe fn p7_ssv_filter_longtarget(
     dsq: &[Dsq],
     l: usize,
     om: &OProfile,

@@ -1757,7 +1757,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     // inside p7_pli_postViterbi_LongTarget (p7_pipeline.c:1445).
                     // The Rust driver instead reverse-complements the target up
                     // front, applies the window->sequence offset inside
-                    // `search_longtarget` (`+= win_start - 1`), then does the
+                    // `p7_pipeline_longtarget` (`+= win_start - 1`), then does the
                     // whole-sequence `sq.n - x + 1` flip here. These are
                     // algebraically identical to C precisely when
                     // `seq_start == sq.start == 1`, which is ALWAYS true for the
@@ -3831,7 +3831,7 @@ fn fm_seed_candidate_windows(
 }
 
 // FM-index candidate-window generation. Two complementary mechanisms produce
-// the candidate windows handed to `search_longtarget`:
+// the candidate windows handed to `p7_pipeline_longtarget`:
 //
 //   1. A seed-then-rescore stage (the consensus/score-threshold tries below):
 //      enumerates candidate model k-mers, locates them in the FM index, extends
@@ -3847,7 +3847,7 @@ fn fm_seed_candidate_windows(
 //
 // The union of windows is deduped/merged in `fm_finalize_seed_windows`, and the
 // real SSV/MSV/Viterbi/Forward scoring re-runs downstream in
-// `search_longtarget`, which derives the final hit coordinates.
+// `p7_pipeline_longtarget`, which derives the final hit coordinates.
 #[allow(clippy::too_many_arguments)]
 fn fm_seed_candidate_windows_with_config(
     target_db: &NhmmerTargetDb,
@@ -9063,7 +9063,7 @@ mod tests {
         let vit_counter = std::sync::atomic::AtomicU64::new(0);
         let fwd_counter = std::sync::atomic::AtomicU64::new(0);
 
-        let hits = search_longtarget(
+        let hits = p7_pipeline_longtarget(
             &seq,
             &hmm,
             &gm,
@@ -9106,7 +9106,7 @@ mod tests {
 ///
 /// Counterpart to one strand-pass inside C `serial_loop`
 /// (`hmmer/src/nhmmer.c:1330`), which calls `p7_Pipeline_LongTarget` on every
-/// sequence regardless of length. Dispatches to `search_longtarget` when the
+/// sequence regardless of length. Dispatches to `p7_pipeline_longtarget` when the
 /// SSE2 SIMD path is available; fails loudly otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_sequence(
@@ -9138,7 +9138,7 @@ pub(crate) fn search_sequence(
     ensure_nhmmer_longtarget_accel_available()?;
     #[cfg(target_arch = "x86_64")]
     {
-        return Ok(search_longtarget(
+        return Ok(p7_pipeline_longtarget(
             sq,
             hmm,
             gm,
@@ -9229,7 +9229,7 @@ fn msv_residue_count_for_longtarget_window(
     let om = &om_ssv;
 
     let mut windows =
-        unsafe { ssv_longtarget::ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, f1, max_length) };
+        unsafe { ssv_longtarget::p7_ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, f1, max_length) };
     if windows.is_empty() {
         return 0;
     }
@@ -9267,7 +9267,7 @@ fn msv_residue_count_for_longtarget_window(
         bg_win.set_length(win_len);
         let nullsc = bg_win.null_one(win_len);
         let usc_result =
-            unsafe { hmmer_pure_rs::simd::msv_filter::msv_filter(&sub_dsq, win_len, &msv_om) };
+            unsafe { hmmer_pure_rs::simd::msv_filter::p7_msv_filter(&sub_dsq, win_len, &msv_om) };
         let usc = match usc_result {
             hmmer_pure_rs::simd::msv_filter::MsvResult::Ok(sc) => sc,
             hmmer_pure_rs::simd::msv_filter::MsvResult::Overflow => f32::INFINITY,
@@ -9375,7 +9375,7 @@ impl NhmmerThresholdConfig {
 /// in the strand-local (input `sq`) frame; the caller flips them for crick.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
-fn search_longtarget(
+fn p7_pipeline_longtarget(
     sq: &Sequence,
     hmm: &hmmer_pure_rs::hmm::Hmm,
     gm: &Profile,
@@ -9434,7 +9434,7 @@ fn search_longtarget(
             })
             .collect()
     } else {
-        unsafe { ssv_longtarget::ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, f1, max_length) }
+        unsafe { ssv_longtarget::p7_ssv_filter_longtarget(&sq.dsq, sq.n, om, bg, f1, max_length) }
     };
 
     // C p7_Pipeline_LongTarget has NO do_max special-case here: --max sets
@@ -9603,8 +9603,9 @@ fn search_longtarget(
             let mut bg_win = bg.clone();
             bg_win.set_length(win_len);
             let nullsc = bg_win.null_one(win_len);
-            let usc_result =
-                unsafe { hmmer_pure_rs::simd::msv_filter::msv_filter(&sub_dsq, win_len, &msv_om) };
+            let usc_result = unsafe {
+                hmmer_pure_rs::simd::msv_filter::p7_msv_filter(&sub_dsq, win_len, &msv_om)
+            };
             let usc = match usc_result {
                 hmmer_pure_rs::simd::msv_filter::MsvResult::Ok(sc) => sc,
                 hmmer_pure_rs::simd::msv_filter::MsvResult::Overflow => f32::INFINITY,
@@ -9728,7 +9729,7 @@ fn search_longtarget(
             let mut vit_om = om.clone();
             vit_om.reconfig_length(loc_window_len as i32);
             let mut sub_windows = unsafe {
-                hmmer_pure_rs::simd::vit_filter::viterbi_filter_longtarget(
+                hmmer_pure_rs::simd::vit_filter::p7_viterbi_filter_longtarget(
                     &vit_sub_dsq,
                     subseq_len,
                     &vit_om,

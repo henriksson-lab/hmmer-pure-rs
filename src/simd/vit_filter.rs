@@ -32,7 +32,7 @@ pub enum VitResult {
 /// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult {
+pub unsafe fn p7_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult {
     let q_count = nqw(om.m);
     let nscells = 3; // M, D, I per q
 
@@ -212,7 +212,7 @@ pub unsafe fn viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult 
 /// Requires SSE2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-pub unsafe fn viterbi_filter_longtarget(
+pub unsafe fn p7_viterbi_filter_longtarget(
     dsq: &[Dsq],
     l: usize,
     om: &OProfile,
@@ -454,7 +454,7 @@ mod tests {
     use crate::profile::*;
     use std::path::Path;
 
-    /// Smoke test: run `viterbi_filter` on a short non-matching sequence and
+    /// Smoke test: run `p7_viterbi_filter` on a short non-matching sequence and
     /// confirm a finite score or a clean overflow result.
     #[test]
     fn test_viterbi_filter_basic() {
@@ -477,7 +477,7 @@ mod tests {
 
         // Test with a non-matching sequence
         let dsq = abc.digitize(b"AAAAAAAAAAGGGGGGGGGG");
-        let result = unsafe { viterbi_filter(&dsq, 20, &om) };
+        let result = unsafe { p7_viterbi_filter(&dsq, 20, &om) };
         match result {
             VitResult::Ok(sc) => {
                 assert!(sc.is_finite(), "Vit score should be finite, got {}", sc);

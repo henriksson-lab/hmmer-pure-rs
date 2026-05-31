@@ -80,7 +80,7 @@ fn ssv_finds_high_scoring_ecoli_trnas() {
 
     let start = Instant::now();
     let windows = unsafe {
-        hmmer_pure_rs::simd::ssv_longtarget::ssv_filter_longtarget(
+        hmmer_pure_rs::simd::ssv_longtarget::p7_ssv_filter_longtarget(
             &dsq,
             seq.len(),
             &om,

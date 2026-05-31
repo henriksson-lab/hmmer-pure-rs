@@ -92,11 +92,7 @@ other = "p7_GViterbi_longtarget"
 # =================================================================
 
 [[entries]]
-rust  = "msv_filter"
-other = "p7_MSVFilter"
-
-[[entries]]
-rust  = "msv_filter_with_scratch"
+rust  = "p7_msv_filter"
 other = "p7_MSVFilter"
 
 [[entries]]
@@ -112,11 +108,11 @@ rust  = "ssv_filter_q17"
 other = "p7_SSVFilter"
 
 [[entries]]
-rust  = "ssv_filter_longtarget"
+rust  = "p7_ssv_filter_longtarget"
 other = "p7_SSVFilter_longtarget"
 
 [[entries]]
-rust  = "viterbi_filter"
+rust  = "p7_viterbi_filter"
 other = "p7_ViterbiFilter"
 
 [[entries]]
@@ -128,7 +124,7 @@ rust  = "neon_viterbi_filter"
 other = "p7_ViterbiFilter"
 
 [[entries]]
-rust  = "viterbi_filter_longtarget"
+rust  = "p7_viterbi_filter_longtarget"
 other = "p7_ViterbiFilter_longtarget"
 
 # =================================================================
@@ -342,7 +338,7 @@ rust  = "new_model"
 other = "p7_pli_NewModel"
 
 [[entries]]
-rust  = "search_longtarget"
+rust  = "p7_pipeline_longtarget"
 other = "p7_Pipeline_LongTarget"
 
 [[entries]]

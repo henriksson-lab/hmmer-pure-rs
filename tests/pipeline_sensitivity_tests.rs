@@ -161,7 +161,7 @@ fn ssv_sensitivity_ecoli_genome() {
     let dsq = abc.digitize(&genome);
 
     let windows = unsafe {
-        simd::ssv_longtarget::ssv_filter_longtarget(
+        simd::ssv_longtarget::p7_ssv_filter_longtarget(
             &dsq,
             genome.len(),
             &om,

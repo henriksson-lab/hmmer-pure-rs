@@ -2286,12 +2286,14 @@ mod tests {
 
         unsafe {
             assert_eq!(
-                msv_score(crate::simd::msv_filter::msv_filter(&dsq, l, &actual)),
-                msv_score(crate::simd::msv_filter::msv_filter(&dsq, l, &expected))
+                msv_score(crate::simd::msv_filter::p7_msv_filter(&dsq, l, &actual)),
+                msv_score(crate::simd::msv_filter::p7_msv_filter(&dsq, l, &expected))
             );
             assert_eq!(
-                vit_score(crate::simd::vit_filter::viterbi_filter(&dsq, l, &actual)),
-                vit_score(crate::simd::vit_filter::viterbi_filter(&dsq, l, &expected))
+                vit_score(crate::simd::vit_filter::p7_viterbi_filter(&dsq, l, &actual)),
+                vit_score(crate::simd::vit_filter::p7_viterbi_filter(
+                    &dsq, l, &expected
+                ))
             );
             assert_eq!(
                 crate::simd::fwd_filter::forward_parser(&dsq, l, &actual).to_bits(),

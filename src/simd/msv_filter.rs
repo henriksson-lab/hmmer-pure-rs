@@ -29,21 +29,109 @@ pub enum MsvResult {
 /// # Safety
 /// Requires SSE2 support. Caller must verify CPU support.
 #[target_feature(enable = "sse2")]
-pub unsafe fn msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
+pub unsafe fn p7_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
     let q_count = nqb(om.m);
 
-    // Working DP row (one row of Q vectors)
+    // C p7_MSVFilter first tries the highly-optimized SSV filter; if it returns
+    // a definitive result (eslOK score or eslERANGE overflow) we return it
+    // directly. Only when SSV returns eslENORESULT do we run the full MSV DP.
+    // (msvfilter.c:102-104)
+    match super::ssv_filter::ssv_filter_q17(dsq, l, om) {
+        super::ssv_filter::SsvResult::Ok(sc) => return MsvResult::Ok(sc),
+        super::ssv_filter::SsvResult::Overflow => return MsvResult::Overflow,
+        super::ssv_filter::SsvResult::NoResult => {}
+    }
+
     let mut dp: Vec<__m128i> = vec![_mm_setzero_si128(); q_count];
-    msv_filter_with_scratch(dsq, l, om, &mut dp)
+    let dp = &mut dp;
+    let biasv = _mm_set1_epi8(om.bias_b as i8);
+    let basev = _mm_set1_epi8(om.base_b as i8);
+    let ceilingv = _mm_cmpeq_epi8(biasv, biasv); // all 0xFF
+
+    let tjbm = om.tjb_b.wrapping_add(om.tbm_b);
+    let tjbmv = _mm_set1_epi8(tjbm as i8);
+    let tecv = _mm_set1_epi8(om.tec_b as i8);
+
+    let mut xjv = _mm_setzero_si128();
+    let mut xbv = _mm_subs_epu8(basev, tjbmv);
+
+    for i in 1..=l {
+        // C indexes `om->rbv[dsq[i]]` unconditionally for every residue 1..L:
+        // rbv is filled for all Kp codes (oprofile.rs builds it `for x in 0..kp`,
+        // covering canonical + degenerate + gap/missing), and every valid digital
+        // code is < Kp, so the row always exists and the recurrence must advance.
+        // (msvfilter.c:134)
+        let xi = dsq[i] as usize;
+        let rsc_ptr = om.rbv.get_unchecked(xi).as_ptr();
+        let dp_ptr = dp.as_mut_ptr();
+
+        let mut xev = _mm_setzero_si128();
+
+        // Right shift by 1 byte (shift in zero = -infinity in offset arithmetic)
+        let mut mpv = _mm_slli_si128::<1>(*dp_ptr.add(q_count - 1));
+
+        for q in 0..q_count {
+            // Calculate new M(i,q)
+            let mut sv = _mm_max_epu8(mpv, xbv);
+            sv = _mm_adds_epu8(sv, biasv);
+            // Load emission score and subtract (in offset arithmetic, subtraction = adding score)
+            let rsc_v = _mm_loadu_si128((*rsc_ptr.add(q)).as_ptr() as *const __m128i);
+            sv = _mm_subs_epu8(sv, rsc_v);
+            xev = _mm_max_epu8(xev, sv);
+
+            let cell = dp_ptr.add(q);
+            mpv = *cell;
+            *cell = sv;
+        }
+
+        // Test for overflow
+        let tempv = _mm_adds_epu8(xev, biasv);
+        let tempv = _mm_cmpeq_epi8(tempv, ceilingv);
+        let cmp = _mm_movemask_epi8(tempv);
+
+        // Horizontal max across the xEv vector
+        let mut tempv = _mm_shuffle_epi32::<{ shuffle_mask(2, 3, 0, 1) }>(xev);
+        xev = _mm_max_epu8(xev, tempv);
+        tempv = _mm_shuffle_epi32::<{ shuffle_mask(0, 1, 2, 3) }>(xev);
+        xev = _mm_max_epu8(xev, tempv);
+        tempv = _mm_shufflelo_epi16::<{ shuffle_mask(2, 3, 0, 1) }>(xev);
+        xev = _mm_max_epu8(xev, tempv);
+        tempv = _mm_srli_si128::<1>(xev);
+        xev = _mm_max_epu8(xev, tempv);
+        // Broadcast the max to all positions
+        xev = _mm_shuffle_epi32::<{ shuffle_mask(0, 0, 0, 0) }>(xev);
+
+        if cmp != 0 {
+            return MsvResult::Overflow;
+        }
+
+        // E->C transition
+        xev = _mm_subs_epu8(xev, tecv);
+        // J state update
+        xjv = _mm_max_epu8(xjv, xev);
+        // B state update
+        xbv = _mm_max_epu8(basev, xjv);
+        xbv = _mm_subs_epu8(xbv, tjbmv);
+    }
+
+    // Extract final J value
+    let xj = _mm_extract_epi16::<0>(xjv) as u16 as u8;
+
+    // Convert back to nats
+    let mut sc = (xj.wrapping_sub(om.tjb_b) as f32) - om.base_b as f32;
+    sc /= om.scale_b;
+    sc -= 3.0; // approximate L * log(L/(L+3)) for NN,CC,JJ
+
+    MsvResult::Ok(sc)
 }
 
-/// SSE2 MSV filter variant that reuses a caller-owned single DP row (C: `p7_MSVFilter`).
+/// Rust helper variant that reuses a caller-owned single DP row.
 ///
-/// Identical math to [`msv_filter`] but skips the per-call allocation by reusing the
-/// caller's `dp` vector. Keep tracehash builds on `msv_filter()` unless a trace proves
+/// Identical math to [`p7_msv_filter`] but skips the per-call allocation by reusing the
+/// caller's `dp` vector. Keep tracehash builds on `p7_msv_filter()` unless a trace proves
 /// this allocation change is harmless for exact instrumentation-sensitive comparisons.
 #[target_feature(enable = "sse2")]
-pub unsafe fn msv_filter_with_scratch(
+pub unsafe fn p7_msv_filter_with_scratch_rust_helper(
     dsq: &[Dsq],
     l: usize,
     om: &OProfile,
@@ -68,7 +156,7 @@ pub unsafe fn msv_filter_with_scratch(
         super::ssv_filter::SsvResult::NoResult => {}
     }
 
-    msv_filter_dp_only(dsq, l, om, dp)
+    p7_msv_filter_dp_only_rust_helper(dsq, l, om, dp)
 }
 
 /// Runs only the striped MSV dynamic-programming recurrence (C: the body of
@@ -81,7 +169,7 @@ pub unsafe fn msv_filter_with_scratch(
 /// # Safety
 /// Requires SSE2 support.
 #[target_feature(enable = "sse2")]
-pub unsafe fn msv_filter_dp_only(
+pub unsafe fn p7_msv_filter_dp_only_rust_helper(
     dsq: &[Dsq],
     l: usize,
     om: &OProfile,
@@ -208,7 +296,7 @@ mod tests {
         let om = OProfile::convert(&gm);
         let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");
 
-        let result = unsafe { msv_filter(&dsq, 20, &om) };
+        let result = unsafe { p7_msv_filter(&dsq, 20, &om) };
         match result {
             MsvResult::Ok(sc) => {
                 // MSV score may be negative for short sequences

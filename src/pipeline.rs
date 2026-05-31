@@ -8,7 +8,7 @@ use crate::sequence::Sequence;
 use crate::simd::msv_filter::MsvResult;
 use crate::simd::oprofile::OProfile;
 #[cfg(target_arch = "x86_64")]
-use crate::simd::vit_filter::{viterbi_filter, VitResult};
+use crate::simd::vit_filter::{p7_viterbi_filter, VitResult};
 use crate::stats;
 use crate::tophits::*;
 use crate::util::cmath::{c_exp_f64, c_log_f64, ESL_CONST_LOG2};
@@ -459,7 +459,7 @@ impl Pipeline {
         let mut filtersc = null_sc;
 
         // For long_target, SSV_longtarget and ViterbiFilter_longtarget already
-        // ran at the postSSV stage (in nhmmer::search_longtarget); C's
+        // ran at the postSSV stage (in nhmmer::p7_pipeline_longtarget); C's
         // postViterbi_LongTarget (p7_pipeline.c:1289) does NOT re-run MSV or
         // Viterbi — it calls p7_ForwardParser directly. Match that here.
         if !self.do_max && !self.long_target {
@@ -471,10 +471,11 @@ impl Pipeline {
             {
                 if is_x86_feature_detected!("sse2") {
                     #[cfg(feature = "tracehash")]
-                    let msv_result = unsafe { crate::simd::msv_filter::msv_filter(&sq.dsq, l, om) };
+                    let msv_result =
+                        unsafe { crate::simd::msv_filter::p7_msv_filter(&sq.dsq, l, om) };
                     #[cfg(not(feature = "tracehash"))]
                     let msv_result = unsafe {
-                        crate::simd::msv_filter::msv_filter_with_scratch(
+                        crate::simd::msv_filter::p7_msv_filter_with_scratch_rust_helper(
                             &sq.dsq,
                             l,
                             om,
@@ -579,7 +580,7 @@ impl Pipeline {
                 #[cfg(target_arch = "x86_64")]
                 {
                     if is_x86_feature_detected!("sse2") {
-                        let vit_result = unsafe { viterbi_filter(&sq.dsq, l, om) };
+                        let vit_result = unsafe { p7_viterbi_filter(&sq.dsq, l, om) };
                         vit_sc = match vit_result {
                             VitResult::Ok(sc) => sc,
                             VitResult::Overflow => f32::INFINITY,

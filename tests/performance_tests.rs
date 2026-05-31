@@ -98,7 +98,14 @@ fn run_p7_longtarget_timed(
 
     let start = Instant::now();
     let windows = unsafe {
-        simd::ssv_longtarget::ssv_filter_longtarget(&dsq, seq.len(), &om, &bg_obj, 0.02, max_length)
+        simd::ssv_longtarget::p7_ssv_filter_longtarget(
+            &dsq,
+            seq.len(),
+            &om,
+            &bg_obj,
+            0.02,
+            max_length,
+        )
     };
     let elapsed = start.elapsed();
 
