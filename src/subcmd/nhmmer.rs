@@ -1600,6 +1600,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     } else {
                         Some(fm_windows.as_deref().unwrap_or(&[]))
                     };
+                    let fm_context = target_db
+                        .fm_index_records
+                        .iter()
+                        .find(|record| {
+                            record.kind == 0
+                                && seq_idx >= record.seq_offset
+                                && seq_idx < record.seq_offset + record.seq_count
+                        })
+                        .map(|record| NhmmerSearchFmContext {
+                            record,
+                            seq_meta: &target_db.fm_sequence_meta,
+                            ambiguities: &target_db.fm_ambiguities,
+                            seq_idx,
+                        });
                     hits.extend(search_sequence(
                         sq,
                         hmm,
@@ -1622,6 +1636,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         &vit_counter,
                         &fwd_counter,
                         initial_windows,
+                        fm_context,
                     )?);
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
@@ -1673,6 +1688,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     } else {
                         Some(fm_windows.as_deref().unwrap_or(&[]))
                     };
+                    let fm_context = target_db
+                        .fm_index_records
+                        .iter()
+                        .find(|record| {
+                            record.kind == 1
+                                && seq_idx >= record.seq_offset
+                                && seq_idx < record.seq_offset + record.seq_count
+                        })
+                        .map(|record| NhmmerSearchFmContext {
+                            record,
+                            seq_meta: &target_db.fm_sequence_meta,
+                            ambiguities: &target_db.fm_ambiguities,
+                            seq_idx,
+                        });
                     let mut rc_hits = search_sequence(
                         &rc_sq,
                         hmm,
@@ -1695,6 +1724,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         &vit_counter,
                         &fwd_counter,
                         initial_windows,
+                        fm_context,
                     )?;
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
@@ -3127,6 +3157,14 @@ struct NhmmerCandidateFmFrame {
     fm_bwt_len: i64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct NhmmerSearchFmContext<'a> {
+    record: &'a NhmmerFmIndexRecord,
+    seq_meta: &'a [NhmmerFmSequenceMeta],
+    ambiguities: &'a [(usize, usize)],
+    seq_idx: usize,
+}
+
 #[derive(Clone, Debug)]
 struct NhmmerScoredCandidateWindow {
     window: NhmmerCandidateWindow,
@@ -3248,6 +3286,7 @@ struct NhmmerFmSequenceMeta {
     name: String,
     acc: String,
     desc: String,
+    target_start: usize,
     fm_start: usize,
     length: usize,
 }
@@ -6217,7 +6256,7 @@ fn read_makehmmerdb_c_metadata_payload(
     let mut sequences = Vec::with_capacity(seq_count);
     for _ in 0..seq_count {
         let _target_id = read_u32(cursor)?;
-        let _target_start = read_u64(cursor)?;
+        let target_start = u64_to_usize(read_u64(cursor)?, "makehmmerdb sequence target_start")?;
         let fm_start = read_u32(cursor)? as usize;
         let length = read_u32(cursor)? as usize;
         let name_len = read_u16(cursor)? as usize;
@@ -6232,6 +6271,7 @@ fn read_makehmmerdb_c_metadata_payload(
             name,
             acc,
             desc,
+            target_start,
             fm_start,
             length,
         });
@@ -6783,6 +6823,34 @@ mod tests {
     }
 
     #[test]
+    fn makehmmerdb_c_metadata_preserves_target_start() {
+        let mut bytes = makehmmerdb_c_metadata_header(4, 8, 1);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&123u64.to_le_bytes());
+        bytes.extend_from_slice(&11u32.to_le_bytes());
+        bytes.extend_from_slice(&17u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(b"s0\0");
+        bytes.extend_from_slice(b"a\0");
+        bytes.extend_from_slice(b"src\0");
+        bytes.extend_from_slice(b"desc\0");
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        let (_, _, _, _, seq_meta, ambiguities) =
+            read_makehmmerdb_c_metadata_payload(&mut cursor).unwrap();
+
+        assert!(ambiguities.is_empty());
+        assert_eq!(seq_meta.len(), 1);
+        assert_eq!(seq_meta[0].name, "s0");
+        assert_eq!(seq_meta[0].target_start, 123);
+        assert_eq!(seq_meta[0].fm_start, 11);
+        assert_eq!(seq_meta[0].length, 17);
+    }
+
+    #[test]
     fn makehmmerdb_c_metadata_rejects_zero_sampling_frequencies() {
         let zero_sa_bytes = makehmmerdb_c_metadata_header(0, 8, 0);
         let mut zero_sa = Cursor::new(zero_sa_bytes.as_slice());
@@ -6903,6 +6971,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -6956,6 +7025,7 @@ mod tests {
                 name: "s0".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: 8,
             },
@@ -6963,6 +7033,7 @@ mod tests {
                 name: "s1".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 8,
                 length: 8,
             },
@@ -7012,6 +7083,7 @@ mod tests {
                 name: "s0".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: 8,
             },
@@ -7019,6 +7091,7 @@ mod tests {
                 name: "s1".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 8,
                 length: 8,
             },
@@ -7081,6 +7154,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7166,6 +7240,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7237,6 +7312,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7304,6 +7380,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7479,6 +7556,7 @@ mod tests {
             name: "target".to_string(),
             acc: String::new(),
             desc: String::new(),
+            target_start: 1,
             fm_start: 0,
             length: text.len(),
         };
@@ -7667,6 +7745,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7732,6 +7811,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -7813,6 +7893,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8417,6 +8498,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8461,6 +8543,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8515,6 +8598,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: block_text.len(),
             }],
@@ -8558,6 +8642,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8601,6 +8686,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8653,6 +8739,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8729,6 +8816,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8788,6 +8876,7 @@ mod tests {
                 name: "target".to_string(),
                 acc: String::new(),
                 desc: String::new(),
+                target_start: 1,
                 fm_start: 0,
                 length: text.len(),
             }],
@@ -8996,6 +9085,7 @@ mod tests {
             &vit_counter,
             &fwd_counter,
             Some(&[]),
+            None,
         );
 
         assert!(
@@ -9041,6 +9131,7 @@ pub(crate) fn search_sequence(
     vit_counter: &std::sync::atomic::AtomicU64,
     fwd_counter: &std::sync::atomic::AtomicU64,
     initial_windows: Option<&[NhmmerCandidateWindow]>,
+    fm_context: Option<NhmmerSearchFmContext<'_>>,
 ) -> Result<Vec<hmmer_pure_rs::tophits::Hit>, String> {
     // Always use longtarget path: C HMMER's nhmmer calls p7_Pipeline_LongTarget
     // for every sequence regardless of length.
@@ -9069,6 +9160,7 @@ pub(crate) fn search_sequence(
             vit_counter,
             fwd_counter,
             initial_windows,
+            fm_context,
         ));
     }
     #[allow(unreachable_code)]
@@ -9305,6 +9397,7 @@ fn search_longtarget(
     vit_counter: &std::sync::atomic::AtomicU64,
     fwd_counter: &std::sync::atomic::AtomicU64,
     initial_windows: Option<&[NhmmerCandidateWindow]>,
+    fm_context: Option<NhmmerSearchFmContext<'_>>,
 ) -> Vec<hmmer_pure_rs::tophits::Hit> {
     use hmmer_pure_rs::simd::ssv_longtarget;
 
@@ -9378,23 +9471,90 @@ fn search_longtarget(
             &prefix_lens,
             &suffix_lens,
         );
-        for win in &mut windows {
-            if win.fm_n >= 0 && win.fm_start >= 0 {
-                let fm_pos = if win.complement {
-                    win.fm_bwt_len - win.fm_n - 1
-                } else {
-                    win.fm_n
-                };
-                let seq_pos = fm_pos - win.fm_start + 1;
-                let seg_pos = if win.complement {
-                    win.target_len as i64 - seq_pos + 1
-                } else {
-                    seq_pos
-                };
-                if seg_pos > 0 {
-                    win.n = seg_pos as usize;
+        if let Some(ctx) = fm_context {
+            let mut i = 0;
+            while i < windows.len() {
+                if windows[i].fm_n >= 0 {
+                    let mut keep = true;
+                    let mut again = true;
+                    while again {
+                        again = false;
+                        let Some(pos) = fm_get_original_position(
+                            ctx.record,
+                            ctx.seq_meta,
+                            windows[i].length,
+                            windows[i].complement,
+                            windows[i].fm_n as usize,
+                        ) else {
+                            keep = false;
+                            break;
+                        };
+                        let Some(segment) = ctx.seq_meta.get(pos.segment_id) else {
+                            keep = false;
+                            break;
+                        };
+
+                        windows[i].id = pos.segment_id as i32;
+                        windows[i].target_len = segment.length;
+                        windows[i].n = pos.seg_pos;
+
+                        if pos.crosses_segment {
+                            let overext = (pos.seg_pos as i64 + windows[i].length as i64)
+                                - (segment.target_start as i64 + segment.length as i64 - 1);
+                            let use_length = windows[i].length as i64 - overext + 1;
+                            if overext <= 0 || use_length <= 0 {
+                                keep = false;
+                                break;
+                            }
+                            let overext = overext as usize;
+                            let use_length = use_length as usize;
+                            if use_length >= 8 && windows[i].length >= 8 {
+                                let mut split = windows[i].clone();
+                                split.id = if windows[i].complement {
+                                    (pos.segment_id as i32) - 1
+                                } else {
+                                    (pos.segment_id as i32) + 1
+                                };
+                                split.k = windows[i].k + use_length - 1;
+                                split.length = use_length;
+                                windows.push(split);
+                                windows[i].k += use_length;
+                                windows[i].length = overext;
+                                again = true;
+                            } else if windows[i].length >= 8 {
+                                windows[i].k += use_length;
+                                windows[i].length = overext;
+                            } else {
+                                windows[i].length = use_length;
+                            }
+                        }
+                    }
+                    if !keep || windows[i].id as usize != ctx.seq_idx {
+                        windows.remove(i);
+                        continue;
+                    }
                 }
-                win.fm_n = -1;
+                i += 1;
+            }
+        } else {
+            for win in &mut windows {
+                if win.fm_n >= 0 && win.fm_start >= 0 {
+                    let fm_pos = if win.complement {
+                        win.fm_bwt_len - win.fm_n - 1
+                    } else {
+                        win.fm_n
+                    };
+                    let seq_pos = fm_pos - win.fm_start + 1;
+                    let seg_pos = if win.complement {
+                        win.target_len as i64 - seq_pos + 1
+                    } else {
+                        seq_pos
+                    };
+                    if seg_pos > 0 {
+                        win.n = seg_pos as usize;
+                    }
+                    win.fm_n = -1;
+                }
             }
         }
     }
@@ -9408,15 +9568,33 @@ fn search_longtarget(
     {
         let mut msv_filtered: Vec<ssv_longtarget::HmmWindow> = Vec::new();
         for win in &windows {
-            let win_start = win.n;
-            let win_end = (win.n + win.length - 1).min(sq.n);
-            if win_end < win_start || (win_end - win_start + 1) < hmm.m {
+            let (win_len, sub_dsq) = if let Some(ctx) = fm_context.filter(|_| win.fm_n >= 0) {
+                let Some(sub_dsq) = fm_convert_range_to_dsq(
+                    ctx.record,
+                    ctx.ambiguities,
+                    win.fm_n as usize,
+                    win.length,
+                    win.complement,
+                    true,
+                ) else {
+                    continue;
+                };
+                (win.length, sub_dsq)
+            } else {
+                let win_start = win.n;
+                let win_end = (win.n + win.length - 1).min(sq.n);
+                if win_end < win_start || (win_end - win_start + 1) < hmm.m {
+                    continue;
+                }
+                let win_len = win_end - win_start + 1;
+                let mut sub_dsq = vec![DSQ_SENTINEL];
+                sub_dsq.extend_from_slice(&sq.dsq[win_start..=win_end]);
+                sub_dsq.push(DSQ_SENTINEL);
+                (win_len, sub_dsq)
+            };
+            if win_len < hmm.m {
                 continue;
             }
-            let win_len = win_end - win_start + 1;
-            let mut sub_dsq = vec![DSQ_SENTINEL];
-            sub_dsq.extend_from_slice(&sq.dsq[win_start..=win_end]);
-            sub_dsq.push(DSQ_SENTINEL);
 
             // Reconfig MSV length for this window, compute null, run MSVFilter,
             // check p-value against F1.
@@ -9462,14 +9640,33 @@ fn search_longtarget(
     {
         for msv in &windows {
             let msv_start = msv.n;
-            let msv_end = (msv.n + msv.length - 1).min(sq.n);
-            if msv_end < msv_start || (msv_end - msv_start + 1) < hmm.m {
+            let (subseq_len, vit_sub_dsq) = if let Some(ctx) = fm_context.filter(|_| msv.fm_n >= 0)
+            {
+                let Some(vit_sub_dsq) = fm_convert_range_to_dsq(
+                    ctx.record,
+                    ctx.ambiguities,
+                    msv.fm_n as usize,
+                    msv.length,
+                    msv.complement,
+                    true,
+                ) else {
+                    continue;
+                };
+                (msv.length, vit_sub_dsq)
+            } else {
+                let msv_end = (msv.n + msv.length - 1).min(sq.n);
+                if msv_end < msv_start || (msv_end - msv_start + 1) < hmm.m {
+                    continue;
+                }
+                let subseq_len = msv_end - msv_start + 1;
+                let mut vit_sub_dsq = vec![DSQ_SENTINEL];
+                vit_sub_dsq.extend_from_slice(&sq.dsq[msv_start..=msv_end]);
+                vit_sub_dsq.push(DSQ_SENTINEL);
+                (subseq_len, vit_sub_dsq)
+            };
+            if subseq_len < hmm.m {
                 continue;
             }
-            let subseq_len = msv_end - msv_start + 1;
-            let mut vit_sub_dsq = vec![DSQ_SENTINEL];
-            vit_sub_dsq.extend_from_slice(&sq.dsq[msv_start..=msv_end]);
-            vit_sub_dsq.push(DSQ_SENTINEL);
 
             // Match C p7_pli_postSSV_LongTarget exactly (p7_pipeline.c:1580-1612):
             //   (a) bias filter on full window_len, with F1_L=min(100,win_len) scaling

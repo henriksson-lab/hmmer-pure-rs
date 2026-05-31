@@ -138,9 +138,6 @@ pub unsafe fn msv_filter_dp_only(
         let tempv = _mm_adds_epu8(xev, biasv);
         let tempv = _mm_cmpeq_epi8(tempv, ceilingv);
         let cmp = _mm_movemask_epi8(tempv);
-        if cmp != 0 {
-            return MsvResult::Overflow;
-        }
 
         // Horizontal max across the xEv vector
         let mut tempv = _mm_shuffle_epi32::<{ shuffle_mask(2, 3, 0, 1) }>(xev);
@@ -153,6 +150,10 @@ pub unsafe fn msv_filter_dp_only(
         xev = _mm_max_epu8(xev, tempv);
         // Broadcast the max to all positions
         xev = _mm_shuffle_epi32::<{ shuffle_mask(0, 0, 0, 0) }>(xev);
+
+        if cmp != 0 {
+            return MsvResult::Overflow;
+        }
 
         // E->C transition
         xev = _mm_subs_epu8(xev, tecv);

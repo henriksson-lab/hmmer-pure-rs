@@ -521,6 +521,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     &vit_counter,
                     &fwd_counter,
                     None,
+                    None,
                 )?;
                 convert_crick_hits_to_forward(&mut rc_hits, sq.n);
                 hits.extend(rc_hits);
@@ -548,6 +549,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     &bias_counter,
                     &vit_counter,
                     &fwd_counter,
+                    None,
                     None,
                 )?);
             }

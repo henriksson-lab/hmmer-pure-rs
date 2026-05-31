@@ -115,9 +115,8 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
 /// pass MSV for essentially all DNA models tested.
 ///
 /// Above-threshold diagonals become `HmmWindow` entries with start/end
-/// positions established by tracing the diagonal forward and backward
-/// through the SSV emission scores. Callers typically merge overlapping
-/// windows via `extend_and_merge_windows`.
+/// positions established by tracing the diagonal forward and backward through
+/// the SSV emission scores.
 ///
 /// # Safety
 /// Requires SSE2.
@@ -370,9 +369,6 @@ pub unsafe fn ssv_filter_longtarget(
     windows
 }
 
-/// Extend and merge windows, expanding each by prefix/suffix lengths.
-/// Port of p7_pli_ExtendAndMergeWindows().
-/// For simplicity, uses a fixed extension of max_length * 0.2 on each side.
 /// Compute per-model-position prefix_lengths and suffix_lengths for the
 /// window extension heuristic. Port of `p7_hmm_ScoreDataComputeRest`
 /// (hmmer/src/p7_scoredata.c:314). Returns (prefix_lengths, suffix_lengths)
@@ -448,7 +444,7 @@ fn compute_prefix_suffix_lengths_hmm(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f3
 /// C reads transitions via `p7_oprofile_GetFwdTransitionArray(om, p7O_MI, ...)`
 /// which pulls from `om->tfv` (= exp of log-transition = round-tripped
 /// probability). Reading from raw HMM transitions gives slightly different
-/// floating-point results that propagate through extend_and_merge_windows,
+/// floating-point results that propagate through p7_pli_extend_and_merge_windows,
 /// changing SSV window lengths by a few residues.
 #[cfg(target_arch = "x86_64")]
 pub fn compute_prefix_suffix_lengths_from_om(
@@ -516,22 +512,6 @@ pub fn compute_prefix_suffix_lengths_from_om(
         prefix[k] += prefix[k - 1];
     }
     (prefix, suffix)
-}
-
-/// Extend windows outward by a fraction of max_length and merge those whose
-/// overlap exceeds `pct_overlap` of the shorter window. Mirrors C
-/// p7_pli_ExtendAndMergeWindows (hmmer/src/p7_pipeline.c:451).
-///
-/// C uses per-k `data->prefix_lengths[k]` / `suffix_lengths[k]` from
-/// P7_SCOREDATA for a variable extension; we approximate with a fixed 0.1
-/// fraction of max_length (the `0.1 +` term in C's formula). The pct_overlap
-/// argument defaults to 0.5 at the post-Vit stage in C.
-pub fn extend_and_merge_windows(
-    windows: &mut Vec<HmmWindow>,
-    max_length: usize,
-    target_len: usize,
-) {
-    extend_and_merge_windows_pct(windows, max_length, target_len, 0.5);
 }
 
 /// Full C-matching variant: per-window extension uses
@@ -666,33 +646,6 @@ fn merge_windows_impl(windows: &mut Vec<HmmWindow>, pct_overlap: f32) {
     }
 
     *windows = merged;
-}
-
-/// Variant of `extend_and_merge_windows` with a tunable overlap-percentage
-/// threshold. Uses the simple `0.2 * max_length` fixed extension (no
-/// scoredata). Use this when per-position prefix/suffix lengths aren't
-/// available; otherwise prefer `p7_pli_extend_and_merge_windows`.
-pub fn extend_and_merge_windows_pct(
-    windows: &mut Vec<HmmWindow>,
-    max_length: usize,
-    target_len: usize,
-    pct_overlap: f32,
-) {
-    if windows.is_empty() {
-        return;
-    }
-
-    // Extend each window by ~0.2 * max_length on each side. Fallback path used
-    // when per-k scoredata isn't available.
-    let extension = (max_length as f32 * 0.2).ceil() as usize;
-    for w in windows.iter_mut() {
-        let start = if w.n > extension { w.n - extension } else { 1 };
-        let end = (w.n + w.length + extension).min(target_len);
-        w.length = end - start + 1;
-        w.n = start;
-    }
-
-    merge_windows_impl(windows, pct_overlap);
 }
 
 /// Split windows longer than `max_window_len` into overlapping sub-windows for
