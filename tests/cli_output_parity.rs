@@ -3064,16 +3064,7 @@ fn search_commands_use_hmmer_ncpu_env_default_without_explicit_cpu() {
 }
 
 #[test]
-fn nhmmscan_w_beta_recomputes_window_length_evalues() {
-    fn first_tblout_evalue(path: &std::path::Path) -> f64 {
-        let tbl = std::fs::read_to_string(path).unwrap();
-        let line = tbl
-            .lines()
-            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .unwrap_or_else(|| panic!("no tblout hit in:\n{tbl}"));
-        line.split_whitespace().nth(12).unwrap().parse().unwrap()
-    }
-
+fn nhmmscan_w_beta_is_reported_but_keeps_pressed_maxl_like_c() {
     let dir = tempfile::tempdir().unwrap();
     let hmmdb = dir.path().join("made1.hmm");
     std::fs::copy("hmmer/tutorial/MADE1.hmm", &hmmdb).unwrap();
@@ -3138,13 +3129,10 @@ fn nhmmscan_w_beta_recomputes_window_length_evalues() {
     let stdout = String::from_utf8(beta_out.stdout).unwrap();
     assert!(stdout.contains("# window length beta value:        0.5\n"));
 
-    let default_evalue = first_tblout_evalue(&default_tbl);
-    let beta_evalue = first_tblout_evalue(&beta_tbl);
-    let expected_ratio = original.max_length as f64 / expected_maxl as f64;
-    let observed_ratio = beta_evalue / default_evalue;
-    assert!(
-        (observed_ratio - expected_ratio).abs() < expected_ratio * 0.05,
-        "observed ratio {observed_ratio} expected {expected_ratio}; default={default_evalue} beta={beta_evalue}"
+    assert_eq!(
+        table_data_rows(&std::fs::read_to_string(default_tbl).unwrap()),
+        table_data_rows(&std::fs::read_to_string(beta_tbl).unwrap()),
+        "C nhmmscan reports --w_beta but keeps the pressed profile MAXL unchanged"
     );
 }
 

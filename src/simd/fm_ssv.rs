@@ -249,10 +249,31 @@ impl FmAlphabet {
     }
 }
 
+/// Faithful Rust counterpart of C `FM_backtrackSeed()`.
+///
+/// The underlying `FmIndex` method performs the LF walk to a suffix-array
+/// sample, matching C's per-row seed backtracking contract.
+fn fm_backtrack_seed(fm: &FmIndex, row: usize) -> Option<usize> {
+    fm.backtrack_seed_position(row)
+}
+
+/// Faithful Rust counterpart of C `fm_newSeed()`: append one seed slot and
+/// return it to the caller for field assignment.
+fn fm_new_seed(seeds: &mut Vec<FmDiag>) -> &mut FmDiag {
+    seeds.push(FmDiag {
+        n: 0,
+        k: 0,
+        length: 0,
+        score: 0.0,
+        complementarity: Complementarity::NoComplement,
+    });
+    seeds.last_mut().expect("just pushed FM seed")
+}
+
 /// Result of `FM_getPassingDiags`: each surviving FM interval entry becomes a
 /// seed. Faithful to C's coordinate computation.
 #[allow(clippy::too_many_arguments)]
-fn get_passing_diags(
+fn fm_get_passing_diags(
     fm: &FmIndex,
     k: i32,
     depth: i32,
@@ -261,38 +282,29 @@ fn get_passing_diags(
     interval: FmInterval,
     seeds: &mut Vec<FmDiag>,
 ) {
-    // C iterates interval->lower..=interval->upper, backtracking each to a
-    // target position. The Rust FmIndex resolves a whole interval to text
-    // positions in one call (`locate_interval`), which is equivalent to C's
-    // per-entry FM_backtrackSeed over the same SA range.
-    let positions = fm.locate_interval(interval);
     // C uses `fmf->N` = the BWT length including the sentinel = text_len + 1.
     let fm_n = fm.n as i64 + 1;
-    for backtrack in positions {
-        let backtrack = backtrack as i64;
-        let mut seed = FmDiag {
-            k,
-            length: depth,
-            // C `FM_getPassingDiags`:
-            //   NOCOMPLEMENT: n = N - backtrack - depth - 1
-            //   COMPLEMENT:   n = backtrack
-            // The Rust `locate_interval` position sits one before C's
-            // `FM_backtrackSeed` value in the complement (revcomp) frame, so
-            // subtract 1 there to reproduce C's `diag->n` exactly (validated
-            // seed-for-seed against bundled C).
-            n: if complementarity == Complementarity::NoComplement {
-                fm_n - backtrack - depth as i64 - 1
-            } else {
-                backtrack - 1
-            },
-            score: 0.0,
-            complementarity,
+    for row in interval.lo..interval.hi {
+        let Some(backtrack) = fm_backtrack_seed(fm, row) else {
+            continue;
         };
+        let backtrack = backtrack as i64;
+        let seed = fm_new_seed(seeds);
+        seed.k = k;
+        seed.length = depth;
+        // C `FM_getPassingDiags`:
+        //   NOCOMPLEMENT: n = N - backtrack - depth - 1
+        //   COMPLEMENT:   n = backtrack
+        seed.n = if complementarity == Complementarity::NoComplement {
+            fm_n - backtrack - depth as i64 - 1
+        } else {
+            backtrack
+        };
+        seed.complementarity = complementarity;
         // C: if model_direction == fm_forward, seed->k -= (depth - 1)
         if model_direction == ModelDirection::Forward {
             seed.k -= depth - 1;
         }
-        seeds.push(seed);
     }
 }
 
@@ -388,7 +400,7 @@ fn fm_recurse(
                 // A seed to extend: emit all matching target positions from the
                 // fmf-locatable interval for this character.
                 if let Some((_, locatable)) = step {
-                    get_passing_diags(
+                    fm_get_passing_diags(
                         fmf,
                         k,
                         depth,
@@ -634,7 +646,14 @@ pub fn fm_get_seeds(
         }
     }
 
-    fm_merge_seeds(&mut seeds, fmf.n as i64, m, config.ssv_length as i32);
+    // C passes `fmf->N`, the BWT length including the terminal sentinel. Rust
+    // `FmIndex::n` is the biological text length, so use `bwt_len()` here.
+    fm_merge_seeds(
+        &mut seeds,
+        fmf.bwt_len() as i64,
+        m,
+        config.ssv_length as i32,
+    );
     seeds
 }
 
@@ -735,7 +754,7 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
 /// codes, 1-indexed so `target[1]` is FM position 0 (index 0 is a sentinel),
 /// matching C's `fm_convertRange2DSQ` extraction of `[target_start, target_end]`
 /// into `tmp_sq->dsq[1..]`. `fm_n` is the FM text length `fm->N`.
-pub fn fm_extend_seed(
+pub fn fm_extend_seed_core(
     diag: &mut FmDiag,
     target: &[usize],
     scores: &SsvScores,
@@ -856,7 +875,7 @@ mod tests {
             score: 0.0,
             complementarity: Complementarity::NoComplement,
         };
-        fm_extend_seed(&mut diag, &target_codes, &scores, &config, fm_n);
+        fm_extend_seed_core(&mut diag, &target_codes, &scores, &config, fm_n);
         // With a perfect-match target the extension should grow the diagonal and
         // produce a positive score equal to 2 bits per matched position.
         assert!(diag.score > 0.0);
@@ -1074,7 +1093,7 @@ mod tests {
         let fm_n = target_text.len() as i64 + 1;
         for diag in seeds.iter_mut() {
             if diag.complementarity == Complementarity::NoComplement {
-                fm_extend_seed(diag, &target_codes, &scores, &config, fm_n);
+                fm_extend_seed_core(diag, &target_codes, &scores, &config, fm_n);
                 assert!(diag.length >= 0);
             }
         }

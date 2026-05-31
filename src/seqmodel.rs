@@ -479,8 +479,10 @@ fn calculate_occupancy(hmm: &Hmm) -> (Vec<f32>, Vec<f32>) {
     mocc[0] = 0.0;
     mocc[1] = hmm.t[0][MI] + hmm.t[0][MM];
     for k in 2..=hmm.m {
-        mocc[k] = mocc[k - 1] * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI])
-            + (1.0 - mocc[k - 1]) * hmm.t[k - 1][DM];
+        let prev = mocc[k - 1];
+        let match_or_insert = prev * (hmm.t[k - 1][MM] + hmm.t[k - 1][MI]);
+        let delete_entry = (1.0_f64 - prev as f64) * hmm.t[k - 1][DM] as f64;
+        mocc[k] = (match_or_insert as f64 + delete_entry) as f32;
     }
 
     iocc[0] = hmm.t[0][MI] / hmm.t[0][IM];
@@ -670,6 +672,7 @@ pub fn build_single_seq_hmm_with_matrix_and_calibration(
 
     hmm.nseq = 1;
     hmm.eff_nseq = 1.0;
+    hmm.comlog = Some("[HMM created from a query sequence]".to_string());
 
     Ok(hmm)
 }

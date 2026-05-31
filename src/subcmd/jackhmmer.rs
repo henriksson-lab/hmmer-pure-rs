@@ -1592,6 +1592,19 @@ fn write_hmm_checkpoint(prefix: &Path, iteration: usize, hmm: &hmmer_pure_rs::hm
         eprintln!("Error creating HMM checkpoint {}: {}", path.display(), e);
         std::process::exit(1);
     });
+    let checkpoint_hmm;
+    let hmm = if iteration == 1 {
+        // C's round-1 single-sequence checkpoint omits EFFN; round 2+ builder
+        // checkpoints keep it.
+        checkpoint_hmm = {
+            let mut h = hmm.clone();
+            h.eff_nseq = -1.0;
+            h
+        };
+        &checkpoint_hmm
+    } else {
+        hmm
+    };
     hmmer_pure_rs::hmmfile::write_hmm(&mut file, hmm).unwrap_or_else(|e| {
         eprintln!("Error writing HMM checkpoint {}: {}", path.display(), e);
         std::process::exit(1);
@@ -1642,18 +1655,23 @@ fn checkpoint_path(prefix: &Path, iteration: usize, ext: &str) -> PathBuf {
 /// and hmmsearch build the same MSA without the query (`inc_n == 0`) and keep
 /// the raw insert representation ('.'/lowercase), so they pass `false`.
 pub(crate) fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
-    write_stockholm_msa_inner(out, msa, true)
+    write_stockholm_msa_inner(out, msa, true, msa.alen.max(1))
 }
 
 /// Same Stockholm writer, but emitting the raw `p7_tophits_Alignment` text
 /// (insert columns kept as '.'/lowercase). Used by phmmer and hmmsearch `-A`,
 /// which build the MSA without the query (`inc_n == 0`) and so match C's
 /// `esl_msafile_Write` byte-for-byte without any insert folding.
-pub(crate) fn write_tophits_alignment_msa(out: &mut dyn Write, msa: &Msa) {
-    write_stockholm_msa_inner(out, msa, false)
+pub(crate) fn write_tophits_alignment_msa_stockholm(out: &mut dyn Write, msa: &Msa) {
+    write_stockholm_msa_inner(out, msa, false, 200)
 }
 
-fn write_stockholm_msa_inner(out: &mut dyn Write, msa: &Msa, fold_inserts_to_match: bool) {
+fn write_stockholm_msa_inner(
+    out: &mut dyn Write,
+    msa: &Msa,
+    fold_inserts_to_match: bool,
+    cpl: usize,
+) {
     let maxname = msa.sqname.iter().map(|name| name.len()).max().unwrap_or(0);
     // maxgf: longest #=GF tag. We only ever emit ID/AC/DE/AU, all 2 chars,
     // and Easel floors maxgf at 2.
@@ -1711,64 +1729,74 @@ fn write_stockholm_msa_inner(out: &mut dyn Write, msa: &Msa, fold_inserts_to_mat
     }
 
     let gr_tag_width = margin.saturating_sub(maxname + 7);
-    for ((name, row), pp) in msa.sqname.iter().zip(msa.aseq.iter()).zip(msa.pp.iter()) {
-        // The builder (`tophits::included_alignment`) emits Easel's digital-MSA
-        // text form, where match-column gaps are '-', insert-column gaps are
-        // '.', and inserted residues are lowercase. C's `esl_msafile_Write`
-        // textizes those bytes unchanged (phmmer/hmmsearch path). jackhmmer's
-        // MSA instead collapses inserts into the consensus, so we optionally
-        // uppercase and fold '.'->'-' to match its C rendering.
-        let rendered: std::borrow::Cow<'_, [u8]> = if fold_inserts_to_match {
-            std::borrow::Cow::Owned(
-                row.iter()
-                    .map(|&ch| match ch {
-                        b'.' => b'-',
-                        b'a'..=b'z' => ch.to_ascii_uppercase(),
-                        _ => ch,
-                    })
-                    .collect(),
-            )
-        } else {
-            std::borrow::Cow::Borrowed(row.as_slice())
-        };
-        writeln!(
-            out,
-            "{:<width$} {}",
-            name,
-            String::from_utf8_lossy(&rendered),
-            width = margin - 1
-        )
-        .unwrap();
-        if let Some(pp) = pp {
+    let cpl = cpl.max(1);
+    let mut pos = 0usize;
+    while pos < msa.alen {
+        let end = (pos + cpl).min(msa.alen);
+        for ((name, row), pp) in msa.sqname.iter().zip(msa.aseq.iter()).zip(msa.pp.iter()) {
+            // The builder (`tophits::included_alignment`) emits Easel's digital-MSA
+            // text form, where match-column gaps are '-', insert-column gaps are
+            // '.', and inserted residues are lowercase. C's `esl_msafile_Write`
+            // textizes those bytes unchanged (phmmer/hmmsearch path). jackhmmer's
+            // MSA instead collapses inserts into the consensus, so we optionally
+            // uppercase and fold '.'->'-' to match its C rendering.
+            let rendered: std::borrow::Cow<'_, [u8]> = if fold_inserts_to_match {
+                std::borrow::Cow::Owned(
+                    row[pos..end]
+                        .iter()
+                        .map(|&ch| match ch {
+                            b'.' => b'-',
+                            b'a'..=b'z' => ch.to_ascii_uppercase(),
+                            _ => ch,
+                        })
+                        .collect(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(&row[pos..end])
+            };
             writeln!(
                 out,
-                "#=GR {:<maxname$} {:<gr_tag_width$} {}",
+                "{:<width$} {}",
                 name,
-                "PP",
-                String::from_utf8_lossy(pp),
+                String::from_utf8_lossy(&rendered),
+                width = margin - 1
+            )
+            .unwrap();
+            if let Some(pp) = pp {
+                writeln!(
+                    out,
+                    "#=GR {:<maxname$} {:<gr_tag_width$} {}",
+                    name,
+                    "PP",
+                    String::from_utf8_lossy(&pp[pos..end]),
+                )
+                .unwrap();
+            }
+        }
+        if let Some(pp_cons) = &msa.pp_cons {
+            writeln!(
+                out,
+                "#=GC {:<width$} {}",
+                "PP_cons",
+                String::from_utf8_lossy(&pp_cons[pos..end]),
+                width = margin - 6
             )
             .unwrap();
         }
-    }
-    if let Some(pp_cons) = &msa.pp_cons {
-        writeln!(
-            out,
-            "#=GC {:<width$} {}",
-            "PP_cons",
-            String::from_utf8_lossy(pp_cons),
-            width = margin - 6
-        )
-        .unwrap();
-    }
-    if let Some(rf) = &msa.rf {
-        writeln!(
-            out,
-            "#=GC {:<width$} {}",
-            "RF",
-            String::from_utf8_lossy(rf),
-            width = margin - 6
-        )
-        .unwrap();
+        if let Some(rf) = &msa.rf {
+            writeln!(
+                out,
+                "#=GC {:<width$} {}",
+                "RF",
+                String::from_utf8_lossy(&rf[pos..end]),
+                width = margin - 6
+            )
+            .unwrap();
+        }
+        pos = end;
+        if pos < msa.alen {
+            writeln!(out).unwrap();
+        }
     }
     writeln!(out, "//").unwrap();
 }

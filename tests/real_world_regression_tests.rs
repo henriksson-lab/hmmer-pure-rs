@@ -2,6 +2,7 @@
 //! realistic fixtures instead of synthetic toy cases.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
 use std::process::Command;
 
 fn binary_path(name: &str) -> std::path::PathBuf {
@@ -57,6 +58,42 @@ fn run_c_hmmsearch_tblout(hmm: &str, seqdb: &str) -> String {
     std::fs::read_to_string(tblout).unwrap()
 }
 
+fn run_hmmsearch_tblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["search", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), hmm, seqdb]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer search");
+    assert!(
+        output.status.success(),
+        "hmmer search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_hmmsearch_tblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), hmm, seqdb]);
+    let output = Command::new(test_path("hmmer/src/hmmsearch"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C hmmsearch");
+    assert!(
+        output.status.success(),
+        "bundled C hmmsearch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
 fn run_nhmmer_tblout(hmm: &str, seqdb: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
@@ -77,16 +114,17 @@ fn run_c_nhmmer_tblout(hmm: &str, seqdb: &str) -> String {
 }
 
 fn run_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
+    run_nhmmer_dfamtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_nhmmer_dfamtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let dfamtblout = dir.path().join("dfamtblout.txt");
+    let mut args = vec!["nhmmer"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--dfamtblout", dfamtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "nhmmer",
-            "--dfamtblout",
-            dfamtblout.to_str().unwrap(),
-            hmm,
-            seqdb,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer nhmmer");
     assert!(
@@ -98,10 +136,16 @@ fn run_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
 }
 
 fn run_c_nhmmer_dfamtblout(hmm: &str, seqdb: &str) -> String {
+    run_c_nhmmer_dfamtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_c_nhmmer_dfamtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let dfamtblout = dir.path().join("dfamtblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&["--dfamtblout", dfamtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(test_path("hmmer/src/nhmmer"))
-        .args(["--dfamtblout", dfamtblout.to_str().unwrap(), hmm, seqdb])
+        .args(args)
         .output()
         .expect("failed to run bundled C nhmmer");
     assert!(
@@ -167,10 +211,90 @@ fn hmm_without_date(path: &std::path::Path) -> String {
         .join("\n")
 }
 
+fn hmm_without_date_or_com(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("DATE  "))
+        .filter(|line| !line.starts_with("COM   "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_hmm_text_matches_with_float_tolerance(rust: &str, c: &str, tol: f64, context: &str) {
+    let rust_tokens: Vec<&str> = rust.split_whitespace().collect();
+    let c_tokens: Vec<&str> = c.split_whitespace().collect();
+    assert_eq!(
+        rust_tokens.len(),
+        c_tokens.len(),
+        "{context}: token counts differ"
+    );
+    for (idx, (rust_tok, c_tok)) in rust_tokens.iter().zip(c_tokens.iter()).enumerate() {
+        if rust_tok == c_tok {
+            continue;
+        }
+        match (rust_tok.parse::<f64>(), c_tok.parse::<f64>()) {
+            (Ok(rust_val), Ok(c_val)) if (rust_val - c_val).abs() <= tol => {}
+            _ => panic!("{context}: token {idx} differs: rust={rust_tok:?} c={c_tok:?}"),
+        }
+    }
+}
+
+fn first_stockholm_from_gzip(gz_path: &str, output: &std::path::Path) {
+    let file = std::fs::File::open(gz_path).unwrap();
+    let mut decoder = flate2::read::GzDecoder::new(file);
+    let mut text = String::new();
+    decoder.read_to_string(&mut text).unwrap();
+    let mut first = String::new();
+    for line in text.lines() {
+        first.push_str(line);
+        first.push('\n');
+        if line.trim() == "//" {
+            break;
+        }
+    }
+    assert!(first.contains("//"));
+    std::fs::write(output, first).unwrap();
+}
+
+fn write_first_fasta_records(path: &std::path::Path, source_rel: &str, n_records: usize) {
+    let src = std::fs::read_to_string(test_path(source_rel)).unwrap();
+    let mut out = String::new();
+    let mut seen = 0usize;
+    for line in src.lines() {
+        if line.starts_with('>') {
+            seen += 1;
+        }
+        if seen > n_records {
+            break;
+        }
+        if seen > 0 {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert_eq!(
+        seen.min(n_records),
+        n_records,
+        "source FASTA {source_rel} contained fewer than {n_records} records"
+    );
+    std::fs::write(path, out).unwrap();
+}
+
 fn output_without_cpu_footer(output: &str) -> String {
     output
         .lines()
         .filter(|line| !line.starts_with("# CPU time:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_hmmbuild_summary(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| !line.starts_with("# CPU time:"))
+        .filter(|line| !line.starts_with("# output HMM file:"))
+        .filter(|line| !line.starts_with("# output alignment file:"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -285,6 +409,112 @@ fn run_c_phmmer_tblout_real(seqfile: &str, seqdb: &str) -> String {
     std::fs::read_to_string(tblout).unwrap()
 }
 
+fn run_phmmer_tblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["phmmer", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer phmmer");
+    assert!(
+        output.status.success(),
+        "hmmer phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_phmmer_tblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--tblout", tblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(test_path("hmmer/src/phmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C phmmer");
+    assert!(
+        output.status.success(),
+        "bundled C phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_phmmer_domtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["phmmer"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--domtblout", domtblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer phmmer");
+    assert!(
+        output.status.success(),
+        "hmmer phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
+fn run_phmmer_pfamtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["phmmer"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--pfamtblout", pfamtblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer phmmer");
+    assert!(
+        output.status.success(),
+        "hmmer phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
+}
+
+fn run_c_phmmer_pfamtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&["--pfamtblout", pfamtblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(test_path("hmmer/src/phmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C phmmer");
+    assert!(
+        output.status.success(),
+        "bundled C phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(pfamtblout).unwrap()
+}
+
+fn run_c_phmmer_domtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domtblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&["--domtblout", domtblout.to_str().unwrap(), seqfile, seqdb]);
+    let output = Command::new(test_path("hmmer/src/phmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C phmmer");
+    assert!(
+        output.status.success(),
+        "bundled C phmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
 fn run_jackhmmer_tblout(seqfile: &str, seqdb: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
@@ -332,6 +562,100 @@ fn run_c_jackhmmer_tblout(seqfile: &str, seqdb: &str) -> String {
     std::fs::read_to_string(tblout).unwrap()
 }
 
+fn run_jackhmmer_tblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["jackhmmer"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--noali",
+        "--tblout",
+        tblout.to_str().unwrap(),
+        seqfile,
+        seqdb,
+    ]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer jackhmmer");
+    assert!(
+        output.status.success(),
+        "hmmer jackhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_c_jackhmmer_tblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let tblout = dir.path().join("tblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&[
+        "--noali",
+        "--tblout",
+        tblout.to_str().unwrap(),
+        seqfile,
+        seqdb,
+    ]);
+    let output = Command::new(test_path("hmmer/src/jackhmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C jackhmmer");
+    assert!(
+        output.status.success(),
+        "bundled C jackhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(tblout).unwrap()
+}
+
+fn run_jackhmmer_domtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["jackhmmer"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--noali",
+        "--domtblout",
+        domtblout.to_str().unwrap(),
+        seqfile,
+        seqdb,
+    ]);
+    let output = Command::new(binary_path("hmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run hmmer jackhmmer");
+    assert!(
+        output.status.success(),
+        "hmmer jackhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
+fn run_c_jackhmmer_domtblout_with_args(seqfile: &str, seqdb: &str, extra_args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let domtblout = dir.path().join("domtblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&[
+        "--noali",
+        "--domtblout",
+        domtblout.to_str().unwrap(),
+        seqfile,
+        seqdb,
+    ]);
+    let output = Command::new(test_path("hmmer/src/jackhmmer"))
+        .args(args)
+        .output()
+        .expect("failed to run bundled C jackhmmer");
+    assert!(
+        output.status.success(),
+        "bundled C jackhmmer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(domtblout).unwrap()
+}
+
 fn run_c_nhmmer_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     let tblout = dir.path().join("tblout.txt");
@@ -374,6 +698,10 @@ fn run_nhmmer(hmm: &str, seqdb: &str, extra_args: &[&str]) -> (String, String) {
 }
 
 fn run_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    run_nhmmscan_tblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_nhmmscan_tblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -387,14 +715,16 @@ fn run_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["nhmmscan"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--tblout",
+        tblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "nhmmscan",
-            "--tblout",
-            tblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer nhmmscan");
     assert!(
@@ -406,6 +736,10 @@ fn run_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_nhmmscan_dfamtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_nhmmscan_dfamtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -419,14 +753,16 @@ fn run_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let dfamtblout = dir.path().join("dfamtblout.txt");
+    let mut args = vec!["nhmmscan"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--dfamtblout",
+        dfamtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "nhmmscan",
-            "--dfamtblout",
-            dfamtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer nhmmscan");
     assert!(
@@ -438,6 +774,10 @@ fn run_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_c_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    run_c_nhmmscan_tblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_c_nhmmscan_tblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -453,13 +793,15 @@ fn run_c_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
     );
 
     let tblout = dir.path().join("tblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&[
+        "--tblout",
+        tblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(test_path("hmmer/src/nhmmscan"))
-        .args([
-            "--tblout",
-            tblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C nhmmscan");
     assert!(
@@ -471,6 +813,10 @@ fn run_c_nhmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_c_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_c_nhmmscan_dfamtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_c_nhmmscan_dfamtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -486,13 +832,15 @@ fn run_c_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
     );
 
     let dfamtblout = dir.path().join("dfamtblout.txt");
+    let mut args = extra_args.to_vec();
+    args.extend_from_slice(&[
+        "--dfamtblout",
+        dfamtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(test_path("hmmer/src/nhmmscan"))
-        .args([
-            "--dfamtblout",
-            dfamtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C nhmmscan");
     assert!(
@@ -504,6 +852,10 @@ fn run_c_nhmmscan_dfamtblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    run_hmmscan_tblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_hmmscan_tblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -517,15 +869,16 @@ fn run_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["scan", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--tblout",
+        tblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "scan",
-            "--noali",
-            "--tblout",
-            tblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer scan");
     assert!(
@@ -537,6 +890,10 @@ fn run_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_c_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
+    run_c_hmmscan_tblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_c_hmmscan_tblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -550,14 +907,16 @@ fn run_c_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let tblout = dir.path().join("tblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--tblout",
+        tblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(test_path("hmmer/src/hmmscan"))
-        .args([
-            "--noali",
-            "--tblout",
-            tblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C hmmscan");
     assert!(
@@ -569,6 +928,10 @@ fn run_c_hmmscan_tblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_hmmscan_domtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_hmmscan_domtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -582,15 +945,16 @@ fn run_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["scan", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--domtblout",
+        domtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "scan",
-            "--noali",
-            "--domtblout",
-            domtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer scan");
     assert!(
@@ -602,6 +966,10 @@ fn run_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_c_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_c_hmmscan_domtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_c_hmmscan_domtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -615,14 +983,16 @@ fn run_c_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--domtblout",
+        domtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(test_path("hmmer/src/hmmscan"))
-        .args([
-            "--noali",
-            "--domtblout",
-            domtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C hmmscan");
     assert!(
@@ -634,6 +1004,10 @@ fn run_c_hmmscan_domtblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_hmmscan_pfamtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_hmmscan_pfamtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -647,15 +1021,16 @@ fn run_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["scan", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--pfamtblout",
+        pfamtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "scan",
-            "--noali",
-            "--pfamtblout",
-            pfamtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer scan");
     assert!(
@@ -667,6 +1042,10 @@ fn run_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
 }
 
 fn run_c_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
+    run_c_hmmscan_pfamtblout_with_args(hmmdb, seqfile, &[])
+}
+
+fn run_c_hmmscan_pfamtblout_with_args(hmmdb: &str, seqfile: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let hmm_copy = dir.path().join("models.hmm");
     std::fs::copy(hmmdb, &hmm_copy).unwrap();
@@ -680,14 +1059,16 @@ fn run_c_hmmscan_pfamtblout(hmmdb: &str, seqfile: &str) -> String {
         String::from_utf8_lossy(&press.stderr)
     );
     let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--pfamtblout",
+        pfamtblout.to_str().unwrap(),
+        hmm_copy.to_str().unwrap(),
+        seqfile,
+    ]);
     let output = Command::new(test_path("hmmer/src/hmmscan"))
-        .args([
-            "--noali",
-            "--pfamtblout",
-            pfamtblout.to_str().unwrap(),
-            hmm_copy.to_str().unwrap(),
-            seqfile,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C hmmscan");
     assert!(
@@ -715,17 +1096,17 @@ fn run_nhmmer_stdout(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
 }
 
 fn run_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
+    run_hmmsearch_domtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_hmmsearch_domtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["search", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--domtblout", domtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "search",
-            "--noali",
-            "--domtblout",
-            domtblout.to_str().unwrap(),
-            hmm,
-            seqdb,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer search");
     assert!(
@@ -737,16 +1118,17 @@ fn run_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
 }
 
 fn run_c_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
+    run_c_hmmsearch_domtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_c_hmmsearch_domtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let domtblout = dir.path().join("domtblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--domtblout", domtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(test_path("hmmer/src/hmmsearch"))
-        .args([
-            "--noali",
-            "--domtblout",
-            domtblout.to_str().unwrap(),
-            hmm,
-            seqdb,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C hmmsearch");
     assert!(
@@ -758,17 +1140,17 @@ fn run_c_hmmsearch_domtblout(hmm: &str, seqdb: &str) -> String {
 }
 
 fn run_hmmsearch_pfamtblout(hmm: &str, seqdb: &str) -> String {
+    run_hmmsearch_pfamtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_hmmsearch_pfamtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["search", "--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--pfamtblout", pfamtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(binary_path("hmmer"))
-        .args([
-            "search",
-            "--noali",
-            "--pfamtblout",
-            pfamtblout.to_str().unwrap(),
-            hmm,
-            seqdb,
-        ])
+        .args(args)
         .output()
         .expect("failed to run hmmer search");
     assert!(
@@ -780,16 +1162,17 @@ fn run_hmmsearch_pfamtblout(hmm: &str, seqdb: &str) -> String {
 }
 
 fn run_c_hmmsearch_pfamtblout(hmm: &str, seqdb: &str) -> String {
+    run_c_hmmsearch_pfamtblout_with_args(hmm, seqdb, &[])
+}
+
+fn run_c_hmmsearch_pfamtblout_with_args(hmm: &str, seqdb: &str, extra_args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let pfamtblout = dir.path().join("pfamtblout.txt");
+    let mut args = vec!["--noali"];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&["--pfamtblout", pfamtblout.to_str().unwrap(), hmm, seqdb]);
     let output = Command::new(test_path("hmmer/src/hmmsearch"))
-        .args([
-            "--noali",
-            "--pfamtblout",
-            pfamtblout.to_str().unwrap(),
-            hmm,
-            seqdb,
-        ])
+        .args(args)
         .output()
         .expect("failed to run bundled C hmmsearch");
     assert!(
@@ -1412,6 +1795,35 @@ fn test_nhmmer_trna_ecoli_genome_fasta_matches_bundled_c_rows() {
 }
 
 #[test]
+fn test_nhmmer_trna_ecoli_genome_gzip_watson_dfamtblout_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let seqdb = test_path("external/new_real/dna/GCF_000005845.2_ASM584v2_genomic.fna.gz");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+
+    let rust_rows = parse_dfamtbl_rows(&run_nhmmer_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--watson"],
+    ));
+    let c_rows = parse_dfamtbl_rows(&run_c_nhmmer_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--watson"],
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs gzipped E. coli genome nhmmer --watson dfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 50);
+}
+
+#[test]
 fn test_nhmmer_trna_ecoli_genome_fm_matches_bundled_c_rows() {
     let dir = tempfile::tempdir().unwrap();
     let hmm = dir.path().join("RF00005_tRNA.hmm");
@@ -1440,6 +1852,221 @@ fn test_nhmmer_trna_ecoli_genome_fm_matches_bundled_c_rows() {
         "tRNA vs E. coli genome FM-index nhmmer rows diverged from bundled C"
     );
     assert_eq!(rust_rows.len(), 85);
+}
+
+#[test]
+fn test_makehmmerdb_ecoli_slice_option_output_matches_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_fm = dir.path().join("rust.ecoli250k.hmmerdb");
+    let c_fm = dir.path().join("c.ecoli250k.hmmerdb");
+    let seqdb = test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--informat",
+            "fasta",
+            "--bin_length",
+            "128",
+            "--sa_freq",
+            "4",
+            &seqdb,
+            rust_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer makehmmerdb with options");
+    assert!(
+        rust.status.success(),
+        "hmmer makehmmerdb with options failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/makehmmerdb"))
+        .args([
+            "--informat",
+            "fasta",
+            "--bin_length",
+            "128",
+            "--sa_freq",
+            "4",
+            &seqdb,
+            c_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C makehmmerdb with options");
+    assert!(
+        c.status.success(),
+        "bundled C makehmmerdb with options failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(rust_fm).unwrap(),
+        std::fs::read(c_fm).unwrap(),
+        "makehmmerdb --bin_length/--sa_freq output bytes diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_makehmmerdb_ecoli_slice_fwd_only_cstream_matches_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_fm = dir.path().join("rust.ecoli250k.fwd.hmmerdb");
+    let c_fm = dir.path().join("c.ecoli250k.fwd.hmmerdb");
+    let seqdb = test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--dna",
+            "--bin_length",
+            "128",
+            "--sa_freq",
+            "16",
+            "--fwd_only",
+            "--cstream",
+            &seqdb,
+            rust_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer makehmmerdb --fwd_only --cstream");
+    assert!(
+        rust.status.success(),
+        "hmmer makehmmerdb --fwd_only --cstream failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/makehmmerdb"))
+        .args([
+            "--dna",
+            "--bin_length",
+            "128",
+            "--sa_freq",
+            "16",
+            "--fwd_only",
+            &seqdb,
+            c_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C makehmmerdb --fwd_only");
+    assert!(
+        c.status.success(),
+        "bundled C makehmmerdb --fwd_only failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(rust_fm).unwrap(),
+        std::fs::read(c_fm).unwrap(),
+        "makehmmerdb --fwd_only --cstream output bytes diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_makehmmerdb_ecoli_genome_gzip_block_options_match_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_fm = dir.path().join("rust.ecoli_genome.hmmerdb");
+    let c_fm = dir.path().join("c.ecoli_genome.hmmerdb");
+    let seqdb = test_path("external/new_real/dna/GCF_000005845.2_ASM584v2_genomic.fna.gz");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--dna",
+            "--bin_length",
+            "256",
+            "--sa_freq",
+            "4",
+            "--block_size",
+            "1",
+            "--cstream",
+            &seqdb,
+            rust_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer makehmmerdb on gzipped genome");
+    assert!(
+        rust.status.success(),
+        "hmmer makehmmerdb gzipped genome failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/makehmmerdb"))
+        .args([
+            "--dna",
+            "--bin_length",
+            "256",
+            "--sa_freq",
+            "4",
+            "--block_size",
+            "1",
+            &seqdb,
+            c_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C makehmmerdb on gzipped genome");
+    assert!(
+        c.status.success(),
+        "bundled C makehmmerdb gzipped genome failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(rust_fm).unwrap(),
+        std::fs::read(c_fm).unwrap(),
+        "makehmmerdb gzipped-genome block option output bytes diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_makehmmerdb_yeast_gzip_multirecord_matches_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_fm = dir.path().join("rust.yeast.hmmerdb");
+    let c_fm = dir.path().join("c.yeast.hmmerdb");
+    let seqdb =
+        test_path("external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "makehmmerdb",
+            "--dna",
+            "--bin_length",
+            "32",
+            "--sa_freq",
+            "16",
+            &seqdb,
+            rust_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer makehmmerdb on gzipped yeast FASTA");
+    assert!(
+        rust.status.success(),
+        "hmmer makehmmerdb gzipped yeast failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/makehmmerdb"))
+        .args([
+            "--dna",
+            "--bin_length",
+            "32",
+            "--sa_freq",
+            "16",
+            &seqdb,
+            c_fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C makehmmerdb on gzipped yeast FASTA");
+    assert!(
+        c.status.success(),
+        "bundled C makehmmerdb gzipped yeast failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(rust_fm).unwrap(),
+        std::fs::read(c_fm).unwrap(),
+        "makehmmerdb should index every record in gzipped multi-record FASTA like bundled C"
+    );
 }
 
 #[test]
@@ -1502,6 +2129,58 @@ fn test_new_real_hatpase_metadata_and_serialization_tools_match_bundled_c() {
 }
 
 #[test]
+fn test_realistic_pfam_fetch_and_convert_modes_match_bundled_c() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    for key in ["14-3-3", "PF00244.27"] {
+        assert_eq!(
+            run_hmmer_stdout(&["fetch", &hmmdb, key]),
+            run_c_tool_stdout("hmmfetch", &[&hmmdb, key]),
+            "hmmfetch {key} from Pfam first12 diverged from bundled C"
+        );
+    }
+
+    let hmm = test_path("test_data/mapali/20aa-rebuilt.hmm");
+    assert_eq!(
+        run_hmmer_stdout(&["convert", "-a", &hmm]),
+        run_c_tool_stdout("hmmconvert", &["-a", &hmm])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["convert", "-2", &hmm]),
+        run_c_tool_stdout("hmmconvert", &["-2", &hmm])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["convert", "--outfmt", "3/b", &hmm]),
+        run_c_tool_stdout("hmmconvert", &["--outfmt", "3/b", &hmm])
+    );
+}
+
+#[test]
+fn test_realistic_pfam_hmmpress_sidecars_match_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm_copy = dir.path().join("Pfam-A.first12.hmm");
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    std::fs::copy(&hmmdb, &hmm_copy).unwrap();
+
+    press_rust_hmmdb(&hmm_copy);
+    let rust_sidecars = ["h3m", "h3i", "h3f", "h3p"].map(|suffix| {
+        let path = hmm_copy.with_extension(format!("hmm.{suffix}"));
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        (suffix, bytes)
+    });
+    press_c_hmmdb(&hmm_copy);
+
+    for (suffix, rust_bytes) in rust_sidecars {
+        let c_sidecar = hmm_copy.with_extension(format!("hmm.{suffix}"));
+        let c_bytes = std::fs::read(&c_sidecar).unwrap();
+        assert_eq!(
+            rust_bytes, c_bytes,
+            "hmmpress sidecar .{suffix} diverged from bundled C"
+        );
+    }
+}
+
+#[test]
 fn test_realistic_dnaj_hmmbuild_and_hmmlogo_match_bundled_c() {
     let dir = tempfile::tempdir().unwrap();
     let rust_hmm = dir.path().join("rust_DnaJ.hmm");
@@ -1515,6 +2194,97 @@ fn test_realistic_dnaj_hmmbuild_and_hmmlogo_match_bundled_c() {
         run_hmmer_stdout(&["logo", rust_hmm.to_str().unwrap()]),
         run_c_tool_stdout("hmmlogo", &[rust_hmm.to_str().unwrap()])
     );
+}
+
+#[test]
+fn test_realistic_dnaj_hmmbuild_name_summary_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_DnaJ_named.hmm");
+    let c_hmm = dir.path().join("c_DnaJ_named.hmm");
+    let msa = test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "build",
+            "-n",
+            "DnaJ_audit",
+            rust_hmm.to_str().unwrap(),
+            &msa,
+        ])
+        .output()
+        .expect("failed to run hmmer build -n");
+    assert!(
+        rust.status.success(),
+        "hmmer build -n failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    let c = Command::new(test_path("hmmer/src/hmmbuild"))
+        .args(["-n", "DnaJ_audit", c_hmm.to_str().unwrap(), &msa])
+        .output()
+        .expect("failed to run bundled C hmmbuild -n");
+    assert!(
+        c.status.success(),
+        "bundled C hmmbuild -n failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let rust_stdout = String::from_utf8(rust.stdout).unwrap();
+    assert!(rust_stdout.contains("# name (the single) HMM:            DnaJ_audit"));
+    assert_eq!(
+        normalize_hmmbuild_summary(&rust_stdout),
+        normalize_hmmbuild_summary(&String::from_utf8(c.stdout).unwrap())
+    );
+    assert_eq!(hmm_without_date(&rust_hmm), hmm_without_date(&c_hmm));
+}
+
+#[test]
+fn test_realistic_dnaj_gzip_hmm_readers_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    let gz_hmm = dir.path().join("DnaJ.hmm.gz");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    {
+        let input = std::fs::File::open(&hmm).unwrap();
+        let output = std::fs::File::create(&gz_hmm).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(output, flate2::Compression::default());
+        std::io::copy(&mut std::io::BufReader::new(input), &mut encoder).unwrap();
+        encoder.finish().unwrap();
+    }
+    let gz_hmm = gz_hmm.to_str().unwrap();
+
+    assert_eq!(
+        run_hmmer_stdout(&["fetch", gz_hmm, "DnaJ"]),
+        run_c_tool_stdout("hmmfetch", &[gz_hmm, "DnaJ"])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["stat", gz_hmm]),
+        run_c_tool_stdout("hmmstat", &[gz_hmm])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["convert", gz_hmm]),
+        run_c_tool_stdout("hmmconvert", &[gz_hmm])
+    );
+}
+
+#[test]
+fn test_realistic_full_pfam_gzip_hmmstat_matches_bundled_c_for_edge_rounding_row() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.hmm.gz");
+    let rust = run_hmmer_stdout(&["stat", &hmmdb]);
+    let c = run_c_tool_stdout("hmmstat", &[&hmmdb]);
+    let find_row = |output: &str| {
+        output
+            .lines()
+            .find(|line| line.contains("Zn2Cys6-like"))
+            .unwrap()
+            .to_string()
+    };
+
+    assert_eq!(find_row(&rust), find_row(&c));
+    assert!(find_row(&rust).contains("  0.52   0.05"));
 }
 
 #[test]
@@ -1540,6 +2310,501 @@ fn test_realistic_dnaj_hmmsim_msv_matches_bundled_c() {
 }
 
 #[test]
+fn test_realistic_dnaj_hmmsim_vit_fwd_hyb_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    let hmm = hmm.to_str().unwrap();
+
+    for mode in ["--vit", "--fwd", "--hyb"] {
+        assert_eq!(
+            output_without_cpu_footer(&run_hmmer_stdout(&[
+                "sim", "--seed", "42", "-N", "1000", mode, hmm
+            ])),
+            output_without_cpu_footer(&run_c_tool_stdout(
+                "hmmsim",
+                &["--seed", "42", "-N", "1000", mode, hmm]
+            )),
+            "DnaJ hmmsim {mode} output diverged from bundled C"
+        );
+    }
+}
+
+#[test]
+fn test_hatpase_hmmsim_forward_small_tail_mass_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let hmm = hmm.to_str().unwrap();
+
+    assert_eq!(
+        output_without_cpu_footer(&run_hmmer_stdout(&[
+            "sim", "--seed", "21", "-N", "120", "-L", "130", "--fwd", "--bgflat", hmm
+        ])),
+        output_without_cpu_footer(&run_c_tool_stdout(
+            "hmmsim",
+            &["--seed", "21", "-N", "120", "-L", "130", "--fwd", "--bgflat", hmm]
+        )),
+        "HATPase_c hmmsim --fwd --bgflat small-tail output diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_dnaj_hmmsim_forward_bgcomp_no_lengthmodel_artifacts_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    let rust_out = dir.path().join("rust.out");
+    let rust_p = dir.path().join("rust.p");
+    let rust_e = dir.path().join("rust.e");
+    let rust_f = dir.path().join("rust.f");
+    let c_out = dir.path().join("c.out");
+    let c_p = dir.path().join("c.p");
+    let c_e = dir.path().join("c.e");
+    let c_f = dir.path().join("c.f");
+    build_rust_hmm(
+        &[
+            "--amino",
+            "--wgsc",
+            "--eclust",
+            "--eid",
+            "0.7",
+            "--plaplace",
+        ],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+
+    let common = [
+        "--seed",
+        "31",
+        "--fwd",
+        "--bgcomp",
+        "--x-no-lengthmodel",
+        "-N",
+        "300",
+        "-L",
+        "85",
+    ];
+    let mut rust_args = vec!["sim"];
+    rust_args.extend_from_slice(&common);
+    rust_args.extend_from_slice(&[
+        "--pfile",
+        rust_p.to_str().unwrap(),
+        "--efile",
+        rust_e.to_str().unwrap(),
+        "--ffile",
+        rust_f.to_str().unwrap(),
+        "-o",
+        rust_out.to_str().unwrap(),
+        hmm.to_str().unwrap(),
+    ]);
+    let rust = Command::new(binary_path("hmmer"))
+        .args(rust_args)
+        .output()
+        .expect("failed to run hmmer sim");
+    assert!(
+        rust.status.success(),
+        "hmmer sim failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let mut c_args = common.to_vec();
+    c_args.extend_from_slice(&[
+        "--pfile",
+        c_p.to_str().unwrap(),
+        "--efile",
+        c_e.to_str().unwrap(),
+        "--ffile",
+        c_f.to_str().unwrap(),
+        "-o",
+        c_out.to_str().unwrap(),
+        hmm.to_str().unwrap(),
+    ]);
+    let c = Command::new(test_path("hmmer/src/hmmsim"))
+        .args(c_args)
+        .output()
+        .expect("failed to run bundled C hmmsim");
+    assert!(
+        c.status.success(),
+        "bundled C hmmsim failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&rust_out).unwrap(),
+        std::fs::read_to_string(&c_out).unwrap(),
+        "hmmsim --fwd --bgcomp --x-no-lengthmodel summary diverged from bundled C"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rust_f).unwrap(),
+        std::fs::read_to_string(&c_f).unwrap(),
+        "Forward --ffile should be empty like bundled C"
+    );
+    assert_hmm_text_matches_with_float_tolerance(
+        &std::fs::read_to_string(&rust_p).unwrap(),
+        &std::fs::read_to_string(&c_p).unwrap(),
+        1.0e-4,
+        "hmmsim Forward pfile",
+    );
+    assert_hmm_text_matches_with_float_tolerance(
+        &std::fs::read_to_string(&rust_e).unwrap(),
+        &std::fs::read_to_string(&c_e).unwrap(),
+        5.0e-3,
+        "hmmsim Forward efile",
+    );
+}
+
+#[test]
+fn test_realistic_dnaj_hmmsearch_yeast_proteome_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_rows, c_rows,
+        "DnaJ vs yeast proteome hmmsearch rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 22);
+
+    let rust_domains = parse_domtbl_rows(&run_hmmsearch_domtblout(hmm.to_str().unwrap(), &seqdb));
+    let c_domains = parse_domtbl_rows(&run_c_hmmsearch_domtblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_domains, c_domains,
+        "DnaJ vs yeast proteome hmmsearch domain rows diverged from bundled C"
+    );
+    assert_eq!(rust_domains.len(), 32);
+}
+
+#[test]
+fn test_realistic_dnaj_hmmsearch_max_yeast_proteome_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    let tblout = dir.path().join("rust.tblout");
+    let c_tblout = dir.path().join("c.tblout");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "search",
+            "--max",
+            "--noali",
+            "--tblout",
+            tblout.to_str().unwrap(),
+            hmm.to_str().unwrap(),
+            &seqdb,
+        ])
+        .output()
+        .expect("failed to run hmmer search --max");
+    assert!(
+        rust.status.success(),
+        "hmmer search --max failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    let c = Command::new(test_path("hmmer/src/hmmsearch"))
+        .args([
+            "--max",
+            "--noali",
+            "--tblout",
+            c_tblout.to_str().unwrap(),
+            hmm.to_str().unwrap(),
+            &seqdb,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmsearch --max");
+    assert!(
+        c.status.success(),
+        "bundled C hmmsearch --max failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let rust_rows = parse_hmmsearch_rows(&std::fs::read_to_string(tblout).unwrap());
+    let c_rows = parse_hmmsearch_rows(&std::fs::read_to_string(c_tblout).unwrap());
+    assert_eq!(
+        rust_rows, c_rows,
+        "DnaJ vs yeast proteome hmmsearch --max rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 73);
+}
+
+#[test]
+fn test_realistic_dnaj_hmmscan_yeast_proteome_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmscan_tblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmscan_tblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_rows, c_rows,
+        "DnaJ vs yeast proteome hmmscan rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 22);
+}
+
+#[test]
+fn test_realistic_pfam_panel_yeast_proteome_matches_bundled_c_rows() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust_search_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout(&hmmdb, &seqdb));
+    let c_search_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout(&hmmdb, &seqdb));
+    assert_eq!(
+        rust_search_rows, c_search_rows,
+        "Pfam first12 vs yeast proteome hmmsearch rows diverged from bundled C"
+    );
+    assert_eq!(rust_search_rows.len(), 14);
+
+    let rust_search_domains = parse_domtbl_rows(&run_hmmsearch_domtblout(&hmmdb, &seqdb));
+    let c_search_domains = parse_domtbl_rows(&run_c_hmmsearch_domtblout(&hmmdb, &seqdb));
+    assert_eq!(
+        rust_search_domains, c_search_domains,
+        "Pfam first12 vs yeast proteome hmmsearch domain rows diverged from bundled C"
+    );
+    assert_eq!(rust_search_domains.len(), 16);
+
+    let rust_scan_rows = parse_hmmsearch_rows(&run_hmmscan_tblout(&hmmdb, &seqdb));
+    let c_scan_rows = parse_hmmsearch_rows(&run_c_hmmscan_tblout(&hmmdb, &seqdb));
+    assert_eq!(
+        rust_scan_rows, c_scan_rows,
+        "Pfam first12 vs yeast proteome hmmscan rows diverged from bundled C"
+    );
+    assert_eq!(rust_scan_rows.len(), 14);
+
+    let rust_scan_domains = parse_domtbl_rows(&run_hmmscan_domtblout(&hmmdb, &seqdb));
+    let c_scan_domains = parse_domtbl_rows(&run_c_hmmscan_domtblout(&hmmdb, &seqdb));
+    assert_eq!(
+        rust_scan_domains, c_scan_domains,
+        "Pfam first12 vs yeast proteome hmmscan domain rows diverged from bundled C"
+    );
+    assert_eq!(rust_scan_domains.len(), 16);
+}
+
+#[test]
+fn test_realistic_pfam_panel_hmmsearch_acc_matches_bundled_c_rows() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust_rows =
+        parse_hmmsearch_rows(&run_hmmsearch_tblout_with_args(&hmmdb, &seqdb, &["--acc"]));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout_with_args(
+        &hmmdb,
+        &seqdb,
+        &["--acc"],
+    ));
+    assert_eq!(
+        rust_rows, c_rows,
+        "Pfam first12 --acc hmmsearch rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 14);
+}
+
+#[test]
+fn test_realistic_yeast_first_protein_phmmer_and_jackhmmer_match_bundled_c_rows() {
+    let query = test_path("external/realistic/queries/yeast_first_protein.fa");
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta");
+
+    let rust_phmmer = parse_hmmsearch_rows(&run_phmmer_tblout(&query, &seqdb));
+    let c_phmmer = parse_hmmsearch_rows(&run_c_phmmer_tblout_real(&query, &seqdb));
+    assert_eq!(
+        rust_phmmer, c_phmmer,
+        "yeast first protein phmmer rows diverged from bundled C"
+    );
+    assert_eq!(rust_phmmer.len(), 46);
+
+    let rust_jackhmmer = parse_hmmsearch_rows(&run_jackhmmer_tblout(&query, &seqdb));
+    let c_jackhmmer = parse_hmmsearch_rows(&run_c_jackhmmer_tblout(&query, &seqdb));
+    assert_eq!(
+        rust_jackhmmer, c_jackhmmer,
+        "yeast first protein jackhmmer rows diverged from bundled C"
+    );
+    assert_eq!(rust_jackhmmer.len(), 46);
+}
+
+#[test]
+fn test_realistic_dnak_phmmer_acc_domtblout_matches_bundled_c_rows() {
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+
+    let rust_rows = parse_domtbl_rows(&run_phmmer_domtblout_with_args(&query, &seqdb, &["--acc"]));
+    let c_rows = parse_domtbl_rows(&run_c_phmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &["--acc"],
+    ));
+    assert_eq!(
+        rust_rows, c_rows,
+        "DnaK --acc phmmer domtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 8);
+}
+
+#[test]
+fn test_realistic_trna_nhmmer_yeast_genome_tblouts_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/realistic/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    let seqdb =
+        test_path("external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa");
+
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer_tblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs yeast genome nhmmer rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 214);
+
+    let rust_dfam = parse_dfamtbl_rows(&run_nhmmer_dfamtblout(hmm.to_str().unwrap(), &seqdb));
+    let c_dfam = parse_dfamtbl_rows(&run_c_nhmmer_dfamtblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_dfam, c_dfam,
+        "tRNA vs yeast genome nhmmer dfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_dfam.len(), 214);
+}
+
+#[test]
+#[ignore = "slow full-yeast FM-index parity regression"]
+fn test_realistic_trna_nhmmer_yeast_genome_fm_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let rust_fm = dir.path().join("rust.yeast.hmmerdb");
+    let c_fm = dir.path().join("c.yeast.hmmerdb");
+    let seqdb =
+        test_path("external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/realistic/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(&seqdb, &rust_fm);
+    make_c_fm_database(&seqdb, &c_fm);
+
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer_tblout(
+        hmm.to_str().unwrap(),
+        rust_fm.to_str().unwrap(),
+    ));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout(
+        hmm.to_str().unwrap(),
+        c_fm.to_str().unwrap(),
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs yeast genome FM-index nhmmer rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 219);
+}
+
+#[test]
+fn test_realistic_trna_nhmmscan_yeast_genome_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/realistic/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    let seqdb =
+        test_path("external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa");
+
+    let rust_rows = parse_nhmmer_rows(&run_nhmmscan_tblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmscan_tblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs yeast genome nhmmscan rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 226);
+
+    let rust_dfam = parse_dfamtbl_rows(&run_nhmmscan_dfamtblout(hmm.to_str().unwrap(), &seqdb));
+    let c_dfam = parse_dfamtbl_rows(&run_c_nhmmscan_dfamtblout(hmm.to_str().unwrap(), &seqdb));
+    assert_eq!(
+        rust_dfam, c_dfam,
+        "tRNA vs yeast genome nhmmscan dfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_dfam.len(), 226);
+}
+
+#[test]
+fn test_realistic_trna_hmmpress_sidecars_match_bundled_c_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/realistic/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+
+    press_rust_hmmdb(&hmm);
+    let rust_sidecars = ["h3m", "h3i", "h3f", "h3p"].map(|suffix| {
+        let path = hmm.with_extension(format!("hmm.{suffix}"));
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        (suffix, bytes)
+    });
+    press_c_hmmdb(&hmm);
+
+    for (suffix, rust_bytes) in rust_sidecars {
+        let c_sidecar = hmm.with_extension(format!("hmm.{suffix}"));
+        let c_bytes = std::fs::read(&c_sidecar).unwrap();
+        assert_eq!(
+            rust_bytes, c_bytes,
+            "tRNA hmmpress sidecar .{suffix} diverged from bundled C"
+        );
+    }
+}
+
+#[test]
+fn test_realistic_dnaj_emit_modes_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("DnaJ.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/realistic/pfam/PF00226_DnaJ.seed.sto"),
+    );
+    let hmm = hmm.to_str().unwrap();
+
+    assert_eq!(
+        run_hmmer_stdout(&["emit", "--seed", "7", "-c", hmm]),
+        run_c_tool_stdout("hmmemit", &["--seed", "7", "-c", hmm])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["emit", "--seed", "7", "-N", "3", hmm]),
+        run_c_tool_stdout("hmmemit", &["--seed", "7", "-N", "3", hmm])
+    );
+}
+
+#[test]
 fn test_new_real_trna_hmmbuild_matches_bundled_c() {
     let dir = tempfile::tempdir().unwrap();
     let rust_hmm = dir.path().join("rust_RF00005_tRNA.hmm");
@@ -1549,6 +2814,273 @@ fn test_new_real_trna_hmmbuild_matches_bundled_c() {
     build_c_hmm(&["--dna"], &c_hmm, &msa);
 
     assert_eq!(hmm_without_date(&rust_hmm), hmm_without_date(&c_hmm));
+}
+
+#[test]
+fn test_new_real_trna_hmmbuild_option_modes_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let msa = test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto");
+    for (idx, opts) in [
+        ["--dna", "--hand", "--wgiven", "--enone"].as_slice(),
+        [
+            "--dna",
+            "--fast",
+            "--symfrac",
+            "0.7",
+            "--wnone",
+            "--eset",
+            "12",
+        ]
+        .as_slice(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let rust_hmm = dir.path().join(format!("rust_tRNA_opts_{idx}.hmm"));
+        let c_hmm = dir.path().join(format!("c_tRNA_opts_{idx}.hmm"));
+        build_rust_hmm(opts, &rust_hmm, &msa);
+        build_c_hmm(opts, &c_hmm, &msa);
+
+        assert_eq!(
+            hmm_without_date(&rust_hmm),
+            hmm_without_date(&c_hmm),
+            "tRNA hmmbuild option set {idx} diverged from bundled C"
+        );
+    }
+}
+
+#[test]
+fn test_hatpase_hmmbuild_entropy_weighted_options_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_HATPase_weighted.hmm");
+    let c_hmm = dir.path().join("c_HATPase_weighted.hmm");
+    let msa = test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto");
+    let opts = [
+        "--amino",
+        "--fast",
+        "--symfrac",
+        "0.58",
+        "--wpb",
+        "--eentexp",
+        "--fragthresh",
+        "0.45",
+        "--maxinsertlen",
+        "5",
+        "--EmN",
+        "25",
+        "--EvN",
+        "25",
+        "--EfN",
+        "25",
+    ];
+    build_rust_hmm(&opts, &rust_hmm, &msa);
+    build_c_hmm(&opts, &c_hmm, &msa);
+
+    assert_hmm_text_matches_with_float_tolerance(
+        &hmm_without_date_or_com(&rust_hmm),
+        &hmm_without_date_or_com(&c_hmm),
+        1.1e-5,
+        "HATPase hmmbuild weighted option path should serialize like bundled C",
+    );
+}
+
+#[test]
+fn test_hatpase_hmmbuild_resaved_msa_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_HATPase.hmm");
+    let c_hmm = dir.path().join("c_HATPase.hmm");
+    let rust_sto = dir.path().join("rust_resaved.sto");
+    let c_sto = dir.path().join("c_resaved.sto");
+    let msa = test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "build",
+            "--amino",
+            "--wnone",
+            "--enone",
+            "-O",
+            rust_sto.to_str().unwrap(),
+            rust_hmm.to_str().unwrap(),
+            &msa,
+        ])
+        .output()
+        .expect("failed to run hmmer build -O");
+    assert!(
+        rust.status.success(),
+        "hmmer build -O failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/hmmbuild"))
+        .args([
+            "--amino",
+            "--wnone",
+            "--enone",
+            "-O",
+            c_sto.to_str().unwrap(),
+            c_hmm.to_str().unwrap(),
+            &msa,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmbuild -O");
+    assert!(
+        c.status.success(),
+        "bundled C hmmbuild -O failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(hmm_without_date(&rust_hmm), hmm_without_date(&c_hmm));
+    assert_eq!(
+        std::fs::read_to_string(rust_sto).unwrap(),
+        std::fs::read_to_string(c_sto).unwrap(),
+        "hmmbuild -O resaved MSA should match bundled C"
+    );
+}
+
+#[test]
+fn test_response_reg_hmmbuild_resaved_blosum_weights_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_Response_reg.hmm");
+    let c_hmm = dir.path().join("c_Response_reg.hmm");
+    let rust_sto = dir.path().join("rust_resaved.sto");
+    let c_sto = dir.path().join("c_resaved.sto");
+    let msa = test_path("external/new_real/pfam/PF00072_Response_reg.seed.sto");
+    let opts = [
+        "--amino",
+        "--wblosum",
+        "--wid",
+        "0.50",
+        "--eclust",
+        "--eid",
+        "0.55",
+        "--plaplace",
+        "--maxinsertlen",
+        "5",
+    ];
+
+    let mut rust_args = vec!["build"];
+    rust_args.extend_from_slice(&opts);
+    rust_args.extend_from_slice(&[
+        "-O",
+        rust_sto.to_str().unwrap(),
+        rust_hmm.to_str().unwrap(),
+        &msa,
+    ]);
+    let rust = Command::new(binary_path("hmmer"))
+        .args(rust_args)
+        .output()
+        .expect("failed to run hmmer build -O with BLOSUM weights");
+    assert!(
+        rust.status.success(),
+        "hmmer build -O failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let mut c_args = opts.to_vec();
+    c_args.extend_from_slice(&["-O", c_sto.to_str().unwrap(), c_hmm.to_str().unwrap(), &msa]);
+    let c = Command::new(test_path("hmmer/src/hmmbuild"))
+        .args(c_args)
+        .output()
+        .expect("failed to run bundled C hmmbuild -O with BLOSUM weights");
+    assert!(
+        c.status.success(),
+        "bundled C hmmbuild -O failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(rust_sto).unwrap(),
+        std::fs::read_to_string(c_sto).unwrap(),
+        "hmmbuild -O should emit C-matching #=GS WT rows after BLOSUM weighting"
+    );
+}
+
+#[test]
+fn test_new_real_dnak_singlemx_hmmbuild_preserves_bundled_c_query_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_DnaK_singlemx.hmm");
+    let c_hmm = dir.path().join("c_DnaK_singlemx.hmm");
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+    let opts = [
+        "--amino",
+        "--informat",
+        "afa",
+        "--singlemx",
+        "--mx",
+        "BLOSUM45",
+        "--popen",
+        "0.03",
+        "--pextend",
+        "0.2",
+    ];
+    build_rust_hmm(&opts, &rust_hmm, &query);
+    build_c_hmm(&opts, &c_hmm, &query);
+
+    let rust = hmm_without_date(&rust_hmm);
+    let c = hmm_without_date(&c_hmm);
+    for line in [
+        "NAME  sp|P0A6Y8|DNAK_ECOLI",
+        "COM   [1] [HMM created from a query sequence]",
+    ] {
+        assert!(
+            rust.contains(line),
+            "Rust singlemx HMM is missing C metadata line {line:?}:\n{rust}"
+        );
+        assert!(c.contains(line));
+    }
+}
+
+#[test]
+fn test_new_real_pfam_gz_first_seed_utility_modes_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("pfam_first_03009_C.sto");
+    first_stockholm_from_gzip(&test_path("external/new_real/pfam/Pfam-A.seed.gz"), &seed);
+    let rust_hmm = dir.path().join("rust_03009_C.hmm");
+    let c_hmm = dir.path().join("c_03009_C.hmm");
+    let opts = ["--amino", "--wnone", "--enone", "--symfrac", "0.35"];
+    build_rust_hmm(&opts, &rust_hmm, seed.to_str().unwrap());
+    build_c_hmm(&opts, &c_hmm, seed.to_str().unwrap());
+
+    assert_eq!(hmm_without_date(&rust_hmm), hmm_without_date(&c_hmm));
+    assert_eq!(
+        run_hmmer_stdout(&["stat", rust_hmm.to_str().unwrap()]),
+        run_c_tool_stdout("hmmstat", &[c_hmm.to_str().unwrap()])
+    );
+    assert_eq!(
+        run_hmmer_stdout(&[
+            "logo",
+            "--height_score",
+            "--no_indel",
+            rust_hmm.to_str().unwrap()
+        ]),
+        run_c_tool_stdout(
+            "hmmlogo",
+            &["--height_score", "--no_indel", c_hmm.to_str().unwrap()]
+        )
+    );
+    assert_eq!(
+        run_hmmer_stdout(&[
+            "emit",
+            "-C",
+            "--minl",
+            "0.25",
+            "--minu",
+            "0.85",
+            rust_hmm.to_str().unwrap()
+        ]),
+        run_c_tool_stdout(
+            "hmmemit",
+            &[
+                "-C",
+                "--minl",
+                "0.25",
+                "--minu",
+                "0.85",
+                c_hmm.to_str().unwrap()
+            ]
+        )
+    );
 }
 
 #[test]
@@ -1596,6 +3128,203 @@ fn test_new_real_hatpase_emit_and_align_match_bundled_c() {
 }
 
 #[test]
+fn test_new_real_hatpase_hmmalign_output_formats_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    let emitted = dir.path().join("emitted.fa");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let hmm = hmm.to_str().unwrap();
+    let emitted_sequences = run_hmmer_stdout(&["emit", "--seed", "23", "-N", "3", hmm]);
+    std::fs::write(&emitted, emitted_sequences).unwrap();
+
+    for format in ["afa", "a2m", "pfam", "clustal"] {
+        assert_eq!(
+            run_hmmer_stdout(&[
+                "align",
+                "--outformat",
+                format,
+                hmm,
+                emitted.to_str().unwrap()
+            ]),
+            run_c_tool_stdout(
+                "hmmalign",
+                &["--outformat", format, hmm, emitted.to_str().unwrap()]
+            ),
+            "HATPase_c hmmalign --outformat {format} diverged from bundled C"
+        );
+    }
+}
+
+#[test]
+fn test_response_reg_hmmalign_ecoli_first50_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("Response_reg.hmm");
+    let seqs = dir.path().join("ecoli_first50.fa");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF00072_Response_reg.seed.sto"),
+    );
+    write_first_fasta_records(
+        &seqs,
+        "external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta",
+        50,
+    );
+    let hmm = hmm.to_str().unwrap();
+    let seqs = seqs.to_str().unwrap();
+
+    assert_eq!(
+        run_hmmer_stdout(&["align", "--outformat", "afa", hmm, seqs]),
+        run_c_tool_stdout("hmmalign", &["--outformat", "afa", hmm, seqs]),
+        "Response_reg hmmalign AFA output should match bundled C on weak E. coli alignments"
+    );
+    assert_eq!(
+        run_hmmer_stdout(&["align", "--trim", "--outformat", "pfam", hmm, seqs]),
+        run_c_tool_stdout(
+            "hmmalign",
+            &["--trim", "--outformat", "pfam", hmm, seqs],
+        ),
+        "Response_reg hmmalign trimmed Pfam output should match bundled C on weak E. coli alignments"
+    );
+}
+
+#[test]
+fn test_hatpase_hmmalign_trim_mapali_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    let emitted = dir.path().join("emitted.fa");
+    let mapali = test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto");
+    build_rust_hmm(&["--amino"], &hmm, &mapali);
+    let hmm = hmm.to_str().unwrap();
+    let emitted_sequences = run_hmmer_stdout(&["emit", "--seed", "29", "-N", "3", hmm]);
+    std::fs::write(&emitted, emitted_sequences).unwrap();
+
+    assert_eq!(
+        run_hmmer_stdout(&[
+            "align",
+            "--trim",
+            "--mapali",
+            &mapali,
+            hmm,
+            emitted.to_str().unwrap(),
+        ]),
+        run_c_tool_stdout(
+            "hmmalign",
+            &[
+                "--trim",
+                "--mapali",
+                &mapali,
+                hmm,
+                emitted.to_str().unwrap(),
+            ],
+        ),
+        "hmmalign --trim --mapali should match bundled C insertion placement"
+    );
+}
+
+#[test]
+fn test_new_real_hatpase_emit_logo_convert_option_modes_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let hmm = hmm.to_str().unwrap();
+
+    for args in [
+        ["emit", "--seed", "9", "-a", "-N", "4", hmm].as_slice(),
+        ["emit", "--seed", "9", "-p", "-L", "80", "-N", "4", hmm].as_slice(),
+        ["emit", "-C", "--minl", "0.4", "--minu", "0.9", hmm].as_slice(),
+        ["logo", "--height_score", hmm].as_slice(),
+        ["logo", "--height_relent_all", "--no_indel", hmm].as_slice(),
+        ["convert", "-a", hmm].as_slice(),
+    ] {
+        let c_tool = match args[0] {
+            "emit" => "hmmemit",
+            "logo" => "hmmlogo",
+            "convert" => "hmmconvert",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            run_hmmer_stdout(args),
+            run_c_tool_stdout(c_tool, &args[1..]),
+            "HATPase_c {:?} output diverged from bundled C",
+            args
+        );
+    }
+}
+
+#[test]
+fn test_new_real_response_reg_build_search_scan_emit_sim_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust_Response_reg.hmm");
+    let c_hmm = dir.path().join("c_Response_reg.hmm");
+    let rust_fast_hmm = dir.path().join("rust_Response_reg_fast.hmm");
+    let c_fast_hmm = dir.path().join("c_Response_reg_fast.hmm");
+    let msa = test_path("external/new_real/pfam/PF00072_Response_reg.seed.sto");
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+
+    build_rust_hmm(&["--amino", "--wnone", "--enone"], &rust_hmm, &msa);
+    build_c_hmm(&["--amino", "--wnone", "--enone"], &c_hmm, &msa);
+    assert_eq!(
+        hmm_without_date_or_com(&rust_hmm),
+        hmm_without_date_or_com(&c_hmm)
+    );
+
+    build_rust_hmm(
+        &["--amino", "--fast", "--symfrac", "0.62", "--wpb", "--enone"],
+        &rust_fast_hmm,
+        &msa,
+    );
+    build_c_hmm(
+        &["--amino", "--fast", "--symfrac", "0.62", "--wpb", "--enone"],
+        &c_fast_hmm,
+        &msa,
+    );
+    assert_eq!(
+        hmm_without_date_or_com(&rust_fast_hmm),
+        hmm_without_date_or_com(&c_fast_hmm)
+    );
+
+    let hmm = rust_hmm.to_str().unwrap();
+    let rust_search_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout(hmm, &seqdb));
+    let c_search_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout(hmm, &seqdb));
+    assert_eq!(
+        rust_search_rows, c_search_rows,
+        "Response_reg vs E. coli proteome hmmsearch rows diverged from bundled C"
+    );
+    assert_eq!(rust_search_rows.len(), 37);
+
+    let rust_scan_rows = parse_hmmsearch_rows(&run_hmmscan_tblout(hmm, &seqdb));
+    let c_scan_rows = parse_hmmsearch_rows(&run_c_hmmscan_tblout(hmm, &seqdb));
+    assert_eq!(
+        rust_scan_rows, c_scan_rows,
+        "Response_reg vs E. coli proteome hmmscan rows diverged from bundled C"
+    );
+    assert_eq!(rust_scan_rows.len(), 37);
+
+    assert_eq!(
+        run_hmmer_stdout(&["emit", "--seed", "17", "-N", "4", hmm]),
+        run_c_tool_stdout("hmmemit", &["--seed", "17", "-N", "4", hmm])
+    );
+    assert_eq!(
+        output_without_cpu_footer(&run_hmmer_stdout(&[
+            "sim", "--seed", "13", "-N", "25", "--vit", hmm
+        ])),
+        output_without_cpu_footer(&run_c_tool_stdout(
+            "hmmsim",
+            &["--seed", "13", "-N", "25", "--vit", hmm]
+        ))
+    );
+}
+
+#[test]
 fn test_phmmer_dnak_ecoli_proteome_matches_bundled_c_rows() {
     let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
     let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta.gz");
@@ -1610,6 +3339,162 @@ fn test_phmmer_dnak_ecoli_proteome_matches_bundled_c_rows() {
 }
 
 #[test]
+fn test_new_real_dnak_phmmer_max_domtblout_gzip_matches_bundled_c_rows() {
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta.gz");
+    let rust_rows = parse_domtbl_rows(&run_phmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &["--max", "--acc"],
+    ));
+    let c_rows = parse_domtbl_rows(&run_c_phmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &["--max", "--acc"],
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "DnaK phmmer --max --acc domtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 35);
+}
+
+#[test]
+fn test_dnak_phmmer_alignment_pp_cons_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_sto = dir.path().join("rust.sto");
+    let c_sto = dir.path().join("c.sto");
+    let rust_tblout = dir.path().join("rust.tblout");
+    let c_tblout = dir.path().join("c.tblout");
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+    let args = [
+        "--notextw",
+        "--mx",
+        "PAM30",
+        "--popen",
+        "0.04",
+        "--pextend",
+        "0.3",
+        "-E",
+        "1e-20",
+        "--domE",
+        "1e-20",
+    ];
+
+    let mut rust_args = vec!["phmmer"];
+    rust_args.extend_from_slice(&args);
+    rust_args.extend_from_slice(&[
+        "-A",
+        rust_sto.to_str().unwrap(),
+        "--tblout",
+        rust_tblout.to_str().unwrap(),
+        &query,
+        &seqdb,
+    ]);
+    let rust = Command::new(binary_path("hmmer"))
+        .args(rust_args)
+        .output()
+        .expect("failed to run hmmer phmmer -A");
+    assert!(
+        rust.status.success(),
+        "hmmer phmmer -A failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let mut c_args = args.to_vec();
+    c_args.extend_from_slice(&[
+        "-A",
+        c_sto.to_str().unwrap(),
+        "--tblout",
+        c_tblout.to_str().unwrap(),
+        &query,
+        &seqdb,
+    ]);
+    let c = Command::new(test_path("hmmer/src/phmmer"))
+        .args(c_args)
+        .output()
+        .expect("failed to run bundled C phmmer -A");
+    assert!(
+        c.status.success(),
+        "bundled C phmmer -A failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let rust_rows = parse_hmmsearch_rows(&std::fs::read_to_string(rust_tblout).unwrap());
+    let c_rows = parse_hmmsearch_rows(&std::fs::read_to_string(c_tblout).unwrap());
+    assert_eq!(rust_rows, c_rows);
+    assert_eq!(rust_rows.len(), 3);
+    assert_eq!(
+        std::fs::read_to_string(rust_sto).unwrap(),
+        std::fs::read_to_string(c_sto).unwrap(),
+        "phmmer -A saved alignment should match bundled C, including PP_cons"
+    );
+}
+
+#[test]
+fn test_phmmer_dnak_ecoli_first500_alignment_wraps_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let seqdb = dir.path().join("ecoli_first500.fa");
+    let rust_ali = dir.path().join("rust.sto");
+    let c_ali = dir.path().join("c.sto");
+    write_first_fasta_records(
+        &seqdb,
+        "external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta",
+        500,
+    );
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "phmmer",
+            "--max",
+            "-E",
+            "100",
+            "--incE",
+            "100",
+            "-A",
+            rust_ali.to_str().unwrap(),
+            &query,
+            seqdb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer phmmer -A");
+    assert!(
+        rust.status.success(),
+        "hmmer phmmer -A failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/phmmer"))
+        .args([
+            "--max",
+            "-E",
+            "100",
+            "--incE",
+            "100",
+            "-A",
+            c_ali.to_str().unwrap(),
+            &query,
+            seqdb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C phmmer -A");
+    assert!(
+        c.status.success(),
+        "bundled C phmmer -A failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(rust_ali).unwrap(),
+        std::fs::read_to_string(c_ali).unwrap(),
+        "phmmer -A Stockholm block wrapping diverged from bundled C"
+    );
+}
+
+#[test]
 fn test_jackhmmer_dnak_ecoli_proteome_matches_bundled_c_rows() {
     let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
     let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
@@ -1621,6 +3506,196 @@ fn test_jackhmmer_dnak_ecoli_proteome_matches_bundled_c_rows() {
         "DnaK vs E. coli proteome jackhmmer rows diverged from bundled C"
     );
     assert_eq!(rust_rows.len(), 6);
+}
+
+#[test]
+fn test_jackhmmer_dnak_ecoli_first800_chkhmm_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let seqdb = dir.path().join("ecoli_first800.fa");
+    let rust_prefix = dir.path().join("rust_jack_chk");
+    let c_prefix = dir.path().join("c_jack_chk");
+    write_first_fasta_records(
+        &seqdb,
+        "external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta",
+        800,
+    );
+    let query = test_path("external/new_real/queries/sp_P0A6Y8_DNAK_ECOLI.fa");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "jackhmmer",
+            "-N",
+            "2",
+            "--cpu",
+            "1",
+            "--noali",
+            "--chkhmm",
+            rust_prefix.to_str().unwrap(),
+            &query,
+            seqdb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer jackhmmer --chkhmm");
+    assert!(
+        rust.status.success(),
+        "hmmer jackhmmer --chkhmm failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/jackhmmer"))
+        .args([
+            "-N",
+            "2",
+            "--cpu",
+            "1",
+            "--noali",
+            "--chkhmm",
+            c_prefix.to_str().unwrap(),
+            &query,
+            seqdb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C jackhmmer --chkhmm");
+    assert!(
+        c.status.success(),
+        "bundled C jackhmmer --chkhmm failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    for round in 1..=2 {
+        let rust_hmm = dir.path().join(format!("rust_jack_chk-{round}.hmm"));
+        let c_hmm = dir.path().join(format!("c_jack_chk-{round}.hmm"));
+        assert_hmm_text_matches_with_float_tolerance(
+            &hmm_without_date_or_com(&rust_hmm),
+            &hmm_without_date_or_com(&c_hmm),
+            1.0e-4,
+            &format!("jackhmmer DnaK/E. coli round {round} checkpoint"),
+        );
+    }
+}
+
+#[test]
+fn test_protein_medium_human_phmmer_and_jackhmmer_options_match_bundled_c_rows() {
+    let query = test_path("external/protein_medium/queries/sp_O43739_CYH3_HUMAN.fa");
+    let seqdb = test_path("external/protein_medium/uniprot_UP000005640_human.fasta");
+
+    let rust_phmmer =
+        parse_hmmsearch_rows(&run_phmmer_tblout_with_args(&query, &seqdb, &["--acc"]));
+    let c_phmmer = parse_hmmsearch_rows(&run_c_phmmer_tblout_with_args(&query, &seqdb, &["--acc"]));
+    assert_eq!(
+        rust_phmmer, c_phmmer,
+        "human medium phmmer --acc rows diverged from bundled C"
+    );
+    assert_eq!(rust_phmmer.len(), 86);
+
+    let rust_domains = parse_domtbl_rows(&run_phmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &["--domE", "1e-20", "--incdomE", "1e-30"],
+    ));
+    let c_domains = parse_domtbl_rows(&run_c_phmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &["--domE", "1e-20", "--incdomE", "1e-30"],
+    ));
+    assert_eq!(
+        rust_domains, c_domains,
+        "human medium phmmer domain threshold rows diverged from bundled C"
+    );
+    assert_eq!(rust_domains.len(), 15);
+
+    let rust_jackhmmer = parse_hmmsearch_rows(&run_jackhmmer_tblout_with_args(
+        &query,
+        &seqdb,
+        &["-N", "2", "--acc"],
+    ));
+    let c_jackhmmer = parse_hmmsearch_rows(&run_c_jackhmmer_tblout_with_args(
+        &query,
+        &seqdb,
+        &["-N", "2", "--acc"],
+    ));
+    assert_eq!(
+        rust_jackhmmer, c_jackhmmer,
+        "human medium jackhmmer -N 2 --acc rows diverged from bundled C"
+    );
+    assert_eq!(rust_jackhmmer.len(), 162);
+}
+
+#[test]
+fn test_protein_medium_human_search_pfamtblout_and_matrix_options_match_bundled_c_rows() {
+    let query = test_path("external/protein_medium/queries/sp_O43739_CYH3_HUMAN.fa");
+    let seqdb = test_path("external/protein_medium/uniprot_UP000005640_human.fasta");
+    let seqdb_gz = test_path("external/protein_medium/uniprot_UP000005640_human.fasta.gz");
+
+    let rust_pfam = parse_pfamtbl_rows(&run_phmmer_pfamtblout_with_args(
+        &query,
+        &seqdb_gz,
+        &["--acc", "--notextw", "-E", "1e-3", "--domE", "1e-3"],
+    ));
+    let c_pfam = parse_pfamtbl_rows(&run_c_phmmer_pfamtblout_with_args(
+        &query,
+        &seqdb_gz,
+        &["--acc", "--notextw", "-E", "1e-3", "--domE", "1e-3"],
+    ));
+    assert_eq!(
+        rust_pfam, c_pfam,
+        "human medium phmmer pfamtblout option rows diverged from bundled C"
+    );
+    assert_eq!(rust_pfam.0.len() + rust_pfam.1.len(), 114);
+
+    let rust_mx = parse_hmmsearch_rows(&run_phmmer_tblout_with_args(
+        &query,
+        &seqdb,
+        &["--mx", "BLOSUM45", "-Z", "20000", "--domZ", "200"],
+    ));
+    let c_mx = parse_hmmsearch_rows(&run_c_phmmer_tblout_with_args(
+        &query,
+        &seqdb,
+        &["--mx", "BLOSUM45", "-Z", "20000", "--domZ", "200"],
+    ));
+    assert_eq!(
+        rust_mx, c_mx,
+        "human medium phmmer matrix/Z option rows diverged from bundled C"
+    );
+    assert_eq!(rust_mx.len(), 79);
+
+    let rust_jack_domains = parse_domtbl_rows(&run_jackhmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &[
+            "-N",
+            "2",
+            "-E",
+            "1e-3",
+            "--incE",
+            "1e-4",
+            "--domE",
+            "1e-3",
+            "--incdomE",
+            "1e-4",
+        ],
+    ));
+    let c_jack_domains = parse_domtbl_rows(&run_c_jackhmmer_domtblout_with_args(
+        &query,
+        &seqdb,
+        &[
+            "-N",
+            "2",
+            "-E",
+            "1e-3",
+            "--incE",
+            "1e-4",
+            "--domE",
+            "1e-3",
+            "--incdomE",
+            "1e-4",
+        ],
+    ));
+    assert_eq!(
+        rust_jack_domains, c_jack_domains,
+        "human medium jackhmmer domain threshold rows diverged from bundled C"
+    );
+    assert_eq!(rust_jack_domains.len(), 152);
 }
 
 #[test]
@@ -1655,6 +3730,163 @@ fn test_new_real_hatpase_alimask_matches_bundled_c() {
 }
 
 #[test]
+fn test_new_real_alimask_pfam_outformat_and_fast_summary_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_pfam = dir.path().join("rust.pfam");
+    let c_pfam = dir.path().join("c.pfam");
+    let hatpase = test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto");
+    run_hmmer_stdout(&[
+        "alimask",
+        "--modelrange",
+        "5-25,40-55",
+        "--outformat",
+        "Pfam",
+        &hatpase,
+        rust_pfam.to_str().unwrap(),
+    ]);
+    run_c_tool_stdout(
+        "alimask",
+        &[
+            "--modelrange",
+            "5-25,40-55",
+            "--outformat",
+            "Pfam",
+            &hatpase,
+            c_pfam.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rust_pfam).unwrap(),
+        std::fs::read_to_string(&c_pfam).unwrap(),
+        "alimask --outformat Pfam post-MSA diverged from bundled C"
+    );
+
+    let rust_fast = dir.path().join("rust_fast.sto");
+    let c_fast = dir.path().join("c_fast.sto");
+    let trna = test_path("external/new_real/rfam/RF00005_tRNA.seed.sto");
+    let rust_stdout = run_hmmer_stdout(&[
+        "alimask",
+        "--fast",
+        "--wnone",
+        "--symfrac",
+        "0.7",
+        "--alirange",
+        "3-30",
+        &trna,
+        rust_fast.to_str().unwrap(),
+    ]);
+    let c_stdout = run_c_tool_stdout(
+        "alimask",
+        &[
+            "--fast",
+            "--wnone",
+            "--symfrac",
+            "0.7",
+            "--alirange",
+            "3-30",
+            &trna,
+            c_fast.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rust_fast).unwrap(),
+        std::fs::read_to_string(&c_fast).unwrap()
+    );
+    assert_eq!(
+        normalize_hmmbuild_summary(&rust_stdout),
+        normalize_hmmbuild_summary(&c_stdout),
+        "alimask --fast summary diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_new_real_trna_alimask_coordinate_modes_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let msa = test_path("external/new_real/rfam/RF00005_tRNA.seed.sto");
+    let rust_masked = dir.path().join("rust_tRNA_masked.sto");
+    let c_masked = dir.path().join("c_tRNA_masked.sto");
+
+    run_hmmer_stdout(&[
+        "alimask",
+        "--rna",
+        "--wgiven",
+        "--alirange",
+        "2..6,10..14",
+        "--appendmask",
+        &msa,
+        rust_masked.to_str().unwrap(),
+    ]);
+    run_c_tool_stdout(
+        "alimask",
+        &[
+            "--rna",
+            "--wgiven",
+            "--alirange",
+            "2..6,10..14",
+            "--appendmask",
+            &msa,
+            c_masked.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rust_masked).unwrap(),
+        std::fs::read_to_string(&c_masked).unwrap(),
+        "tRNA alimask --appendmask output diverged from bundled C"
+    );
+
+    assert_eq!(
+        run_hmmer_stdout(&[
+            "alimask",
+            "--rna",
+            "--fast",
+            "--symfrac",
+            "0.60",
+            "--model2ali",
+            "1..5",
+            &msa,
+        ]),
+        run_c_tool_stdout(
+            "alimask",
+            &[
+                "--rna",
+                "--fast",
+                "--symfrac",
+                "0.60",
+                "--model2ali",
+                "1..5",
+                &msa,
+            ],
+        ),
+        "tRNA alimask --model2ali output diverged from bundled C"
+    );
+    assert_eq!(
+        run_hmmer_stdout(&[
+            "alimask",
+            "--rna",
+            "--fast",
+            "--symfrac",
+            "0.60",
+            "--ali2model",
+            "3..12",
+            &msa,
+        ]),
+        run_c_tool_stdout(
+            "alimask",
+            &[
+                "--rna",
+                "--fast",
+                "--symfrac",
+                "0.60",
+                "--ali2model",
+                "3..12",
+                &msa,
+            ],
+        ),
+        "tRNA alimask --ali2model output diverged from bundled C"
+    );
+}
+
+#[test]
 fn test_hmmsearch_hatpase_ecoli_proteome_matches_bundled_c_rows() {
     let dir = tempfile::tempdir().unwrap();
     let hmm = dir.path().join("PF02518_HATPase_c.hmm");
@@ -1673,6 +3905,177 @@ fn test_hmmsearch_hatpase_ecoli_proteome_matches_bundled_c_rows() {
         "HATPase_c vs E. coli proteome hmmsearch rows diverged from bundled C"
     );
     assert_eq!(rust_rows.len(), 37);
+}
+
+#[test]
+fn test_hmmsearch_hatpase_ecoli_proteome_gzip_target_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta.gz");
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout(hmm.to_str().unwrap(), &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "HATPase_c vs gzipped E. coli proteome hmmsearch rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 37);
+}
+
+#[test]
+fn test_hmmsearch_hatpase_ecoli_proteome_threshold_options_match_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+    let args = [
+        "-E",
+        "1e-5",
+        "--incE",
+        "1e-6",
+        "--domE",
+        "1e-5",
+        "--incdomE",
+        "1e-6",
+    ];
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "HATPase_c hmmsearch threshold-option rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 34);
+}
+
+#[test]
+fn test_hmmsearch_hatpase_ecoli_proteome_domtblout_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+
+    let rust_rows = parse_domtbl_rows(&run_hmmsearch_domtblout(hmm.to_str().unwrap(), &seqdb));
+    let c_rows = parse_domtbl_rows(&run_c_hmmsearch_domtblout(hmm.to_str().unwrap(), &seqdb));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "HATPase_c vs E. coli proteome hmmsearch domtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 41);
+}
+
+#[test]
+fn test_new_real_hatpase_hmmsearch_human_nobias_nonull2_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let seqdb = test_path("external/protein_medium/uniprot_UP000005640_human.fasta");
+    let args = ["--nobias", "--nonull2", "--domZ", "1234"];
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmsearch_tblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmsearch_tblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+    assert_eq!(
+        rust_rows, c_rows,
+        "HATPase_c vs human hmmsearch --nobias --nonull2 rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 31);
+
+    let rust_domains = parse_domtbl_rows(&run_hmmsearch_domtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+    let c_domains = parse_domtbl_rows(&run_c_hmmsearch_domtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &args,
+    ));
+    assert_eq!(
+        rust_domains, c_domains,
+        "HATPase_c vs human hmmsearch --nobias --nonull2 domain rows diverged from bundled C"
+    );
+    assert_eq!(rust_domains.len(), 35);
+}
+
+#[test]
+fn test_hmmsearch_hatpase_ecoli_proteome_pfamtblout_cutoffs_match_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("PF02518_HATPase_c.hmm");
+    build_rust_hmm(
+        &["--amino"],
+        &hmm,
+        &test_path("external/new_real/pfam/PF02518_HATPase_c.seed.sto"),
+    );
+    let seqdb = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta");
+    let seqdb_gz = test_path("external/new_real/protein/uniprot_UP000000625_ecoli_k12.fasta.gz");
+
+    let rust_ga = parse_pfamtbl_rows(&run_hmmsearch_pfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb_gz,
+        &["--cut_ga"],
+    ));
+    let c_ga = parse_pfamtbl_rows(&run_c_hmmsearch_pfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb_gz,
+        &["--cut_ga"],
+    ));
+    assert_eq!(
+        rust_ga, c_ga,
+        "HATPase_c hmmsearch --cut_ga pfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_ga.0.len() + rust_ga.1.len(), 67);
+
+    let rust_nc = parse_pfamtbl_rows(&run_hmmsearch_pfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--cut_nc"],
+    ));
+    let c_nc = parse_pfamtbl_rows(&run_c_hmmsearch_pfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--cut_nc"],
+    ));
+    assert_eq!(
+        rust_nc, c_nc,
+        "HATPase_c hmmsearch --cut_nc pfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_nc.0.len() + rust_nc.1.len(), 68);
 }
 
 #[test]
@@ -1697,6 +4100,51 @@ fn test_hmmscan_hatpase_ecoli_proteome_matches_bundled_c_rows() {
 }
 
 #[test]
+fn test_hmmscan_pfam_panel_cutoff_pfamtblout_matches_bundled_c_rows() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    let seqdb = test_path("external/realistic/protein/uniprot_UP000002311_yeast.fasta.gz");
+    let rust_rows = parse_pfamtbl_rows(&run_hmmscan_pfamtblout_with_args(
+        &hmmdb,
+        &seqdb,
+        &["--cut_ga"],
+    ));
+    let c_rows = parse_pfamtbl_rows(&run_c_hmmscan_pfamtblout_with_args(
+        &hmmdb,
+        &seqdb,
+        &["--cut_ga"],
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "Pfam first12 hmmscan --cut_ga pfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.0.len() + rust_rows.1.len(), 18);
+}
+
+#[test]
+fn test_hmmscan_pfam_panel_human_query_max_outputs_match_bundled_c_rows() {
+    let hmmdb = test_path("external/realistic/pfam/Pfam-A.first12.hmm");
+    let query = test_path("external/protein_medium/queries/sp_O43739_CYH3_HUMAN.fa");
+    let args = ["--acc", "--max"];
+
+    let rust_rows = parse_hmmsearch_rows(&run_hmmscan_tblout_with_args(&hmmdb, &query, &args));
+    let c_rows = parse_hmmsearch_rows(&run_c_hmmscan_tblout_with_args(&hmmdb, &query, &args));
+    assert_eq!(
+        rust_rows, c_rows,
+        "Pfam first12 vs human query hmmscan --acc --max rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 6);
+
+    let rust_domains = parse_domtbl_rows(&run_hmmscan_domtblout_with_args(&hmmdb, &query, &args));
+    let c_domains = parse_domtbl_rows(&run_c_hmmscan_domtblout_with_args(&hmmdb, &query, &args));
+    assert_eq!(
+        rust_domains, c_domains,
+        "Pfam first12 vs human query hmmscan --acc --max domain rows diverged from bundled C"
+    );
+    assert_eq!(rust_domains.len(), 8);
+}
+
+#[test]
 fn test_nhmmscan_trna_ecoli_genome_slice_matches_bundled_c_rows() {
     let dir = tempfile::tempdir().unwrap();
     let hmm = dir.path().join("RF00005_tRNA.hmm");
@@ -1715,6 +4163,230 @@ fn test_nhmmscan_trna_ecoli_genome_slice_matches_bundled_c_rows() {
         "tRNA vs E. coli genome slice nhmmscan rows diverged from bundled C"
     );
     assert_eq!(rust_rows.len(), 4);
+}
+
+#[test]
+fn test_nhmmscan_trna_ecoli_genome_gzip_max_dfamtblout_matches_bundled_c_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let seqdb = test_path("external/new_real/dna/GCF_000005845.2_ASM584v2_genomic.fna.gz");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+
+    let rust_rows = parse_dfamtbl_rows(&run_nhmmscan_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--acc", "--max"],
+    ));
+    let c_rows = parse_dfamtbl_rows(&run_c_nhmmscan_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        &seqdb,
+        &["--acc", "--max"],
+    ));
+
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs gzipped E. coli genome nhmmscan --acc --max dfamtblout rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 86);
+}
+
+#[test]
+fn test_nhmmscan_crick_pipeline_stats_use_c_residue_denominator() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_hmm = dir.path().join("rust.RF00005_tRNA.hmm");
+    let c_hmm = dir.path().join("c.RF00005_tRNA.hmm");
+    build_rust_hmm(
+        &["--dna"],
+        &rust_hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    std::fs::copy(&rust_hmm, &c_hmm).unwrap();
+    press_rust_hmmdb(&rust_hmm);
+    press_c_hmmdb(&c_hmm);
+
+    let seqdb = test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna");
+    let rust_stdout = run_hmmer_stdout(&[
+        "nhmmscan",
+        "--crick",
+        "--noali",
+        "-E",
+        "100",
+        rust_hmm.to_str().unwrap(),
+        &seqdb,
+    ]);
+    let c_stdout = run_c_tool_stdout(
+        "nhmmscan",
+        &[
+            "--crick",
+            "--noali",
+            "-E",
+            "100",
+            c_hmm.to_str().unwrap(),
+            &seqdb,
+        ],
+    );
+
+    let query_stats = |stdout: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with("Query sequence(s):"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(query_stats(&rust_stdout), query_stats(&c_stdout));
+    assert!(
+        rust_stdout
+            .contains("Query sequence(s):                         1  (500000 residues searched)"),
+        "nhmmscan --crick should report C's doubled residue denominator:\n{rust_stdout}"
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_watson_seed_options_use_c_residue_denominator() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let rust_fm = dir.path().join("rust.ecoli250k.hmmerdb");
+    let c_fm = dir.path().join("c.ecoli250k.hmmerdb");
+    let seqdb = test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(&seqdb, &rust_fm);
+    make_c_fm_database(&seqdb, &c_fm);
+
+    let args = [
+        "--watson",
+        "--seed_sc_thresh",
+        "10",
+        "--seed_sc_density",
+        "0.5",
+        "--seed_req_pos",
+        "3",
+        "--noali",
+    ];
+    let (rust_stdout, rust_tbl) =
+        run_nhmmer(hmm.to_str().unwrap(), rust_fm.to_str().unwrap(), &args);
+    let (c_stdout, c_tbl) =
+        run_c_nhmmer_with_args(hmm.to_str().unwrap(), c_fm.to_str().unwrap(), &args);
+    assert_eq!(
+        parse_nhmmer_rows(&rust_tbl),
+        parse_nhmmer_rows(&c_tbl),
+        "nhmmer FM --watson seed-option tblout rows diverged from bundled C"
+    );
+
+    let target_stats = |stdout: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with("Target sequences:"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(target_stats(&rust_stdout), target_stats(&c_stdout));
+    assert!(
+        rust_stdout
+            .contains("Target sequences:                          1  (500000 residues searched)"),
+        "FM-index nhmmer --watson should keep C's doubled residue denominator:\n{rust_stdout}"
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_w_beta_rows_match_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let rust_fm = dir.path().join("rust.ecoli250k.hmmerdb");
+    let c_fm = dir.path().join("c.ecoli250k.hmmerdb");
+    let seqdb = test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(&seqdb, &rust_fm);
+    make_c_fm_database(&seqdb, &c_fm);
+
+    let args = ["--watson", "--w_beta", "0.5", "--noali"];
+    let (_rust_stdout, rust_tbl) =
+        run_nhmmer(hmm.to_str().unwrap(), rust_fm.to_str().unwrap(), &args);
+    let (_c_stdout, c_tbl) =
+        run_c_nhmmer_with_args(hmm.to_str().unwrap(), c_fm.to_str().unwrap(), &args);
+    assert_eq!(
+        parse_nhmmer_rows(&rust_tbl),
+        parse_nhmmer_rows(&c_tbl),
+        "nhmmer FM --w_beta tblout rows diverged from bundled C"
+    );
+
+    let rust_dfam = parse_dfamtbl_rows(&run_nhmmer_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        rust_fm.to_str().unwrap(),
+        &args,
+    ));
+    let c_dfam = parse_dfamtbl_rows(&run_c_nhmmer_dfamtblout_with_args(
+        hmm.to_str().unwrap(),
+        c_fm.to_str().unwrap(),
+        &args,
+    ));
+    assert_eq!(
+        rust_dfam, c_dfam,
+        "nhmmer FM --w_beta dfamtblout rows diverged from bundled C"
+    );
+}
+
+#[test]
+fn test_nhmmscan_w_beta_reports_option_but_uses_pressed_maxl_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("yeast_chr_i_ii.fa");
+    let rust_hmm = dir.path().join("rust.RF00005_tRNA.hmm");
+    let c_hmm = dir.path().join("c.RF00005_tRNA.hmm");
+    write_named_fasta_records(
+        &fasta,
+        "external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa",
+        &["I", "II"],
+    );
+    build_rust_hmm(
+        &["--dna"],
+        &rust_hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    std::fs::copy(&rust_hmm, &c_hmm).unwrap();
+    press_rust_hmmdb(&rust_hmm);
+    press_c_hmmdb(&c_hmm);
+
+    let args = ["--crick", "--w_beta", "0.7", "--nonull2"];
+    let rust_rows = parse_nhmmer_rows(&run_nhmmscan_tblout_with_args(
+        rust_hmm.to_str().unwrap(),
+        fasta.to_str().unwrap(),
+        &args,
+    ));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmscan_tblout_with_args(
+        c_hmm.to_str().unwrap(),
+        fasta.to_str().unwrap(),
+        &args,
+    ));
+    assert_eq!(
+        rust_rows, c_rows,
+        "nhmmscan --w_beta tblout rows diverged from bundled C"
+    );
+
+    let rust_dfam = parse_dfamtbl_rows(&run_nhmmscan_dfamtblout_with_args(
+        rust_hmm.to_str().unwrap(),
+        fasta.to_str().unwrap(),
+        &args,
+    ));
+    let c_dfam = parse_dfamtbl_rows(&run_c_nhmmscan_dfamtblout_with_args(
+        c_hmm.to_str().unwrap(),
+        fasta.to_str().unwrap(),
+        &args,
+    ));
+    assert_eq!(
+        rust_dfam, c_dfam,
+        "nhmmscan --w_beta dfamtblout rows diverged from bundled C"
+    );
 }
 
 #[test]
@@ -2524,7 +5196,7 @@ fn parse_filter_residue_counters(stdout: &str) -> (u64, u64, u64, u64) {
 // FM window construction credited far fewer residues than C (e.g. SSV 23924 vs
 // 41383 for MADE1). The fix extends FM seed diagonals with the C-faithful
 // `FM_extendSeed` port and feeds the un-pre-merged extended-diagonal list to
-// the same `extend_and_merge_windows_with_scoredata(.., 0)` pass C uses.
+// the same `p7_pli_extend_and_merge_windows(.., 0)` pass C uses.
 //
 // SSV and bias counters must match C exactly; Vit/Fwd are allowed a 1-residue
 // slack for a single boundary tie in the post-Vit 0.5-overlap merge that does
@@ -2607,6 +5279,30 @@ fn write_multi_segment_dna_fasta(path: &std::path::Path, source_rel: &str, seg_l
     std::fs::write(path, out).unwrap();
 }
 
+fn write_named_fasta_records(path: &std::path::Path, source_rel: &str, names: &[&str]) {
+    let wanted: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+    let src = std::fs::read_to_string(test_path(source_rel)).unwrap();
+    let mut out = String::new();
+    let mut keep = false;
+    for line in src.lines() {
+        if let Some(rest) = line.strip_prefix('>') {
+            let name = rest.split_whitespace().next().unwrap_or("");
+            keep = wanted.contains(name);
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for name in names {
+        assert!(
+            out.contains(&format!(">{name}")),
+            "source FASTA {source_rel} did not contain record {name}"
+        );
+    }
+    std::fs::write(path, out).unwrap();
+}
+
 fn assert_multi_segment_fm_parity(hmm_rel: &str, source_rel: &str, seg_len: usize, extra: &[&str]) {
     let dir = tempfile::tempdir().unwrap();
     let fasta = dir.path().join("multi.fa");
@@ -2679,6 +5375,102 @@ fn test_nhmmer_fmindex_multi_segment_low_threshold_matches_c() {
 }
 
 #[test]
+fn test_nhmmer_fmindex_yeast_chr_i_ii_crick_rows_match_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("yeast_chr_i_ii.fa");
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let rust_fm = dir.path().join("rust.yeast_chr_i_ii.hmmerdb");
+    let c_fm = dir.path().join("c.yeast_chr_i_ii.hmmerdb");
+    write_named_fasta_records(
+        &fasta,
+        "external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa",
+        &["I", "II"],
+    );
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(fasta.to_str().unwrap(), &rust_fm);
+    make_c_fm_database(fasta.to_str().unwrap(), &c_fm);
+
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer_tblout(
+        hmm.to_str().unwrap(),
+        rust_fm.to_str().unwrap(),
+    ));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout(
+        hmm.to_str().unwrap(),
+        c_fm.to_str().unwrap(),
+    ));
+    assert_eq!(
+        rust_rows, c_rows,
+        "tRNA vs yeast chr I+II FM-index nhmmer rows diverged from bundled C"
+    );
+    assert_eq!(rust_rows.len(), 13);
+    assert!(
+        rust_rows
+            .iter()
+            .any(|row| row.strand == "-" && row.target == "I"),
+        "fixture must include a Crick hit on chr I"
+    );
+    assert!(
+        rust_rows
+            .iter()
+            .any(|row| row.strand == "-" && row.target == "II"),
+        "fixture must include a Crick hit on chr II"
+    );
+}
+
+#[test]
+fn test_nhmmer_fmindex_seed_drop_options_keep_c_row_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("yeast_chr_vii_viii.fa");
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let rust_fm = dir.path().join("rust.yeast_chr_vii_viii.hmmerdb");
+    let c_fm = dir.path().join("c.yeast_chr_vii_viii.hmmerdb");
+    write_named_fasta_records(
+        &fasta,
+        "external/realistic/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa",
+        &["VII", "VIII"],
+    );
+    build_rust_hmm(
+        &["--dna", "--w_beta", "0.25", "--seed", "41"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(fasta.to_str().unwrap(), &rust_fm);
+    make_c_fm_database(fasta.to_str().unwrap(), &c_fm);
+
+    let args = [
+        "--crick",
+        "--seed_max_depth",
+        "12",
+        "--seed_drop_max_len",
+        "3",
+        "--seed_drop_lim",
+        "0.2",
+        "--seed_consens_match",
+        "9",
+        "--seed_ssv_length",
+        "80",
+        "--noali",
+    ];
+    let (_rust_stdout, rust_tbl) =
+        run_nhmmer(hmm.to_str().unwrap(), rust_fm.to_str().unwrap(), &args);
+    let (_c_stdout, c_tbl) =
+        run_c_nhmmer_with_args(hmm.to_str().unwrap(), c_fm.to_str().unwrap(), &args);
+    let rust_rows = parse_nhmmer_rows(&rust_tbl);
+    let c_rows = parse_nhmmer_rows(&c_tbl);
+
+    assert_eq!(
+        rust_rows.len(),
+        c_rows.len(),
+        "custom FM seed options should not leak extra Crick windows"
+    );
+    assert_eq!(rust_rows.len(), 17);
+}
+
+#[test]
 fn test_nhmmer_accepts_space_separated_negative_threshold() {
     // C/Easel accepts `-T -20` (space-separated negative bit score); Rust's clap
     // parser must too (regression for allow_hyphen_values on the threshold args).
@@ -2701,6 +5493,52 @@ fn test_nhmmer_accepts_space_separated_negative_threshold() {
         output.status.success(),
         "nhmmer -T -20 should be accepted: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_nhmmer_tformat_fasta_rejects_fmindex_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("RF00005_tRNA.hmm");
+    let fm = dir.path().join("ecoli250k.hmmerdb");
+    build_rust_hmm(
+        &["--dna"],
+        &hmm,
+        &test_path("external/new_real/rfam/RF00005_tRNA.dna.seed.sto"),
+    );
+    make_rust_fm_database(
+        &test_path("external/new_real/derived/GCF_000005845.2_ASM584v2_first250k.fna"),
+        &fm,
+    );
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "nhmmer",
+            "--tformat",
+            "fasta",
+            hmm.to_str().unwrap(),
+            fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run hmmer nhmmer --tformat fasta on FM index");
+    let c = Command::new(test_path("hmmer/src/nhmmer"))
+        .args([
+            "--tformat",
+            "fasta",
+            hmm.to_str().unwrap(),
+            fm.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run bundled C nhmmer --tformat fasta on FM index");
+
+    assert!(!rust.status.success());
+    assert!(!c.status.success());
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    let c_stderr = String::from_utf8_lossy(&c.stderr);
+    assert!(c_stderr.contains("Unable to guess alphabet for target sequence database file"));
+    assert!(
+        rust_stderr.contains("Unable to guess alphabet for target sequence database file"),
+        "Rust should reject FM index as FASTA like bundled C:\n{rust_stderr}"
     );
 }
 

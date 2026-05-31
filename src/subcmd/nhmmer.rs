@@ -1533,10 +1533,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         use rayon::prelude::*;
 
         let max_length = nhmmer_max_length(hmm, args.w_length, args.w_beta);
+        let mut search_hmm = hmm.clone();
+        search_hmm.max_length = max_length;
+        let hmm = &search_hmm;
         if let Some(ref mut f) = hmmout_file {
-            let mut saved_hmm = hmm.clone();
-            saved_hmm.max_length = max_length;
-            hmmer_pure_rs::hmmfile::write_hmm(f, &saved_hmm).unwrap_or_else(|e| {
+            hmmer_pure_rs::hmmfile::write_hmm(f, hmm).unwrap_or_else(|e| {
                 eprintln!("Error writing hmm output: {}", e);
                 std::process::exit(1);
             });
@@ -1783,12 +1784,22 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         // nhmmer E-value space is in residues, not sequences. Count each strand
         // searched once (C HMMER reports this as "residues searched").
         let total_residues: usize = sequences.iter().map(|s| s.n).sum();
-        let strand_multiplier = (do_watson as usize) + (do_crick as usize);
+        let strand_multiplier = if target_db.fm_index_records.is_empty() {
+            (do_watson as usize) + (do_crick as usize)
+        } else {
+            // C's FM-index path keeps the full top+bottom database-size
+            // denominator even for --watson/--crick-only searches.
+            2
+        };
         let residues_searched = (total_residues * strand_multiplier.max(1)) as f64;
         let evalue_residues = args
             .z_value
             .map(|z_mb| {
-                let strands = if do_watson && do_crick { 2.0 } else { 1.0 };
+                let strands = if !target_db.fm_index_records.is_empty() || (do_watson && do_crick) {
+                    2.0
+                } else {
+                    1.0
+                };
                 z_mb * 1_000_000.0 * strands
             })
             .unwrap_or(residues_searched);
@@ -3104,6 +3115,16 @@ pub(crate) struct NhmmerCandidateWindow {
     n: usize,
     length: usize,
     k: usize,
+    fm_frame: Option<NhmmerCandidateFmFrame>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NhmmerCandidateFmFrame {
+    fm_n: i64,
+    id: i32,
+    target_len: usize,
+    fm_start: i64,
+    fm_bwt_len: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -3115,6 +3136,15 @@ struct NhmmerScoredCandidateWindow {
 fn read_target_database(args: &Args, abc: &Alphabet) -> Result<NhmmerTargetDb, String> {
     let path = &args.seqdb;
     let tformat = args.tformat.as_deref();
+    if tformat.is_some_and(|format| format.eq_ignore_ascii_case("fasta"))
+        && path != Path::new("-")
+        && path_looks_like_makehmmerdb_target(path)
+    {
+        return Err(format!(
+            "Unable to guess alphabet for target sequence database file {}",
+            path.display()
+        ));
+    }
     if tformat.is_some_and(is_fmindex_target_format) {
         if args.restrictdb_stkey.is_some() || args.restrictdb_n.is_some() || args.ssifile.is_some()
         {
@@ -3174,6 +3204,14 @@ fn read_target_database(args: &Args, abc: &Alphabet) -> Result<NhmmerTargetDb, S
         fm_ambiguities: Vec::new(),
         fm_index_records: Vec::new(),
     })
+}
+
+fn path_looks_like_makehmmerdb_target(path: &Path) -> bool {
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && (magic == *b"HMMERDB\0" || is_likely_raw_makehmmerdb_c_stream(&magic))
 }
 
 fn reject_fmindex_max(do_max: bool) -> Result<(), String> {
@@ -3299,13 +3337,22 @@ fn parse_makehmmerdb_target_database(
             ambiguities.len(),
         )?;
     }
-    let fm_index_records = if !container_index_records.is_empty() {
+    let mut fm_index_records = if !container_index_records.is_empty() {
         container_index_records
     } else if !is_container {
         build_raw_c_stream_fm_index_records(&records_by_block, fwd_only)?
     } else {
         Vec::new()
     };
+    if !fm_index_records.is_empty() {
+        let block_texts: Vec<Arc<[u8]>> = records_by_block
+            .iter()
+            .map(|record| Arc::<[u8]>::from(record.text[..record.text_bases_len].to_vec()))
+            .collect();
+        for record in &mut fm_index_records {
+            record.text = Arc::clone(&block_texts[record.block_id]);
+        }
+    }
 
     let mut out = Vec::with_capacity(sequences.len());
     for (seq_idx, seq_meta) in sequences.iter().enumerate() {
@@ -3346,6 +3393,7 @@ struct NhmmerFmIndexRecord {
     kind: u32,
     text_start: usize,
     text_len: usize,
+    text: Arc<[u8]>,
     seq_offset: usize,
     seq_count: usize,
     ambig_offset: usize,
@@ -3539,6 +3587,7 @@ fn parse_makehmmerdb_index_extension_mapped(
             kind,
             text_start,
             text_len,
+            text: Arc::from([]),
             seq_offset,
             seq_count,
             ambig_offset,
@@ -3681,12 +3730,14 @@ fn build_raw_c_stream_fm_index_records(
         }
 
         let block_text = &block.text[..text_len];
+        let block_text: Arc<[u8]> = Arc::from(block_text.to_vec());
         let reversed_text: Vec<u8> = block_text.iter().rev().copied().collect();
         records.push(NhmmerFmIndexRecord {
             block_id,
             kind: 0,
             text_start,
             text_len,
+            text: Arc::clone(&block_text),
             seq_offset: block.seq_offset,
             seq_count: block.seq_count,
             ambig_offset: block.ambig_offset,
@@ -3701,12 +3752,13 @@ fn build_raw_c_stream_fm_index_records(
                 kind: 1,
                 text_start,
                 text_len,
+                text: Arc::clone(&block_text),
                 seq_offset: block.seq_offset,
                 seq_count: block.seq_count,
                 ambig_offset: block.ambig_offset,
                 ambig_count: block.ambig_count,
                 overlap_bases: block.overlap_bases,
-                fm: FmIndex::build(block_text),
+                fm: FmIndex::build(&block_text),
             });
         }
 
@@ -3905,7 +3957,8 @@ fn fm_seed_candidate_windows_with_config(
                 fmb,
                 record,
                 &target_db.fm_ambiguities,
-                seq_meta,
+                &target_db.fm_sequence_meta,
+                seq_idx,
                 seq,
                 hmm,
                 bg,
@@ -3945,7 +3998,7 @@ fn fm_seed_candidate_windows_with_config(
 /// `p7_SSVFM_longlarget`'s extended-diagonal list, so the Rust-specific seed
 /// pre-merge (`fm_merge_seed_windows`) and the lenient window gate
 /// (`fm_extended_diagonal_passes_window_gate`) are skipped — the downstream
-/// `extend_and_merge_windows_with_scoredata(.., 0.0)` does C's
+/// `p7_pli_extend_and_merge_windows(.., 0.0)` does C's
 /// `p7_pli_ExtendAndMergeWindows(.., 0)` merge, which makes the FM residue
 /// counters match C. For the fallback seed-then-rescore path (`c_faithful ==
 /// false`) those Rust-only guards stay in place to keep the hit set correct.
@@ -4088,6 +4141,161 @@ fn fm_diagonal_has_complete_lod(
     })
 }
 
+/// Faithful Rust counterpart of C `fm_convertRange2DSQ()`.
+///
+/// `first` is a 0-based position in FM->T for Watson, or in revcomp(FM->T) for
+/// Crick. The returned DSQ is 1-based with sentinels at both ends.
+fn fm_convert_range_to_dsq(
+    record: &NhmmerFmIndexRecord,
+    ambiguities: &[(usize, usize)],
+    first: usize,
+    length: usize,
+    is_complement: bool,
+    fix_ambiguities: bool,
+) -> Option<Vec<u8>> {
+    let mut first = first;
+    if is_complement {
+        first = record
+            .fm
+            .bwt_len()
+            .checked_sub(first.checked_add(length)?)?
+            .checked_sub(1)?;
+    }
+    let end = first.checked_add(length)?;
+    if end > record.text.len() {
+        return None;
+    }
+
+    let mut dsq = Vec::with_capacity(length + 2);
+    dsq.push(DSQ_SENTINEL);
+    for &base in &record.text[first..end] {
+        dsq.push(match base {
+            b'A' | b'a' => 0,
+            b'C' | b'c' => 1,
+            b'G' | b'g' => 2,
+            b'T' | b't' | b'U' | b'u' => 3,
+            _ => 0,
+        });
+    }
+    dsq.push(DSQ_SENTINEL);
+
+    if fix_ambiguities {
+        let range_end = end.saturating_sub(1);
+        for &(lower, upper) in ambiguities
+            .iter()
+            .skip(record.ambig_offset)
+            .take(record.ambig_count)
+        {
+            if upper < first {
+                continue;
+            }
+            if lower > range_end {
+                break;
+            }
+            let start = lower.max(first);
+            let stop = upper.min(range_end);
+            for pos in start..=stop {
+                dsq[pos - first + 1] = 15; // DNA unknown/N = Kp-3 in Easel/HMMER.
+            }
+        }
+    }
+
+    if is_complement {
+        let last = dsq.len().saturating_sub(2);
+        for i in 1..=(last / 2) {
+            let j = last - i + 1;
+            let a = complement_dna_dsq(dsq[i]);
+            let b = complement_dna_dsq(dsq[j]);
+            dsq[i] = b;
+            dsq[j] = a;
+        }
+        if last % 2 == 1 {
+            let mid = (last + 1) / 2;
+            dsq[mid] = complement_dna_dsq(dsq[mid]);
+        }
+    }
+
+    Some(dsq)
+}
+
+/// Faithful Rust counterpart of C `fm_computeSequenceOffset()`.
+fn fm_compute_sequence_offset(
+    record: &NhmmerFmIndexRecord,
+    seq_meta: &[NhmmerFmSequenceMeta],
+    pos: usize,
+) -> Option<usize> {
+    if record.seq_count == 0 {
+        return None;
+    }
+    let mut lo = record.seq_offset;
+    let mut hi = lo.checked_add(record.seq_count)?.checked_sub(1)?;
+    if hi >= seq_meta.len() {
+        return None;
+    }
+    if lo == hi {
+        return Some(lo);
+    }
+    if seq_meta[hi].fm_start <= pos {
+        return Some(hi);
+    }
+    loop {
+        let mid = (lo + hi + 1) / 2;
+        if seq_meta[mid].fm_start <= pos {
+            lo = mid;
+        } else if mid == 0 || seq_meta[mid - 1].fm_start > pos {
+            hi = mid;
+        } else {
+            return Some(mid - 1);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NhmmerFmOriginalPosition {
+    segment_id: usize,
+    seg_pos: usize,
+    crosses_segment: bool,
+}
+
+/// Faithful Rust counterpart of C `fm_getOriginalPosition()`.
+fn fm_get_original_position(
+    record: &NhmmerFmIndexRecord,
+    seq_meta: &[NhmmerFmSequenceMeta],
+    length: usize,
+    is_complement: bool,
+    fm_pos: usize,
+) -> Option<NhmmerFmOriginalPosition> {
+    let mut fm_pos = fm_pos;
+    if is_complement {
+        fm_pos = record.fm.bwt_len().checked_sub(fm_pos)?.checked_sub(1)?;
+    }
+    let segment_id = fm_compute_sequence_offset(record, seq_meta, fm_pos)?;
+    let segment = seq_meta.get(segment_id)?;
+    let mut seg_pos = fm_pos.checked_sub(segment.fm_start)?.checked_add(1)?;
+    if is_complement {
+        seg_pos = segment.length.checked_sub(seg_pos)?.checked_add(1)?;
+    }
+    let crosses_segment = seg_pos
+        .checked_add(length)
+        .and_then(|value| value.checked_sub(1))
+        .is_none_or(|end| end > segment.length);
+    Some(NhmmerFmOriginalPosition {
+        segment_id,
+        seg_pos,
+        crosses_segment,
+    })
+}
+
+fn complement_dna_dsq(code: u8) -> u8 {
+    match code {
+        0 => 3,
+        1 => 2,
+        2 => 1,
+        3 => 0,
+        _ => code,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fm_push_seed_window(
     windows: &mut Vec<NhmmerScoredCandidateWindow>,
@@ -4140,6 +4348,7 @@ fn fm_push_seed_window(
         n: window_start0 + 1,
         length: window_len,
         k: model_end,
+        fm_frame: None,
     };
     if !fm_extended_diagonal_passes_window_gate(seq, hmm, bg, &window, score_bits) {
         return;
@@ -4151,16 +4360,17 @@ fn fm_push_seed_window(
 /// faithful `fm_ssv::fm_extend_seed` (C `FM_extendSeed`), rather than re-running
 /// the local sequence-space extension. This is the FM-augment path: the kernel
 /// already produced an extended diagonal `(diag.n, diag.k, diag.length,
-/// diag.score)` in C's coordinate/score frame, so we only do the FM→sequence
-/// coordinate mapping (mirroring `fm_push_seed_window`'s leading-overlap and
-/// ambiguity guards) and credit the kernel's own bit score. `seed_len` is the
-/// extended diagonal length, `fm_pos` is `text_len - diag.n - diag.length`,
-/// `model_end` is `diag.k + diag.length - 1`, and `score_bits` is `diag.score`.
+/// diag.score)` in C's coordinate/score frame, so we only do the same
+/// FM→sequence coordinate mapping as C `FM_window_from_diag()` and credit the
+/// kernel's own bit score. `seed_len` is the extended diagonal length, `fm_pos`
+/// is `diag.n`, `model_end` is `diag.k + diag.length - 1`, and `score_bits` is
+/// `diag.score`.
 #[allow(clippy::too_many_arguments)]
 fn fm_push_extended_diag_window(
     windows: &mut Vec<NhmmerScoredCandidateWindow>,
-    ambiguities: &[(usize, usize)],
-    seq_meta: &NhmmerFmSequenceMeta,
+    _ambiguities: &[(usize, usize)],
+    seq_meta: &[NhmmerFmSequenceMeta],
+    seq_idx: usize,
     seq: &Sequence,
     record: &NhmmerFmIndexRecord,
     is_complement: bool,
@@ -4169,47 +4379,143 @@ fn fm_push_extended_diag_window(
     fm_pos: usize,
     score_bits: f32,
 ) {
-    if seed_len == 0 || fm_pos + seed_len > record.text_len {
+    if seed_len == 0 || fm_pos > record.text_len || !score_bits.is_finite() {
         return;
     }
-    let block_seed_start = if is_complement {
-        fm_pos
-    } else {
-        record.text_len - fm_pos - seed_len
+    let diag = crate::simd::fm_ssv::FmDiag {
+        n: fm_pos as i64,
+        k: model_end.saturating_sub(seed_len).saturating_add(1) as i32,
+        length: seed_len as i32,
+        score: score_bits,
+        complementarity: if is_complement {
+            crate::simd::fm_ssv::Complementarity::Complement
+        } else {
+            crate::simd::fm_ssv::Complementarity::NoComplement
+        },
     };
-    let Some(block_seed_end) = block_seed_start.checked_add(seed_len) else {
-        return;
-    };
-    if fm_seed_is_wholly_in_leading_overlap(record, block_seed_end) {
-        return;
+    if let Some(window) = fm_window_from_diag(record, seq_meta, seq_idx, seq.n, &diag) {
+        windows.push(window);
     }
-    if fm_seed_overlaps_ambiguity(
-        ambiguities,
-        record.ambig_offset,
-        record.ambig_count,
-        block_seed_start,
-        block_seed_end,
-    ) {
-        return;
+}
+
+/// Faithful Rust counterpart of C `FM_window_from_diag()`: convert an
+/// FM-coordinate diagonal into the original sequence coordinate frame.
+fn fm_window_from_diag(
+    record: &NhmmerFmIndexRecord,
+    seq_meta: &[NhmmerFmSequenceMeta],
+    seq_idx: usize,
+    seq_len: usize,
+    diag: &crate::simd::fm_ssv::FmDiag,
+) -> Option<NhmmerScoredCandidateWindow> {
+    if diag.length <= 0 || diag.n < 0 || !diag.score.is_finite() {
+        return None;
     }
-    let forward_seq_seed_start = match block_seed_start.checked_sub(seq_meta.fm_start) {
-        Some(pos) if pos + seed_len <= seq_meta.length => pos,
-        _ => return,
-    };
-    let seq_seed_start = if is_complement {
-        seq.n - forward_seq_seed_start - seed_len
-    } else {
-        forward_seq_seed_start
-    };
-    if !score_bits.is_finite() {
-        return;
+    let is_complement = diag.complementarity == crate::simd::fm_ssv::Complementarity::Complement;
+    let seed_len = diag.length as usize;
+    let fm_pos = diag.n as usize;
+    let model_end = (diag.k + diag.length - 1) as usize;
+    let pos = fm_get_original_position(record, seq_meta, seed_len, is_complement, fm_pos)?;
+    if pos.segment_id != seq_idx || pos.seg_pos == 0 {
+        return None;
+    }
+    let seq_seed_start = pos.seg_pos - 1;
+    if seq_seed_start >= seq_len {
+        return None;
     }
     let window = NhmmerCandidateWindow {
         n: seq_seed_start + 1,
         length: seed_len,
         k: model_end,
+        fm_frame: (record.seq_count > 1).then_some(NhmmerCandidateFmFrame {
+            fm_n: fm_pos as i64,
+            id: pos.segment_id as i32,
+            target_len: seq_len,
+            fm_start: seq_meta
+                .get(seq_idx)
+                .map(|meta| meta.fm_start as i64)
+                .unwrap_or(0),
+            fm_bwt_len: record.fm.bwt_len() as i64,
+        }),
     };
-    windows.push(NhmmerScoredCandidateWindow { window, score_bits });
+    Some(NhmmerScoredCandidateWindow {
+        window,
+        score_bits: diag.score,
+    })
+}
+
+/// Faithful Rust counterpart of C `FM_extendSeed()`: compute the candidate
+/// extension range, extract it through `fm_convertRange2DSQ()`, and keep the
+/// best-scoring sub-diagonal.
+fn fm_extend_seed(
+    diag: &mut crate::simd::fm_ssv::FmDiag,
+    record: &NhmmerFmIndexRecord,
+    ambiguities: &[(usize, usize)],
+    scores: &crate::simd::fm_ssv::SsvScores,
+    config: &crate::simd::fm_ssv::FmSsvConfig,
+    fm_n: i64,
+) -> bool {
+    let m = scores.m;
+    let kp = scores.kp;
+    let extend = (config.ssv_length as i32 - diag.length).max(10);
+
+    let mut model_start = (diag.k - extend + 1).max(1);
+    let mut model_end = (diag.k + diag.length + extend - 1).min(m);
+    let mut target_start = diag.n - (diag.k as i64 - model_start as i64);
+    let mut target_end = diag.n + (model_end as i64 - diag.k as i64);
+
+    if target_start < 0 {
+        model_start -= target_start as i32;
+        target_start = 0;
+    }
+    if target_end > fm_n - 2 {
+        model_end -= (target_end - (fm_n - 2)) as i32;
+        target_end = fm_n - 2;
+    }
+    if model_start > model_end || target_start > target_end {
+        return false;
+    }
+
+    let is_complement = diag.complementarity == crate::simd::fm_ssv::Complementarity::Complement;
+    let Some(tmp_sq) = fm_convert_range_to_dsq(
+        record,
+        ambiguities,
+        target_start as usize,
+        (target_end - target_start + 1) as usize,
+        is_complement,
+        false,
+    ) else {
+        return false;
+    };
+
+    let mut k = model_start;
+    let mut n: usize = 1;
+    let mut sc = 0.0_f32;
+    let mut hit_start: i64 = n as i64;
+    let mut max_sc = 0.0_f32;
+    let mut max_hit_start: i64 = n as i64;
+    let mut max_hit_end: i64 = n as i64;
+
+    while k <= model_end {
+        let c = tmp_sq.get(n).copied().unwrap_or(0) as usize;
+        let cidx = (k as usize) * kp + c;
+        sc += scores.scores.get(cidx).copied().unwrap_or(0.0);
+        if sc < 0.0 {
+            sc = 0.0;
+            hit_start = n as i64 + 1;
+        } else if sc > max_sc {
+            max_sc = sc;
+            max_hit_start = hit_start;
+            max_hit_end = n as i64;
+        }
+        k += 1;
+        n += 1;
+    }
+
+    diag.n = target_start + max_hit_start - 1;
+    diag.k = model_start + (max_hit_start - 1) as i32;
+    diag.length = (max_hit_end - max_hit_start + 1) as i32;
+    diag.score = max_sc;
+    true
 }
 
 /// Augment the FM candidate windows with the exact two-sweep SSV-over-FM kernel
@@ -4229,9 +4535,9 @@ fn fm_push_extended_diag_window(
 /// `is_complement` selects the strand. The caller passes `fmf` = the block's
 /// kind=0 (reversed-text) index and `fmb` = its kind=1 (forward-text) index for
 /// either strand, and `record` = the strand's own record (kind=0 for Watson,
-/// kind=1 for Crick) used for the coordinate/overlap/ambiguity mapping exactly
-/// as the seed-then-rescore path uses it. The Crick coordinate matches C's
-/// complement `fm_getOriginalPosition` conversion (validated against bundled C).
+/// kind=1 for Crick) used for coordinate mapping. The Crick coordinate matches
+/// C's complement `fm_getOriginalPosition` conversion (validated against
+/// bundled C).
 ///
 /// To mirror C `p7_SSVFM_longlarget`, the extended diagonals are filtered by the
 /// Gumbel-derived `sc_thresh` (computed from `max_length`, `f1`, and the model's
@@ -4239,20 +4545,20 @@ fn fm_push_extended_diag_window(
 /// kernel's extra raw seeds would survive the lenient seed-then-rescore `>0`
 /// window gate and produce hits C never reports.
 ///
-/// Returns `true` when the C-faithful `FM_extendSeed` extension path was taken
-/// (single-segment block whose FM text frame we can reconstruct). In that mode
-/// the augment alone reproduces C `p7_SSVFM_longlarget`'s window list, so the
-/// caller drops the Rust-only seed sources and skips the seed pre-merge / window
-/// gate (`fm_finalize_seed_windows`), matching C's residue counters. Returns
-/// `false` for the fallback (seed-then-rescore) path, where those Rust-specific
-/// guards stay in place.
+/// Returns `true` when the C-faithful `FM_extendSeed` extension path was taken.
+/// In that mode the augment alone reproduces C `p7_SSVFM_longlarget`'s window
+/// list, so the caller drops the Rust-only seed sources and skips the seed
+/// pre-merge / window gate (`fm_finalize_seed_windows`), matching C's residue
+/// counters. Returns `false` for the fallback (seed-then-rescore) path, where
+/// those Rust-specific guards stay in place.
 #[allow(clippy::too_many_arguments)]
 fn fm_ssv_augment_windows(
     fmf: &FmIndex,
     fmb: &FmIndex,
     record: &NhmmerFmIndexRecord,
     ambiguities: &[(usize, usize)],
-    seq_meta: &NhmmerFmSequenceMeta,
+    seq_meta: &[NhmmerFmSequenceMeta],
+    seq_idx: usize,
     seq: &Sequence,
     hmm: &Hmm,
     bg: &Bg,
@@ -4268,6 +4574,9 @@ fn fm_ssv_augment_windows(
     if m == 0 {
         return false;
     }
+    let Some(current_seq_meta) = seq_meta.get(seq_idx) else {
+        return false;
+    };
     let kp = 4usize; // ACGT
     let ln2 = std::f32::consts::LN_2;
 
@@ -4311,18 +4620,18 @@ fn fm_ssv_augment_windows(
 
     // sc_thresh_ratio (C nhmmer.c:996-1007): best_sc_avg = sum(max match score)/
     // sqrt(M) in nats, floored at 5; ratio = min(best_sc_avg/7, 1). Then
-    // sc_threshFM = scthreshFM(14 bits) * ratio, in nats.
+    // sc_threshFM = user scthreshFM (bits) * ratio, in nats.
     let best_sc_avg = (best_sc_sum / (m as f64).sqrt()).max(5.0);
     let ratio = (best_sc_avg / 7.0).min(1.0) as f32;
-    let sc_thresh_fm = NHMMER_FM_SEED_SCORE_THRESHOLD_BITS * ratio * ln2;
+    let sc_thresh_fm = config.score_threshold_bits * ratio * ln2;
 
     let fm_config = fm_ssv::FmSsvConfig {
-        max_depth: NHMMER_FM_SEED_MAX_DEPTH,
-        drop_max_len: NHMMER_FM_SEED_DROP_MAX_LEN,
-        drop_lim: NHMMER_FM_SEED_DROP_LIMIT_BITS * ln2,
-        consec_pos_req: NHMMER_FM_SEED_CONSEC_POS_REQ,
+        max_depth: config.max_depth,
+        drop_max_len: config.drop_max_len,
+        drop_lim: config.drop_lim_bits * ln2,
+        consec_pos_req: config.consec_pos_req,
         consensus_match_req: config.consensus_match_req,
-        score_density_req: NHMMER_FM_SEED_SCORE_DENSITY_BITS * ln2,
+        score_density_req: config.score_density_bits * ln2,
         ssv_length: config.ssv_length.max(1),
     };
 
@@ -4368,44 +4677,7 @@ fn fm_ssv_augment_windows(
         /* bottom_only (Crick / Complement) */ is_complement,
     );
 
-    // Build the strand-resolved FM-text codes that C `FM_extendSeed` extends
-    // against via `fm_convertRange2DSQ(fm, ..., complementarity, ...)`. The kernel
-    // diagonals' `diag.n` are in the FM coordinate frame (full-text 0-based);
-    // `fm_extend_seed` reads `target[abs]` where `abs = target_start + offset`
-    // (1-indexed, target[1] = FM position 0). For the single-segment DBs we
-    // support, the record text covers `seq` exactly (fm_start == 0); for the
-    // Watson (kind=0) frame the FM text is the forward sequence, and for the
-    // Crick (kind=1) frame `fm_convertRange2DSQ` yields the reverse-complement,
-    // which equals the revcomp of the forward sequence.
-    let fm_text_codes: Option<Vec<usize>> = if seq_meta.fm_start == 0
-        && seq_meta.length == seq.n
-        && record.text_len >= seq.n
-        && record.fm.n == record.text_len
-    {
-        let mut codes = vec![0usize; record.text_len + 2];
-        if is_complement {
-            // Crick: complement base at reversed position.
-            for i in 0..seq.n {
-                let fwd = seq.dsq[seq.n - i] as usize;
-                codes[i + 1] = match fwd {
-                    0 => 3,
-                    1 => 2,
-                    2 => 1,
-                    3 => 0,
-                    _ => 0,
-                };
-            }
-        } else {
-            for i in 0..seq.n {
-                codes[i + 1] = seq.dsq[i + 1] as usize;
-            }
-        }
-        Some(codes)
-    } else {
-        None
-    };
-
-    let c_faithful = fm_text_codes.is_some();
+    let c_faithful = !record.text.is_empty();
     let text_len = record.text_len as i64;
     // C's FM_DATA.N is the BWT length, including the terminal symbol. Rust
     // `FmIndex::n` stores only the biological text length, so use the serialized
@@ -4419,13 +4691,13 @@ fn fm_ssv_augment_windows(
             continue;
         }
 
-        if let Some(target) = fm_text_codes.as_ref() {
-            // Faithful C `FM_extendSeed`: extend the raw kernel diagonal against
-            // the FM text using the SSV (bit) score table, then window from the
-            // extended coordinates. This reproduces C's window count/length —
-            // the seed-then-rescore re-extension (`fm_extend_seed_diagonal`)
-            // systematically produced fewer/shorter windows.
-            fm_ssv::fm_extend_seed(&mut diag, target, &scores, &fm_config, fm_n);
+        if c_faithful {
+            // Faithful C `FM_extendSeed`: extract the diagonal range through
+            // `fm_convertRange2DSQ`, extend it with the SSV score table, then
+            // window from the extended coordinates.
+            if !fm_extend_seed(&mut diag, record, ambiguities, &scores, &fm_config, fm_n) {
+                continue;
+            }
             // `scores`/`diag.score` are in NATS; `sc_thresh_bits` is in BITS.
             // C compares the extended diagonal's score against `sc_thresh`
             // (nats), so convert the threshold to nats here. Store the window's
@@ -4437,20 +4709,20 @@ fn fm_ssv_augment_windows(
             if model_end == 0 || model_end > hmm.m {
                 continue;
             }
-            let fm_pos = text_len - diag.n - diag.length as i64;
-            if fm_pos < 0 {
+            if diag.n < 0 {
                 continue;
             }
             fm_push_extended_diag_window(
                 &mut ssv_windows,
                 ambiguities,
                 seq_meta,
+                seq_idx,
                 seq,
                 record,
                 is_complement,
                 diag.length as usize,
                 model_end,
-                fm_pos as usize,
+                diag.n as usize,
                 diag.score / ln2,
             );
         } else {
@@ -4471,7 +4743,7 @@ fn fm_ssv_augment_windows(
             fm_push_seed_window(
                 &mut ssv_windows,
                 ambiguities,
-                seq_meta,
+                current_seq_meta,
                 seq,
                 record,
                 hmm,
@@ -6640,6 +6912,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -6656,8 +6929,121 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 3,
                 length: 4,
-                k: 4
+                k: 4,
+                fm_frame: None,
             }]
+        );
+    }
+
+    #[test]
+    fn nhmmer_fm_c_mapping_helpers_convert_and_map_block_coordinates() {
+        let text = b"AAAACCCCGGGGTTTT";
+        let record = NhmmerFmIndexRecord {
+            block_id: 0,
+            kind: 0,
+            text_start: 0,
+            text_len: text.len(),
+            text: Arc::from(text.to_vec()),
+            seq_offset: 0,
+            seq_count: 2,
+            ambig_offset: 0,
+            ambig_count: 1,
+            overlap_bases: 0,
+            fm: FmIndex::build(&text.iter().rev().copied().collect::<Vec<_>>()),
+        };
+        let seq_meta = vec![
+            NhmmerFmSequenceMeta {
+                name: "s0".to_string(),
+                acc: String::new(),
+                desc: String::new(),
+                fm_start: 0,
+                length: 8,
+            },
+            NhmmerFmSequenceMeta {
+                name: "s1".to_string(),
+                acc: String::new(),
+                desc: String::new(),
+                fm_start: 8,
+                length: 8,
+            },
+        ];
+        let ambiguities = vec![(5, 6)];
+
+        let watson = fm_convert_range_to_dsq(&record, &ambiguities, 4, 4, false, true).unwrap();
+        assert_eq!(&watson[1..=4], &[1, 15, 15, 1]);
+
+        let crick = fm_convert_range_to_dsq(&record, &ambiguities, 0, 4, true, false).unwrap();
+        assert_eq!(&crick[1..=4], &[0, 0, 0, 0]);
+
+        let pos = fm_get_original_position(&record, &seq_meta, 4, false, 10).unwrap();
+        assert_eq!(
+            pos,
+            NhmmerFmOriginalPosition {
+                segment_id: 1,
+                seg_pos: 3,
+                crosses_segment: false,
+            }
+        );
+
+        let crossing = fm_get_original_position(&record, &seq_meta, 4, false, 6).unwrap();
+        assert_eq!(crossing.segment_id, 0);
+        assert_eq!(crossing.seg_pos, 7);
+        assert!(crossing.crosses_segment);
+    }
+
+    #[test]
+    fn nhmmer_fm_window_from_diag_preserves_original_segment_id() {
+        let text = b"AAAACCCCGGGGTTTT";
+        let record = NhmmerFmIndexRecord {
+            block_id: 0,
+            kind: 0,
+            text_start: 0,
+            text_len: text.len(),
+            text: Arc::from(text.to_vec()),
+            seq_offset: 0,
+            seq_count: 2,
+            ambig_offset: 0,
+            ambig_count: 0,
+            overlap_bases: 0,
+            fm: FmIndex::build(&text.iter().rev().copied().collect::<Vec<_>>()),
+        };
+        let seq_meta = vec![
+            NhmmerFmSequenceMeta {
+                name: "s0".to_string(),
+                acc: String::new(),
+                desc: String::new(),
+                fm_start: 0,
+                length: 8,
+            },
+            NhmmerFmSequenceMeta {
+                name: "s1".to_string(),
+                acc: String::new(),
+                desc: String::new(),
+                fm_start: 8,
+                length: 8,
+            },
+        ];
+        let diag = crate::simd::fm_ssv::FmDiag {
+            n: 10,
+            k: 2,
+            length: 3,
+            score: 7.0,
+            complementarity: crate::simd::fm_ssv::Complementarity::NoComplement,
+        };
+
+        let window = fm_window_from_diag(&record, &seq_meta, 1, 8, &diag).unwrap();
+
+        assert_eq!(window.window.n, 3);
+        assert_eq!(window.window.length, 3);
+        assert_eq!(
+            window.window.fm_frame.unwrap(),
+            NhmmerCandidateFmFrame {
+                fm_n: 10,
+                id: 1,
+                target_len: 8,
+                fm_start: 8,
+                fm_bwt_len: record.fm.bwt_len() as i64,
+            }
         );
     }
 
@@ -6704,6 +7090,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -6788,6 +7175,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -6816,7 +7204,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 3,
                 length: 10,
-                k: 10
+                k: 10,
+                fm_frame: None,
             }]
         );
     }
@@ -6857,6 +7246,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.clone()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -6923,6 +7313,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.clone()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7096,6 +7487,7 @@ mod tests {
             kind: 0,
             text_start: 0,
             text_len: text.len(),
+            text: Arc::from(text.to_vec()),
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -7166,6 +7558,7 @@ mod tests {
                 n: 1,
                 length: text.len(),
                 k: text.len(),
+                fm_frame: None,
             }
         );
         assert!(windows[0].score_bits > 0.0);
@@ -7206,6 +7599,7 @@ mod tests {
                         n: 3,
                         length: 4,
                         k: 4,
+                        fm_frame: None,
                     },
                     score_bits: 0.0,
                 },
@@ -7214,6 +7608,7 @@ mod tests {
                         n: 5,
                         length: 4,
                         k: 6,
+                        fm_frame: None,
                     },
                     score_bits: 0.0,
                 },
@@ -7231,6 +7626,7 @@ mod tests {
                 n: 3,
                 length: 6,
                 k: 6,
+                fm_frame: None,
             }
         );
         assert!(
@@ -7280,6 +7676,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7344,6 +7741,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.clone()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7424,6 +7822,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.clone()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7525,6 +7924,7 @@ mod tests {
                     n: idx + 1,
                     length: 1,
                     k: 1,
+                    fm_frame: None,
                 },
                 score_bits: (window_count - idx) as f32,
             })
@@ -7911,6 +8311,7 @@ mod tests {
             kind: 0,
             text_start: 0,
             text_len: 12,
+            text: Arc::from(b"ACGTACGTACGT".to_vec()),
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -7976,6 +8377,7 @@ mod tests {
             kind: 0,
             text_start: 0,
             text_len: text.len(),
+            text: Arc::from(text.to_vec()),
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -8024,6 +8426,7 @@ mod tests {
                 kind: 0,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8067,6 +8470,7 @@ mod tests {
                 kind: 0,
                 text_start: 2,
                 text_len: block_text.len(),
+                text: Arc::from(block_text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8083,7 +8487,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 1,
                 length: 4,
-                k: 4
+                k: 4,
+                fm_frame: None,
             }]
         );
     }
@@ -8119,6 +8524,7 @@ mod tests {
                 kind: 0,
                 text_start: 2,
                 text_len: block_text.len(),
+                text: Arc::from(block_text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8161,6 +8567,7 @@ mod tests {
                 kind: 0,
                 text_start: 7,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8203,6 +8610,7 @@ mod tests {
                 kind: 0,
                 text_start: 7,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8219,7 +8627,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 2,
                 length: 4,
-                k: 4
+                k: 4,
+                fm_frame: None,
             }]
         );
     }
@@ -8253,6 +8662,7 @@ mod tests {
                 kind: 1,
                 text_start: 0,
                 text_len: text.len(),
+                text: Arc::from(text.to_vec()),
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8269,7 +8679,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 3,
                 length: 3,
-                k: 3
+                k: 3,
+                fm_frame: None,
             }]
         );
         assert!(fm_seed_candidate_windows(&target_db, 0, &hmm, &Bg::new(&abc), 5, false).is_none());
@@ -8332,7 +8743,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 3,
                 length: 4,
-                k: 4
+                k: 4,
+                fm_frame: None,
             }]
         );
     }
@@ -8390,7 +8802,8 @@ mod tests {
             vec![NhmmerCandidateWindow {
                 n: 3,
                 length: 3,
-                k: 3
+                k: 3,
+                fm_frame: None,
             }]
         );
     }
@@ -8735,7 +9148,7 @@ fn msv_residue_count_for_longtarget_window(
         hmm.m * 4
     };
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths_from_om(om);
-    ssv_longtarget::extend_and_merge_windows_with_scoredata(
+    ssv_longtarget::p7_pli_extend_and_merge_windows(
         &mut windows,
         ml,
         sq.n,
@@ -8915,15 +9328,16 @@ fn search_longtarget(
                 k: w.k,
                 length: w.length,
                 score: 0.0,
-                target_len: sq.n,
+                target_len: w.fm_frame.map_or(sq.n, |frame| frame.target_len),
                 complement: is_complement,
-                // Per-segment FM path: each searched `sq` IS one FM segment, so
-                // id is constant within this call and windows are already in
-                // segment-local (RC-local for crick) coordinates. id=0 (single
-                // segment per call) and fm_n=-1 (no concatenated-FM frame, so
-                // no complement extension flip — see HmmWindow docs).
-                id: 0,
-                fm_n: -1,
+                // Multi-segment FM windows carry C's concatenated-FM coordinate
+                // (`fm_n >= 0`) so complement windows take C's special
+                // extension flip. FASTA and single-segment FM windows keep
+                // fm_n=-1, the RC-local/no-flip frame.
+                id: w.fm_frame.map_or(0, |frame| frame.id),
+                fm_n: w.fm_frame.map_or(-1, |frame| frame.fm_n),
+                fm_start: w.fm_frame.map_or(-1, |frame| frame.fm_start),
+                fm_bwt_len: w.fm_frame.map_or(0, |frame| frame.fm_bwt_len),
             })
             .collect()
     } else {
@@ -8956,7 +9370,7 @@ fn search_longtarget(
     #[cfg(not(target_arch = "x86_64"))]
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths(hmm);
     {
-        ssv_longtarget::extend_and_merge_windows_with_scoredata(
+        ssv_longtarget::p7_pli_extend_and_merge_windows(
             &mut windows,
             ml,
             sq.n,
@@ -8964,6 +9378,25 @@ fn search_longtarget(
             &prefix_lens,
             &suffix_lens,
         );
+        for win in &mut windows {
+            if win.fm_n >= 0 && win.fm_start >= 0 {
+                let fm_pos = if win.complement {
+                    win.fm_bwt_len - win.fm_n - 1
+                } else {
+                    win.fm_n
+                };
+                let seq_pos = fm_pos - win.fm_start + 1;
+                let seg_pos = if win.complement {
+                    win.target_len as i64 - seq_pos + 1
+                } else {
+                    seq_pos
+                };
+                if seg_pos > 0 {
+                    win.n = seg_pos as usize;
+                }
+                win.fm_n = -1;
+            }
+        }
     }
 
     // Phase 1a: Per-window standard MSV filter (F1 gate). Mirrors C
@@ -9112,7 +9545,7 @@ fn search_longtarget(
             // vit_windowlist entries having target_len=window_len (subseq_len).
             // This bounds extension to subseq bounds; without it, extension
             // could reach beyond the SSV window.
-            ssv_longtarget::extend_and_merge_windows_with_scoredata(
+            ssv_longtarget::p7_pli_extend_and_merge_windows(
                 &mut sub_windows,
                 ml,
                 subseq_len,
@@ -9145,6 +9578,8 @@ fn search_longtarget(
                     complement: is_complement,
                     id: 0,
                     fm_n: -1,
+                    fm_start: -1,
+                    fm_bwt_len: 0,
                 });
             }
         }

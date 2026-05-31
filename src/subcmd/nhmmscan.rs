@@ -473,6 +473,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             };
 
             let max_length = nhmmscan_max_length(hmm, args.w_length, args.w_beta);
+            let mut search_hmm = hmm.clone();
+            search_hmm.max_length = max_length;
             let effective_f1 = if args.max { 0.3 } else { args.f1 };
             let effective_f2 = if args.max { 1.0 } else { args.f2 };
             let effective_f3 = if args.max { 1.0 } else { args.f3 };
@@ -499,7 +501,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 };
                 let mut rc_hits = crate::subcmd::nhmmer::search_sequence(
                     &rc_sq,
-                    hmm,
+                    &search_hmm,
                     &gm,
                     &om,
                     &local_bg,
@@ -527,7 +529,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             if do_watson {
                 hits.extend(crate::subcmd::nhmmer::search_sequence(
                     &sq,
-                    hmm,
+                    &search_hmm,
                     &gm,
                     &om,
                     &local_bg,
@@ -673,11 +675,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             args.noali,
             textw,
         );
-        let strands_searched = ((!args.crick) as usize) + ((!args.watson) as usize);
+        let stats_residue_multiplier = if args.watson { 1 } else { 2 };
         let pos_output = reported_aligned_residues(&th);
         write_nhmmscan_pipeline_stats(
             out,
-            (sq.n * strands_searched.max(1)) as u64,
+            (sq.n * stats_residue_multiplier) as u64,
             hmms.len() as u64,
             hmms.iter().map(|hmm| hmm.m as u64).sum(),
             th.nreported as u64,
@@ -827,17 +829,13 @@ fn open_query_seq_file(
 
 fn nhmmscan_max_length(
     hmm: &hmmer_pure_rs::hmm::Hmm,
-    w_length: Option<i32>,
-    w_beta: Option<f64>,
+    _w_length: Option<i32>,
+    _w_beta: Option<f64>,
 ) -> i32 {
-    if let Some(w_length) = w_length {
-        w_length
-    } else if let Some(w_beta) = w_beta.filter(|beta| *beta > 0.0) {
-        builder::max_length_from_beta(hmm, w_beta)
-    } else if hmm.max_length > 0 {
+    // C nhmmscan parses and reports --w_beta/--w_length, but the scan path
+    // searches pressed profiles with their serialized MAXL unchanged.
+    if hmm.max_length > 0 {
         hmm.max_length
-    } else if w_beta == Some(0.0) {
-        (hmm.m * 4) as i32
     } else {
         builder::max_length_from_beta(hmm, DEFAULT_WINDOW_BETA)
     }

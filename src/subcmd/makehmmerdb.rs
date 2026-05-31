@@ -368,7 +368,7 @@ fn read_seqfile_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
     if path.extension().is_some_and(|e| e == "gz") {
-        flate2::read::GzDecoder::new(file).read_to_end(&mut buf)?;
+        flate2::read::MultiGzDecoder::new(file).read_to_end(&mut buf)?;
     } else {
         std::io::BufReader::new(file).read_to_end(&mut buf)?;
     }

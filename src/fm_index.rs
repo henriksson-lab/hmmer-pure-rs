@@ -622,7 +622,7 @@ impl FmIndex {
             }
             let mut samples = Vec::with_capacity(sa.len().div_ceil(sample_rate));
             for (row, &pos) in sa.iter().enumerate() {
-                if (pos as usize) % sample_rate == 0 {
+                if row % sample_rate == 0 {
                     samples.push((
                         i32::try_from(row)
                             .map_err(|_| "FM-index row exceeds i32 range".to_string())?,
@@ -762,6 +762,15 @@ impl FmIndex {
             .filter_map(|i| self.suffix_position(i))
             .filter(|&pos| pos < self.n)
             .collect()
+    }
+
+    /// Faithful public counterpart of C `FM_backtrackSeed()` for one BWT row.
+    ///
+    /// `suffix_position()` already performs the same LF backtracking to a
+    /// sampled suffix-array row when only samples are resident, and returns the
+    /// text position represented by this row.
+    pub fn backtrack_seed_position(&self, row: usize) -> Option<usize> {
+        self.suffix_position(row).filter(|&pos| pos < self.n)
     }
 
     fn suffix_position(&self, row: usize) -> Option<usize> {
@@ -999,6 +1008,38 @@ mod tests {
             got.sort_unstable();
             assert_eq!(got, expected, "sampled locate mismatch for {pattern:?}");
         }
+    }
+
+    #[test]
+    fn sampled_fm_index_samples_suffix_array_by_bwt_row() {
+        let original = FmIndex::build(b"ACGTACGTGCAACGTACGT");
+        let sample_rate = 3;
+        let sampled = FmIndex::from_parts_inner(
+            original.bwt.clone(),
+            original.sa.clone(),
+            original.c,
+            original.n,
+            Some(sample_rate),
+        )
+        .unwrap();
+
+        let expected: Vec<(i32, i32)> = original
+            .sa
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| row % sample_rate == 0)
+            .map(|(row, &pos)| (row as i32, pos))
+            .collect();
+        let position_sampled: Vec<(i32, i32)> = original
+            .sa
+            .iter()
+            .enumerate()
+            .filter(|(_, &pos)| (pos as usize) % sample_rate == 0)
+            .map(|(row, &pos)| (row as i32, pos))
+            .collect();
+
+        assert_ne!(position_sampled, expected);
+        assert_eq!(sampled.sa_samples, expected);
     }
 
     #[test]

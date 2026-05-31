@@ -184,15 +184,15 @@ fn mean_position_relative_entropy(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
 
     let mut mre = 0.0_f64;
     for (node, &occ) in mocc.iter().enumerate().take(h.m + 1).skip(1) {
-        mre += (occ as f64) * rel_entropy(&h.mat[node][..h.abc_k], &bg.f[..h.abc_k]);
+        mre += (occ as f64) * f_rel_entropy_c(&h.mat[node][..h.abc_k], &bg.f[..h.abc_k]) as f64;
     }
-    mre /= occ_sum as f64;
+    mre /= fsum_c(&mocc[1..=h.m]) as f64;
 
     if h.m < 2 {
         return mre as f32;
     }
 
-    let trans_occ_sum: f32 = mocc[2..=h.m].iter().sum();
+    let trans_occ_sum = fsum_c(&mocc[2..=h.m]);
     if trans_occ_sum <= 0.0 {
         return mre as f32;
     }
@@ -235,6 +235,31 @@ fn composition_kld(h: &hmmer_pure_rs::Hmm, bg: &Bg) -> f32 {
     }
 
     rel_entropy(&avg, &bg.f[..h.abc_k]) as f32
+}
+
+fn fsum_c(values: &[f32]) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut c = 0.0_f32;
+    for &value in values {
+        let y = value - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
+fn f_rel_entropy_c(p: &[f32], q: &[f32]) -> f32 {
+    let mut kl = 0.0_f32;
+    for (&px, &qx) in p.iter().zip(q.iter()) {
+        if px > 0.0 {
+            if qx == 0.0 {
+                return f32::INFINITY;
+            }
+            kl = (kl as f64 + (px as f64) * (c_log_f64((px / qx) as f64) / ESL_CONST_LOG2)) as f32;
+        }
+    }
+    kl
 }
 
 fn rel_entropy(p: &[f32], q: &[f32]) -> f64 {

@@ -2361,7 +2361,7 @@ pub(crate) fn write_ali_output<W: Write>(
     msa.desc = desc.filter(|s| !s.is_empty()).map(|s| s.to_string());
     msa.author = Some(author.to_string());
     let nseq = msa.nseq;
-    crate::subcmd::jackhmmer::write_tophits_alignment_msa(f, &msa);
+    crate::subcmd::jackhmmer::write_tophits_alignment_msa_stockholm(f, &msa);
     Some(nseq)
 }
 

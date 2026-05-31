@@ -89,6 +89,19 @@ fn write_mismatched_mapali(src: &str, dst: &std::path::Path) {
     assert_ne!(original_checksum, modified_checksum);
 }
 
+fn extract_hmm_with_c_hmmfetch(db: &str, key: &str, dst: &std::path::Path) {
+    let output = Command::new(test_path("hmmer/src/hmmfetch"))
+        .args(["-o", dst.to_str().unwrap(), db, key])
+        .output()
+        .expect("failed to run bundled C hmmfetch");
+
+    assert!(
+        output.status.success(),
+        "bundled C hmmfetch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn parse_fasta_sequences(path: &str) -> HashMap<String, String> {
     let content = std::fs::read_to_string(path).unwrap();
     let mut seqs = HashMap::new();
@@ -408,6 +421,28 @@ fn hmmalign_a2m_matches_bundled_c_on_20aa_fixture() {
         String::from_utf8(rust.stdout).unwrap(),
         String::from_utf8(c.stdout).unwrap()
     );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
+fn hmmalign_a2m_preserves_real_fasta_description_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmm = dir.path().join("14-3-3.hmm");
+    extract_hmm_with_c_hmmfetch(
+        &test_path("external/realistic/pfam/Pfam-A.first12.hmm"),
+        "14-3-3",
+        &hmm,
+    );
+    let query = test_path("external/realistic/queries/yeast_first_protein.fa");
+    let rust = run_hmmalign_command(hmm.to_str().unwrap(), &query, &["--outformat", "A2M"]);
+    let c = run_c_hmmalign_command(hmm.to_str().unwrap(), &query, &["--outformat", "A2M"]);
+
+    let rust_stdout = String::from_utf8(rust.stdout).unwrap();
+    assert!(rust_stdout.contains(">sp|A0A0B7P3V8|YP41B_YEAST Transposon Ty4-P Gag-Pol polyprotein"));
+    assert_eq!(rust_stdout, String::from_utf8(c.stdout).unwrap());
     assert_eq!(
         String::from_utf8(rust.stderr).unwrap(),
         String::from_utf8(c.stderr).unwrap()
@@ -846,6 +881,60 @@ fn hmmalign_mapali_rebuilt_caudal_act_accepts_seed_sequences() {
     }
     assert!(stdout.contains("#=GC RF"));
     assert!(stdout.contains("#=GC PP_cons"));
+}
+
+#[test]
+fn hmmalign_mapali_rebuilt_caudal_act_matches_bundled_c_stockholm_output() {
+    let rust = run_hmmalign_command(
+        &test_path("test_data/mapali/Caudal_act-rebuilt.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--mapali", &test_path("hmmer/testsuite/Caudal_act.sto")],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("test_data/mapali/Caudal_act-rebuilt.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &["--mapali", &test_path("hmmer/testsuite/Caudal_act.sto")],
+    );
+
+    let rust_stdout = String::from_utf8(rust.stdout).unwrap();
+    assert!(rust_stdout.contains("#=GS P79788_CHICK/13-172 AC P79788.1"));
+    assert!(rust_stdout.contains("gLNLAAQNFV"));
+    assert_eq!(rust_stdout, String::from_utf8(c.stdout).unwrap());
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
+}
+
+#[test]
+fn hmmalign_trim_mapali_rebuilt_caudal_act_matches_bundled_c_stockholm_output() {
+    let rust = run_hmmalign_command(
+        &test_path("test_data/mapali/Caudal_act-rebuilt.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &[
+            "--trim",
+            "--mapali",
+            &test_path("hmmer/testsuite/Caudal_act.sto"),
+        ],
+    );
+    let c = run_c_hmmalign_command(
+        &test_path("test_data/mapali/Caudal_act-rebuilt.hmm"),
+        &test_path("hmmer/testsuite/20aa-alitest.fa"),
+        &[
+            "--trim",
+            "--mapali",
+            &test_path("hmmer/testsuite/Caudal_act.sto"),
+        ],
+    );
+
+    assert_eq!(
+        String::from_utf8(rust.stdout).unwrap(),
+        String::from_utf8(c.stdout).unwrap()
+    );
+    assert_eq!(
+        String::from_utf8(rust.stderr).unwrap(),
+        String::from_utf8(c.stderr).unwrap()
+    );
 }
 
 #[test]

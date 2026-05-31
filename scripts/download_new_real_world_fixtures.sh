@@ -143,6 +143,7 @@ decompress_gzip "$dna_dir/GCF_000005845.2_ASM584v2_genomic.fna.gz" \
   "$dna_dir/GCF_000005845.2_ASM584v2_genomic.fna"
 
 extract_stockholm_by_accession "$pfam_dir/Pfam-A.seed.gz" "PF02518" "$pfam_dir/PF02518_HATPase_c.seed.sto"
+extract_stockholm_by_accession "$pfam_dir/Pfam-A.seed.gz" "PF00072" "$pfam_dir/PF00072_Response_reg.seed.sto"
 extract_stockholm_by_accession "$rfam_dir/Rfam.seed.gz" "RF00005" "$rfam_dir/RF00005_tRNA.seed.sto"
 sed 's/U/T/g; s/u/t/g' "$rfam_dir/RF00005_tRNA.seed.sto" > "$rfam_dir/RF00005_tRNA.dna.seed.sto"
 
@@ -158,6 +159,7 @@ write_first_bases "$dna_dir/GCF_000005845.2_ASM584v2_genomic.fna" \
   echo "pfam_seed_url=$pfam_seed_url"
   echo "rfam_seed_url=$rfam_seed_url"
   echo "pfam_selected_accession=PF02518"
+  echo "pfam_extra_accession=PF00072"
   echo "rfam_selected_accession=RF00005"
   echo "protein_query_id=sp|P0A6Y8|DNAK_ECOLI"
   echo "dna_subset_bases=250000"

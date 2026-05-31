@@ -8,10 +8,6 @@ use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::dp::generic_backward::g_backward;
-use hmmer_pure_rs::dp::generic_decoding::g_decoding;
-use hmmer_pure_rs::dp::generic_fwdback::g_forward;
-use hmmer_pure_rs::dp::generic_optacc::{g_oa_trace, g_optimal_accuracy};
 use hmmer_pure_rs::dp::gmx::Gmx;
 use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::logsum;
@@ -19,6 +15,18 @@ use hmmer_pure_rs::msa;
 use hmmer_pure_rs::profile::{self, Profile, P7_UNILOCAL};
 use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::trace::State;
+#[cfg(not(target_arch = "x86_64"))]
+use hmmer_pure_rs::{
+    dp::generic_backward::g_backward,
+    dp::generic_decoding::g_decoding,
+    dp::generic_fwdback::g_forward,
+    dp::generic_optacc::{g_oa_trace, g_optimal_accuracy},
+};
+#[cfg(target_arch = "x86_64")]
+use hmmer_pure_rs::{
+    simd::oprofile::{OProfile, P7O_C, P7O_J, P7O_LOOP, P7O_N},
+    simd::probmx::{p_decoding_to_gmx, ProbMx},
+};
 
 #[derive(Parser)]
 #[command(name = "hmmalign", about = "Align sequences to a profile HMM")]
@@ -434,7 +442,11 @@ fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
 /// for amino alphabets.
 fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     for row in &msa.rows {
-        writeln!(out, ">{}", row.name).unwrap();
+        if let Some(desc) = row.desc.as_deref().filter(|desc| !desc.is_empty()) {
+            writeln!(out, ">{} {}", row.name, desc).unwrap();
+        } else {
+            writeln!(out, ">{}", row.name).unwrap();
+        }
         let mut seq = String::with_capacity(row.aseq.len());
         for (ch, rf) in row.aseq.chars().zip(msa.rfline.chars()) {
             let is_consensus = rf.is_ascii_alphanumeric();
@@ -500,6 +512,71 @@ type AlignedTrace = (hmmer_pure_rs::trace::Trace, Vec<f32>);
 /// sequences via `p7_gmx_GrowTo`-style reuse, so only the trace and a small
 /// O(L) posterior vector are retained per sequence — never the O(M*L) matrices.
 fn align_traces(
+    hmm: &hmmer_pure_rs::hmm::Hmm,
+    abc: &Alphabet,
+    bg: &Bg,
+    sequences: &[Sequence],
+) -> Vec<AlignedTrace> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return align_traces_optimized(hmm, abc, bg, sequences);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        return align_traces_generic(hmm, abc, bg, sequences);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn align_traces_optimized(
+    hmm: &hmmer_pure_rs::hmm::Hmm,
+    abc: &Alphabet,
+    bg: &Bg,
+    sequences: &[Sequence],
+) -> Vec<AlignedTrace> {
+    let mut gm = Profile::new(hmm.m, abc);
+    profile::profile_config(hmm, bg, &mut gm, 100, P7_UNILOCAL);
+    let mut om = OProfile::convert(&gm);
+    let mut fwd = ProbMx::new_full(hmm.m, 0);
+    let mut bck = ProbMx::new_full(hmm.m, 0);
+    let mut pp = ProbMx::new_full(hmm.m, 0);
+    let mut oa = ProbMx::new_full(hmm.m, 0);
+    let mut pp_gmx = Gmx::new(hmm.m, 0);
+
+    let mut out = Vec::with_capacity(sequences.len());
+    for sq in sequences {
+        om.reconfig_length(sq.n as i32);
+        fwd.resize_full(hmm.m, sq.n);
+        bck.resize_full(hmm.m, sq.n);
+        pp.resize_full(hmm.m, sq.n);
+        oa.resize_full(hmm.m, sq.n);
+        pp_gmx.grow_to(hmm.m, sq.n);
+
+        let fwd_sc = unsafe {
+            hmmer_pure_rs::simd::fwd_filter::forward_parser_pmx(&sq.dsq, sq.n, &om, &mut fwd)
+        };
+        unsafe {
+            hmmer_pure_rs::simd::bck_filter::backward_parser_pmx(
+                &sq.dsq, sq.n, &om, fwd_sc, &mut bck,
+            );
+            hmmer_pure_rs::simd::optacc::posterior_decoding_pmx(&fwd, &bck, &om, &mut pp);
+            hmmer_pure_rs::simd::optacc::optimal_accuracy_pmx(&om, &pp, &mut oa);
+        }
+        let tr = unsafe { hmmer_pure_rs::simd::optacc::oa_trace_pmx(&om, &pp, &oa) };
+        let njc_loop = [
+            om.xf[P7O_N][P7O_LOOP],
+            om.xf[P7O_J][P7O_LOOP],
+            om.xf[P7O_C][P7O_LOOP],
+        ];
+        p_decoding_to_gmx(&fwd, &bck, hmm.m, njc_loop, &mut pp_gmx);
+        let pp_z = trace_posteriors(&tr, &pp_gmx);
+        out.push((tr, pp_z));
+    }
+    out
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn align_traces_generic(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,
     bg: &Bg,
@@ -637,32 +714,27 @@ fn build_text_msa_with_mapali(
     }
 
     let map = hmm.map.as_ref().unwrap();
-    let mut inscount = mapped_insert_widths(mapped, map, hmm.m);
-    if trim {
-        inscount[0] = 0;
-        inscount[hmm.m] = 0;
-    }
-
+    let mapped_pairs = faux_from_mapped_msa(mapped, map, abc, hmm.m);
     let traces = align_traces(hmm, abc, bg, sequences);
 
-    for (tr, _) in &traces {
-        update_insert_widths_from_trace(&mut inscount, tr, hmm.m);
-    }
+    let mut all_traces = Vec::with_capacity(mapped_pairs.len() + traces.len());
+    all_traces.extend(mapped_pairs.iter().map(|(_, tr)| (tr.clone(), Vec::new())));
+    all_traces.extend(traces.iter().cloned());
 
-    let matuse = vec![true; hmm.m + 1];
-    let matmap = compute_matmap(&inscount, &matuse, hmm.m);
-    let alen = alignment_len_from_map(&inscount, &matuse, hmm.m);
+    let (inscount, matuse, matmap, alen) = map_new_msa(hmm.m, &all_traces, trim);
 
     let mut rows = Vec::with_capacity(mapped.nseq + sequences.len());
-    for (idx, name) in mapped.sqname.iter().enumerate() {
+    for (idx, (sq, tr)) in mapped_pairs.iter().enumerate() {
+        let dummy_pp = vec![0.0_f32; tr.n];
+        let (mut aseq, mut ppline) =
+            make_text_row(abc, sq, tr, &dummy_pp, &matuse, &matmap, alen, trim);
+        rejustify_insertions_text(&mut aseq, &mut ppline, &inscount, &matmap, &matuse, hmm.m);
         rows.push(AlignmentRow {
-            name: name.clone(),
-            acc: None,
+            name: mapped.sqname[idx].clone(),
+            acc: (!mapped.sqacc[idx].is_empty()).then(|| mapped.sqacc[idx].clone()),
             desc: (!mapped.sqdesc[idx].is_empty()).then(|| mapped.sqdesc[idx].clone()),
-            aseq: expand_mapped_row(&mapped.aseq[idx], map, &matmap, &inscount, hmm.m, trim),
-            ppline: mapped.pp[idx]
-                .as_ref()
-                .map(|pp| expand_mapped_annotation(pp, map, &matmap, &inscount, hmm.m, trim)),
+            aseq,
+            ppline: None,
         });
     }
 
@@ -689,189 +761,123 @@ fn build_text_msa_with_mapali(
 
     let mut rfline = vec![b'.'; alen];
     for k in 1..=hmm.m {
-        rfline[matmap[k] - 1] = b'x';
-    }
-    let pp_cons = mapped
-        .pp_cons
-        .as_ref()
-        .map(|pp| expand_mapped_annotation(pp, map, &matmap, &inscount, hmm.m, trim))
-        .unwrap_or_else(|| ".".repeat(alen));
-    let mut pp_cons_bytes = pp_cons.into_bytes();
-    for (apos, ch) in pp_cons_bytes.iter_mut().enumerate() {
-        if pp_cons_n[apos] > 0 {
-            *ch = pp_to_char(pp_cons_sum[apos] / pp_cons_n[apos] as f32) as u8;
+        if matuse[k] {
+            rfline[matmap[k] - 1] = b'x';
         }
     }
-    let pp_cons = String::from_utf8(pp_cons_bytes).unwrap();
+    let mut pp_cons = String::with_capacity(alen);
+    for apos in 0..alen {
+        if pp_cons_n[apos] > 0 {
+            pp_cons.push(pp_to_char(pp_cons_sum[apos] / pp_cons_n[apos] as f32));
+        } else {
+            pp_cons.push('.');
+        }
+    }
 
-    TextMsa {
+    let mut msa = TextMsa {
         rows,
         rfline: String::from_utf8(rfline).unwrap(),
         pp_cons,
+    };
+    if trim {
+        trim_terminal_residueless_columns(&mut msa);
     }
+    msa
 }
 
-/// Compute the per-node insert width vector (length M+1) implied by the source
-/// MSA's column-to-model `map`. Used as the initial insert budget when merging a
-/// `--mapali` alignment with newly aligned sequences.
-fn mapped_insert_widths(mapped: &msa::Msa, map: &[i32], m: usize) -> Vec<usize> {
-    let mut ins = vec![0usize; m + 1];
-    ins[0] = (map[1] - 1).max(0) as usize;
-    for k in 1..m {
-        ins[k] = (map[k + 1] - map[k] - 1).max(0) as usize;
-    }
-    ins[m] = (mapped.alen as i32 - map[m]).max(0) as usize;
-    ins
-}
-
-/// Walk a trace, count I/N/C insertions per model node, and update the global
-/// per-node insert-width vector to the maximum across all traces.
-fn update_insert_widths_from_trace(
-    inscount: &mut [usize],
-    tr: &hmmer_pure_rs::trace::Trace,
-    m: usize,
-) {
-    let mut insnum = vec![0usize; m + 1];
-    for z in 1..tr.n {
-        match tr.st[z] {
-            State::I => insnum[tr.k[z]] += 1,
-            State::N if tr.st[z - 1] == State::N => insnum[0] += 1,
-            State::C if tr.st[z - 1] == State::C => insnum[m] += 1,
-            _ => {}
-        }
-    }
-    for k in 0..=m {
-        inscount[k] = inscount[k].max(insnum[k]);
-    }
-}
-
-/// Build `matmap[1..=M]`: the alignment column (1-based) assigned to each
-/// consensus model node, accounting for retained insert widths and per-node
-/// `matuse` flags.
-fn compute_matmap(inscount: &[usize], matuse: &[bool], m: usize) -> Vec<usize> {
-    let mut matmap = vec![0usize; m + 1];
-    let mut alen = inscount[0];
-    for k in 1..=m {
-        if matuse[k] {
-            matmap[k] = alen + 1;
-            alen += 1 + inscount[k];
-        } else {
-            matmap[k] = alen;
-            alen += inscount[k];
-        }
-    }
-    matmap
-}
-
-/// Total alignment length implied by per-node insert widths plus retained
-/// consensus columns (`matuse`).
-fn alignment_len_from_map(inscount: &[usize], matuse: &[bool], m: usize) -> usize {
-    let mut alen = inscount[0];
-    for k in 1..=m {
-        alen += inscount[k] + usize::from(matuse[k]);
-    }
-    alen
-}
-
-/// Expand a single mapped-MSA row into the merged alignment's coordinate system:
-/// place consensus residues at `matmap[k]` columns and copy the original insert
-/// stretches into the wider insert buckets.
-fn expand_mapped_row(
-    row: &[u8],
+fn faux_from_mapped_msa(
+    mapped: &msa::Msa,
     map: &[i32],
-    matmap: &[usize],
-    inscount: &[usize],
+    abc: &Alphabet,
     m: usize,
-    trim: bool,
-) -> String {
-    let all_match = vec![true; m + 1];
-    let mut out = vec![b'.'; alignment_len_from_map(inscount, &all_match, m)];
+) -> Vec<(Sequence, hmmer_pure_rs::trace::Trace)> {
+    let mut matassign = vec![false; mapped.alen + 1];
     for k in 1..=m {
-        out[matmap[k] - 1] = b'-';
-    }
-    if !(trim && m == 0) {
-        copy_insert_slice(
-            &mut out,
-            0,
-            &row[0..(map[1] - 1).max(0) as usize],
-            matmap,
-            m,
-            trim,
-        );
-    }
-    for k in 1..=m {
-        let src_cons = (map[k] - 1) as usize;
-        out[matmap[k] - 1] = normalize_mapped_consensus_char(row[src_cons]);
-        let next = if k == m {
-            row.len()
-        } else {
-            (map[k + 1] - 1) as usize
-        };
-        copy_insert_slice(&mut out, k, &row[src_cons + 1..next], matmap, m, trim);
+        matassign[map[k] as usize] = true;
     }
 
-    String::from_utf8(out).unwrap()
+    (0..mapped.nseq)
+        .map(|idx| {
+            let mut sq = Sequence::new();
+            sq.name = mapped.sqname[idx].clone();
+            sq.acc = mapped.sqacc[idx].clone();
+            sq.desc = mapped.sqdesc[idx].clone();
+
+            let mut tr = hmmer_pure_rs::trace::Trace::new();
+            tr.append(State::B, 0, 0);
+
+            let mut k = 0usize;
+            let mut rpos = 1usize;
+            for (apos0, &ch) in mapped.aseq[idx].iter().enumerate() {
+                let apos = apos0 + 1;
+                let code = abc.digitize_symbol(ch);
+                let is_residue = abc.is_residue(code) || code == abc.nonresidue_code();
+                let is_gap = matches!(ch, b'-' | b'.' | b'_');
+                let is_missing = code == abc.missing_code();
+
+                if matassign[apos] {
+                    k += 1;
+                    if is_residue {
+                        sq.dsq.push(code);
+                        tr.append(State::M, k, rpos);
+                        rpos += 1;
+                    } else if is_gap {
+                        tr.append(State::D, k, 0);
+                    } else if is_missing {
+                        if tr.st.last().copied() != Some(State::X) {
+                            tr.append(State::X, k, 0);
+                        }
+                    }
+                } else if is_residue {
+                    sq.dsq.push(code);
+                    tr.append(State::I, k, rpos);
+                    rpos += 1;
+                } else if is_missing && tr.st.last().copied() != Some(State::X) {
+                    tr.append(State::X, k, 0);
+                }
+            }
+
+            tr.append(State::E, 0, 0);
+            tr.m = k;
+            tr.l = mapped.alen;
+            sq.n = sq.dsq.len() - 1;
+            sq.l = sq.n;
+            sq.dsq.push(hmmer_pure_rs::alphabet::DSQ_SENTINEL);
+
+            (sq, tr)
+        })
+        .collect()
 }
 
-fn expand_mapped_annotation(
-    row: &[u8],
-    map: &[i32],
-    matmap: &[usize],
-    inscount: &[usize],
-    m: usize,
-    trim: bool,
-) -> String {
-    let all_match = vec![true; m + 1];
-    let mut out = vec![b'.'; alignment_len_from_map(inscount, &all_match, m)];
-    if !(trim && m == 0) {
-        copy_insert_slice(
-            &mut out,
-            0,
-            &row[0..(map[1] - 1).max(0) as usize],
-            matmap,
-            m,
-            trim,
-        );
-    }
-    for k in 1..=m {
-        let src_cons = (map[k] - 1) as usize;
-        out[matmap[k] - 1] = row[src_cons];
-        let next = if k == m {
-            row.len()
-        } else {
-            (map[k + 1] - 1) as usize
-        };
-        copy_insert_slice(&mut out, k, &row[src_cons + 1..next], matmap, m, trim);
-    }
-    String::from_utf8(out).unwrap()
-}
-
-/// Copy an insert-bucket slice from a source row into the destination alignment
-/// starting at `matmap[bucket]` (or column 0 for bucket 0). Skips the N/C
-/// terminal buckets when `trim` is set.
-fn copy_insert_slice(
-    out: &mut [u8],
-    bucket: usize,
-    slice: &[u8],
-    matmap: &[usize],
-    m: usize,
-    trim: bool,
-) {
-    if trim && (bucket == 0 || bucket == m) {
+fn trim_terminal_residueless_columns(msa: &mut TextMsa) {
+    let alen = msa.rfline.len();
+    let first = (0..alen).find(|&apos| {
+        msa.rows
+            .iter()
+            .any(|row| row.aseq.as_bytes()[apos].is_ascii_alphabetic())
+    });
+    let Some(first) = first else {
+        return;
+    };
+    let last = (0..alen)
+        .rfind(|&apos| {
+            msa.rows
+                .iter()
+                .any(|row| row.aseq.as_bytes()[apos].is_ascii_alphabetic())
+        })
+        .unwrap();
+    if first == 0 && last + 1 == alen {
         return;
     }
-    let dst_start = if bucket == 0 { 0 } else { matmap[bucket] };
-    for (offset, &ch) in slice.iter().enumerate() {
-        out[dst_start + offset] = ch;
-    }
-}
 
-/// Replace insert-style gaps (`.`, `_`) with the consensus-column gap (`-`).
-fn normalize_mapped_consensus_char(ch: u8) -> u8 {
-    match ch {
-        b'.' | b'_' => b'-',
-        other => other,
+    for row in &mut msa.rows {
+        row.aseq = row.aseq[first..=last].to_string();
+        if let Some(ppline) = row.ppline.as_mut() {
+            *ppline = ppline[first..=last].to_string();
+        }
     }
+    msa.rfline = msa.rfline[first..=last].to_string();
+    msa.pp_cons = msa.pp_cons[first..=last].to_string();
 }
 
 /// Build the merged-MSA coordinate system (insert widths, matuse flags, matmap,

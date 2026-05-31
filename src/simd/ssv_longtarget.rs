@@ -45,6 +45,13 @@ pub struct HmmWindow {
     /// driver sets `fm_n = -1` ("RC-local frame, no flip"); a future faithful
     /// concatenated-FM path would set `fm_n >= 0`.
     pub fm_n: i64,
+    /// Segment start in the concatenated FM text. Only meaningful when
+    /// `fm_n >= 0`; used by the Rust FM handoff to remap an extended C-frame
+    /// window back to the searched per-segment sequence before DSQ slicing.
+    pub fm_start: i64,
+    /// FM BWT length including terminal symbol. Only meaningful when
+    /// `fm_n >= 0`; needed for C's complement coordinate transform.
+    pub fm_bwt_len: i64,
 }
 
 impl HmmWindow {
@@ -349,6 +356,8 @@ pub unsafe fn ssv_filter_longtarget(
                 // segment), fm_n=-1 (no concatenated-FM frame -> no flip).
                 id: 0,
                 fm_n: -1,
+                fm_start: -1,
+                fm_bwt_len: 0,
             });
 
             // Skip forward past the hit
@@ -529,10 +538,10 @@ pub fn extend_and_merge_windows(
 /// `max_length * (0.1 + prefix_lengths[k - length + 1])` for the left side
 /// and `max_length * (0.1 + suffix_lengths[k])` for the right.
 /// Mirrors the per-k branches in p7_pli_ExtendAndMergeWindows:482-487.
-pub fn extend_and_merge_windows_with_scoredata(
+pub fn p7_pli_extend_and_merge_windows(
     windows: &mut Vec<HmmWindow>,
     max_length: usize,
-    target_len: usize,
+    _target_len: usize,
     pct_overlap: f32,
     prefix_lengths: &[f32],
     suffix_lengths: &[f32],
@@ -555,7 +564,7 @@ pub fn extend_and_merge_windows_with_scoredata(
         let suf_ext_f = ml * (base_frac + suffix_lengths[k] as f64);
 
         let (window_start, window_end): (i64, i64);
-        let tlen = w.target_len.max(target_len) as i64;
+        let tlen = w.target_len as i64;
         if w.needs_complement_extension_flip() {
             // Port of C p7_pli_ExtendAndMergeWindows complement branch
             // (hmmer/src/p7_pipeline.c:470-481): flip n into target-relative
@@ -594,7 +603,7 @@ pub fn extend_and_merge_windows_with_scoredata(
         }
 
         let window_start = window_start.max(1);
-        let window_end = window_end.min(target_len as i64).max(window_start);
+        let window_end = window_end.min(tlen).max(window_start);
         // C p7_pipeline.c:489-492: length, then fm_n -= (n - window_start), n.
         w.length = (window_end - window_start + 1) as usize;
         w.fm_n -= w.n as i64 - window_start;
@@ -662,7 +671,7 @@ fn merge_windows_impl(windows: &mut Vec<HmmWindow>, pct_overlap: f32) {
 /// Variant of `extend_and_merge_windows` with a tunable overlap-percentage
 /// threshold. Uses the simple `0.2 * max_length` fixed extension (no
 /// scoredata). Use this when per-position prefix/suffix lengths aren't
-/// available; otherwise prefer `extend_and_merge_windows_with_scoredata`.
+/// available; otherwise prefer `p7_pli_extend_and_merge_windows`.
 pub fn extend_and_merge_windows_pct(
     windows: &mut Vec<HmmWindow>,
     max_length: usize,
@@ -742,6 +751,8 @@ pub fn split_long_windows(
                 complement: w.complement,
                 id: w.id,
                 fm_n: -1,
+                fm_start: -1,
+                fm_bwt_len: 0,
             });
             if new_len <= max_window_len as i64 {
                 break;
@@ -765,6 +776,8 @@ mod tests {
             complement,
             id,
             fm_n: -1,
+            fm_start: -1,
+            fm_bwt_len: 0,
         }
     }
 
@@ -841,5 +854,19 @@ mod tests {
         let mut fwd = win(10, 5, false, 0);
         fwd.fm_n = 0;
         assert!(!fwd.needs_complement_extension_flip());
+    }
+
+    #[test]
+    fn p7_pli_extend_uses_window_target_len_like_c() {
+        let mut w = win(40, 5, false, 0);
+        w.target_len = 50;
+        let mut windows = vec![w];
+        let prefix = vec![0.0; 8];
+        let suffix = vec![0.0; 8];
+
+        p7_pli_extend_and_merge_windows(&mut windows, 10, 10, 0.0, &prefix, &suffix);
+
+        assert_eq!(windows[0].n, 39);
+        assert_eq!(windows[0].length, 8);
     }
 }

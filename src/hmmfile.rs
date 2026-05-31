@@ -69,14 +69,16 @@ impl<B: BufRead> CappedLineReader<B> {
 /// Wrapper over [`read_hmms`] that opens `path` first. Returns all HMMs
 /// in the file as a `Vec`; errors propagate I/O and format failures.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
-    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::new(open_hmm_reader(path)?);
     read_hmms(reader)
 }
 
 /// Open an HMM save file and read every HMM, auto-dispatching ASCII vs binary
 /// from the leading magic bytes instead of relying on the filename.
 pub fn read_hmm_file_auto(path: &Path) -> HmmerResult<Vec<Hmm>> {
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        return read_hmm_file(path);
+    }
     if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
         crate::hmmfile_binary::read_binary_hmm_file(path)
     } else {
@@ -88,24 +90,28 @@ pub fn read_hmm_file_auto(path: &Path) -> HmmerResult<Vec<Hmm>> {
 /// HMMER3 format tag across the whole file. This is only for legacy utility
 /// paths that operate record-by-record rather than validating a database.
 pub fn read_hmm_file_auto_allow_mixed_formats(path: &Path) -> HmmerResult<Vec<Hmm>> {
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        return read_hmms_allow_mixed_formats(BufReader::new(open_hmm_reader(path)?));
+    }
     if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
         crate::hmmfile_binary::read_binary_hmm_file(path)
     } else {
-        let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-        read_hmms_allow_mixed_formats(BufReader::new(file))
+        read_hmms_allow_mixed_formats(BufReader::new(open_hmm_reader(path)?))
     }
 }
 
 /// Open an HMM save file and read only the first HMM record.
 pub fn read_first_hmm_file_auto(path: &Path) -> HmmerResult<Hmm> {
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        return read_first_hmm(BufReader::new(open_hmm_reader(path)?));
+    }
     if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
         return crate::hmmfile_binary::read_binary_hmm_file(path)?
             .into_iter()
             .next()
             .ok_or_else(|| HmmerError::Format("No HMM records found".to_string()));
     }
-    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
-    read_first_hmm(BufReader::new(file))
+    read_first_hmm(BufReader::new(open_hmm_reader(path)?))
 }
 
 /// Seek to a record offset from an SSI index and read exactly one HMM record.
@@ -219,6 +225,17 @@ pub enum FetchOutcome {
 /// the differing record. This function reproduces that alphabet-stateful,
 /// break-on-match behavior exactly, for both ASCII and binary files.
 pub fn fetch_one_sequential(path: &Path, key: &str) -> HmmerResult<FetchOutcome> {
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        let mut lines = CappedLineReader::new(BufReader::new(open_hmm_reader(path)?));
+        let mut expected_abc = None;
+        while let Some((hmm, _fmt)) = read_one_hmm_with_format(&mut lines)? {
+            check_shared_alphabet(&mut expected_abc, hmm.abc_type)?;
+            if hmm.name == key || hmm.acc.as_deref() == Some(key) {
+                return Ok(FetchOutcome::Found(hmm));
+            }
+        }
+        return Ok(FetchOutcome::NotFound);
+    }
     if crate::hmmfile_binary::looks_like_binary_hmm_file(path)? {
         let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
         let mut reader = BufReader::new(file);
@@ -242,6 +259,15 @@ pub fn fetch_one_sequential(path: &Path, key: &str) -> HmmerResult<FetchOutcome>
         }
     }
     Ok(FetchOutcome::NotFound)
+}
+
+fn open_hmm_reader(path: &Path) -> HmmerResult<Box<dyn Read>> {
+    let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        Ok(Box::new(flate2::read::GzDecoder::new(file)))
+    } else {
+        Ok(Box::new(file))
+    }
 }
 
 /// Thread a single alphabet across sequentially read records, matching C's

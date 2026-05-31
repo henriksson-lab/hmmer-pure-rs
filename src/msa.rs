@@ -54,6 +54,8 @@ pub struct Msa {
     pub author: Option<String>,
     /// Sequence names
     pub sqname: Vec<String>,
+    /// Per-sequence accessions (`#=GS <seq> AC`)
+    pub sqacc: Vec<String>,
     /// Per-sequence descriptions (`#=GS <seq> DE`)
     pub sqdesc: Vec<String>,
     /// Per-sequence relative weights (`#=GS <seq> WT`) if supplied.
@@ -384,6 +386,7 @@ fn parse_afa_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
         desc: None,
         author: None,
         sqname,
+        sqacc: vec![String::new(); nseq],
         sqdesc,
         weights: None,
         aseq,
@@ -517,6 +520,7 @@ fn parse_a2m_alignment(text: &str, alignment_name: String) -> HmmerResult<Msa> {
         desc: None,
         author: None,
         sqname,
+        sqacc: vec![String::new(); nseq],
         sqdesc,
         weights: None,
         aseq,
@@ -858,6 +862,7 @@ fn msa_from_rows(
         desc: None,
         author: None,
         sqname,
+        sqacc: vec![String::new(); nseq],
         sqdesc,
         weights: None,
         aseq,
@@ -1009,6 +1014,7 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
     let mut cutoffs = StockholmCutoffs::default();
     let mut seq_order: Vec<String> = Vec::new();
     let mut seq_data: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut sqacc: HashMap<String, String> = HashMap::new();
     let mut sqdesc: HashMap<String, String> = HashMap::new();
     let mut weights: HashMap<String, f64> = HashMap::new();
     let mut pp: HashMap<String, Vec<u8>> = HashMap::new();
@@ -1183,35 +1189,50 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
                 None => pp_cons = Some(pp_str.as_bytes().to_vec()),
             }
         } else if let Some(rest) = trimmed.strip_prefix("#=GS ") {
-            let fields: Vec<&str> = rest.splitn(3, char::is_whitespace).collect();
-            if fields.len() == 3 {
-                if fields[1] == "DE" {
+            let mut name_split = rest.splitn(2, char::is_whitespace);
+            let seq_name = name_split.next().unwrap_or_default();
+            let annotation = name_split.next().unwrap_or_default().trim_start();
+            let mut tag_split = annotation.splitn(2, char::is_whitespace);
+            let tag = tag_split.next().unwrap_or_default();
+            let value = tag_split.next().unwrap_or_default().trim();
+            if !seq_name.is_empty() && !tag.is_empty() && !value.is_empty() {
+                if tag == "AC" {
+                    if sqacc
+                        .insert(seq_name.to_string(), value.to_string())
+                        .is_some()
+                    {
+                        return Err(HmmerError::Format(format!(
+                            "Stockholm sequence {} has more than one AC annotation",
+                            seq_name
+                        )));
+                    }
+                } else if tag == "DE" {
                     if sqdesc
-                        .insert(fields[0].to_string(), fields[2].trim().to_string())
+                        .insert(seq_name.to_string(), value.to_string())
                         .is_some()
                     {
                         return Err(HmmerError::Format(format!(
                             "Stockholm sequence {} has more than one DE annotation",
-                            fields[0]
+                            seq_name
                         )));
                     }
-                } else if fields[1] == "WT" {
-                    let weight = fields[2].trim().parse::<f64>().map_err(|e| {
+                } else if tag == "WT" {
+                    let weight = value.parse::<f64>().map_err(|e| {
                         HmmerError::Format(format!(
                             "Stockholm #=GS {} WT annotation is not a valid weight: {}",
-                            fields[0], e
+                            seq_name, e
                         ))
                     })?;
                     if !weight.is_finite() {
                         return Err(HmmerError::Format(format!(
                             "Stockholm #=GS {} WT annotation must be a finite weight",
-                            fields[0]
+                            seq_name
                         )));
                     }
-                    if weights.insert(fields[0].to_string(), weight).is_some() {
+                    if weights.insert(seq_name.to_string(), weight).is_some() {
                         return Err(HmmerError::Format(format!(
                             "Stockholm sequence {} has more than one WT annotation",
-                            fields[0]
+                            seq_name
                         )));
                     }
                 }
@@ -1368,6 +1389,14 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
             )));
         }
     }
+    for name in sqacc.keys() {
+        if !seq_order.iter().any(|seq_name| seq_name == name) {
+            return Err(HmmerError::Format(format!(
+                "Stockholm #=GS {} AC annotation refers to unknown sequence",
+                name
+            )));
+        }
+    }
     for name in weights.keys() {
         if !seq_order.iter().any(|seq_name| seq_name == name) {
             return Err(HmmerError::Format(format!(
@@ -1397,6 +1426,10 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
         .iter()
         .map(|name| sqdesc.remove(name).unwrap_or_default())
         .collect();
+    let sqacc_vec: Vec<String> = seq_order
+        .iter()
+        .map(|name| sqacc.remove(name).unwrap_or_default())
+        .collect();
     let weight_vec = if weights.is_empty() {
         None
     } else {
@@ -1416,6 +1449,7 @@ fn parse_stockholm_block(lines: &[String]) -> HmmerResult<Option<StockholmMsa>> 
             desc,
             author,
             sqname: seq_order,
+            sqacc: sqacc_vec,
             sqdesc: sqdesc_vec,
             weights: weight_vec,
             pp: pp_vec,

@@ -404,3 +404,51 @@ other = "hmmsearch"
 [[entries]]
 rust  = "nhmmer"
 other = "nhmmer"
+
+[[entries]]
+rust  = "fm_convert_range_to_dsq"
+other = "fm_convertRange2DSQ"
+
+[[entries]]
+rust  = "fm_compute_sequence_offset"
+other = "fm_computeSequenceOffset"
+
+[[entries]]
+rust  = "fm_get_original_position"
+other = "fm_getOriginalPosition"
+
+[[entries]]
+rust  = "fm_get_seeds"
+other = "FM_getSeeds"
+
+[[entries]]
+rust  = "fm_recurse"
+other = "FM_Recurse"
+
+[[entries]]
+rust  = "fm_get_passing_diags"
+other = "FM_getPassingDiags"
+
+[[entries]]
+rust  = "fm_new_seed"
+other = "fm_newSeed"
+
+[[entries]]
+rust  = "fm_backtrack_seed"
+other = "FM_backtrackSeed"
+
+[[entries]]
+rust  = "fm_merge_seeds"
+other = "FM_mergeSeeds"
+
+[[entries]]
+rust  = "fm_extend_seed"
+other = "FM_extendSeed"
+
+[[entries]]
+rust  = "fm_window_from_diag"
+other = "FM_window_from_diag"
+
+[[entries]]
+rust  = "p7_pli_extend_and_merge_windows"
+other = "p7_pli_ExtendAndMergeWindows"

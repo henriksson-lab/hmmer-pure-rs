@@ -231,17 +231,17 @@ fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
 unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
     use std::arch::x86_64::*;
 
-    const CEPHES_P0: f32 = 1.987_569_1e-4;
-    const CEPHES_P1: f32 = 1.398_199_9e-3;
-    const CEPHES_P2: f32 = 8.333_452e-3;
-    const CEPHES_P3: f32 = 4.166_579_6e-2;
-    const CEPHES_P4: f32 = 1.666_666_6e-1;
-    const CEPHES_P5: f32 = 5e-1;
-    const C0: f32 = 0.693_359_4;
+    const CEPHES_P0: f32 = 1.987_569_150_0e-4;
+    const CEPHES_P1: f32 = 1.398_199_950_7e-3;
+    const CEPHES_P2: f32 = 8.333_451_907_3e-3;
+    const CEPHES_P3: f32 = 4.166_579_589_4e-2;
+    const CEPHES_P4: f32 = 1.666_666_545_9e-1;
+    const CEPHES_P5: f32 = 5.000_000_120_1e-1;
+    const C0: f32 = 0.693_359_375;
     const C1: f32 = -2.121_944_4e-4;
-    const LOG2R: f32 = 1.442_695_f32;
-    const MAXLOGF: f32 = 88.376_26;
-    const MINLOGF: f32 = -88.376_26;
+    const LOG2R: f32 = 1.442_695_040_888_963_4_f32;
+    const MAXLOGF: f32 = 88.376_262_664_794_9;
+    const MINLOGF: f32 = -88.376_262_664_794_9;
 
     let mut xv = _mm_loadu_ps(x.as_ptr());
     let maxmask = _mm_cmpgt_ps(xv, _mm_set1_ps(MAXLOGF));

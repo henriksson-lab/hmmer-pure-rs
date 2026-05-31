@@ -357,6 +357,8 @@ pub unsafe fn viterbi_filter_longtarget(
                             // HmmWindow field docs.
                             id: 0,
                             fm_n: -1,
+                            fm_start: -1,
+                            fm_bwt_len: 0,
                         });
                     }
                 }

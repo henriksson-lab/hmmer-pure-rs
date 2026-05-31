@@ -284,7 +284,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
         bg.fhmm_e0 = bg.f.clone();
         bg.fhmm_e1 = bg.f.clone();
     }
-    bg.set_length(args.l);
+    // Match C esl_randomness_Create(uint32_t): a negative int seed is
+    // reinterpreted as its wrapping u32; only an exact 0 picks an arbitrary
+    // clock seed (handled inside Mt19937::new via resolve_seed).
+    let mut rng = Mt19937::new(args.seed as u32);
+    let score_mode = score_mode_from_args(&args);
 
     let mut gm = Profile::new(hmm.m, &abc);
     let mode = if args.sw {
@@ -297,25 +301,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
         P7_LOCAL
     };
     profile::profile_config(hmm, &bg, &mut gm, args.l as i32, mode);
+    let model_params = calibrated_model_params(score_mode, hmm, &abc, &bg, &args, &mut rng);
     if args.no_lengthmodel {
         elide_length_model(&mut gm, &mut bg);
     }
-
-    // Match C esl_randomness_Create(uint32_t): a negative int seed is
-    // reinterpreted as its wrapping u32; only an exact 0 picks an arbitrary
-    // clock seed (handled inside Mt19937::new via resolve_seed).
-    let mut rng = Mt19937::new(args.seed as u32);
-
-    let score_mode = if args.forward {
-        ScoreMode::Forward
-    } else if args.hybrid {
-        ScoreMode::Hybrid
-    } else if args.msv {
-        ScoreMode::Msv
-    } else {
-        ScoreMode::Viterbi
-    };
-    let model_params = calibrated_model_params(score_mode, hmm, &abc, &bg, &args, &mut rng);
+    bg.set_length(args.l);
 
     let mut out: Box<dyn Write> = match args.outfile {
         Some(ref path) => Box::new(std::fs::File::create(path).unwrap_or_else(|e| {
@@ -411,6 +401,18 @@ enum ScoreMode {
     Forward,
     Hybrid,
     Msv,
+}
+
+fn score_mode_from_args(args: &Args) -> ScoreMode {
+    if args.forward {
+        ScoreMode::Forward
+    } else if args.hybrid {
+        ScoreMode::Hybrid
+    } else if args.msv {
+        ScoreMode::Msv
+    } else {
+        ScoreMode::Viterbi
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -651,20 +653,22 @@ fn write_optional_outputs(
     }
 
     if let Some(path) = &args.ffile {
-        let mut npass = 0usize;
-        for &score in scores {
-            if fit.model_survival(score) <= args.pthresh {
-                npass += 1;
-            }
-        }
         let mut file = std::fs::File::create(path)?;
-        writeln!(
-            file,
-            "{}\t{}\t{}",
-            hmm_name,
-            npass,
-            fmt_fixed4(npass as f64 / scores.len() as f64)
-        )?;
+        if !matches!(score_mode, ScoreMode::Forward) {
+            let mut npass = 0usize;
+            for &score in scores {
+                if fit.model_survival(score) <= args.pthresh {
+                    npass += 1;
+                }
+            }
+            writeln!(
+                file,
+                "{}\t{}\t{}",
+                hmm_name,
+                npass,
+                fmt_fixed4(npass as f64 / scores.len() as f64)
+            )?;
+        }
     }
 
     if let Some(path) = &args.efile {
@@ -796,8 +800,10 @@ impl ScoreHistogram {
     }
 
     fn tail_by_mass(&self, mass: f64) -> &[f64] {
-        let n = ((self.sorted.len() as f64) * mass.min(1.0)).ceil() as usize;
-        let n = n.max(1).min(self.sorted.len());
+        // Easel esl_histogram_GetTailByMass() truncates `n * pmass`, so the
+        // returned tail mass is <= the requested mass.
+        let n = ((self.sorted.len() as f64) * mass.min(1.0)) as usize;
+        let n = n.min(self.sorted.len());
         &self.sorted[self.sorted.len() - n..]
     }
 

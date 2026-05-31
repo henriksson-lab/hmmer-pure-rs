@@ -1,6 +1,6 @@
 //! hmmbuild — build profile HMM(s) from multiple sequence alignment(s).
 
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
@@ -215,6 +215,7 @@ struct BuildAlignment {
     msa: msa::Msa,
     cutoffs: msa::StockholmCutoffs,
     force_hand_arch: bool,
+    original_stockholm: Option<msa::FullStockholm>,
 }
 
 impl std::ops::Deref for BuildAlignment {
@@ -557,6 +558,9 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         args.hmmfile.display()
     )
     .unwrap();
+    if let Some(ref name) = args.name {
+        writeln!(summary, "# name (the single) HMM:            {name}").unwrap();
+    }
     if let Some(ref path) = args.summary_out {
         writeln!(
             summary,
@@ -574,13 +578,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         .unwrap();
     }
     if args.amino {
-        writeln!(summary, "# input alignment is asserted as:  protein").unwrap();
+        writeln!(summary, "# input alignment is asserted as:   protein").unwrap();
     }
     if args.dna {
-        writeln!(summary, "# input alignment is asserted as:  DNA").unwrap();
+        writeln!(summary, "# input alignment is asserted as:   DNA").unwrap();
     }
     if args.rna {
-        writeln!(summary, "# input alignment is asserted as:  RNA").unwrap();
+        writeln!(summary, "# input alignment is asserted as:   RNA").unwrap();
     }
     if args.hand {
         writeln!(
@@ -847,7 +851,15 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 hand_arch,
                 weighting_strategy,
             );
-            write_processed_msa(out, alignment, &model_mask);
+            write_processed_msa(
+                out,
+                alignment,
+                &model_mask,
+                &abc,
+                args.fragthresh,
+                hand_arch,
+                weighting_strategy,
+            );
         }
         let mut hmm = if args.singlemx {
             build_single_sequence_hmm(
@@ -968,6 +980,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             std::process::exit(1);
         });
     }
+    writeln!(summary).unwrap();
 
     std::process::ExitCode::SUCCESS
 }
@@ -990,6 +1003,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: true,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_afa_msa_format) {
@@ -1006,6 +1020,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_psiblast_msa_format) {
@@ -1022,6 +1037,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_clustal_msa_format) {
@@ -1038,6 +1054,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_selex_msa_format) {
@@ -1054,6 +1071,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_phylip_msa_format) {
@@ -1070,6 +1088,7 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if format.is_some_and(is_phylips_msa_format) {
@@ -1086,27 +1105,35 @@ fn read_build_alignments_maybe_stdin(
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
                 force_hand_arch: false,
+                original_stockholm: None,
             })
             .collect())
     } else if path == std::path::Path::new("-") {
         let stdin = std::io::stdin();
-        Ok(
-            msa::read_stockholm_preserved_from_reader(BufReader::new(stdin.lock()))?
-                .into_iter()
-                .map(|record| BuildAlignment {
-                    msa: record.msa,
-                    cutoffs: record.cutoffs,
-                    force_hand_arch: false,
-                })
-                .collect(),
-        )
-    } else {
-        Ok(msa::read_stockholm_preserved(path)?
+        let mut bytes = Vec::new();
+        stdin.lock().read_to_end(&mut bytes)?;
+        let preserved = msa::read_stockholm_preserved_from_reader(BufReader::new(&bytes[..]))?;
+        let full = msa::read_stockholm_full_from_reader(BufReader::new(&bytes[..]))?;
+        Ok(preserved
             .into_iter()
-            .map(|record| BuildAlignment {
+            .zip(full)
+            .map(|(record, original_stockholm)| BuildAlignment {
                 msa: record.msa,
                 cutoffs: record.cutoffs,
                 force_hand_arch: false,
+                original_stockholm: Some(original_stockholm),
+            })
+            .collect())
+    } else {
+        let full = msa::read_stockholm_full(path)?;
+        Ok(msa::read_stockholm_preserved(path)?
+            .into_iter()
+            .zip(full)
+            .map(|(record, original_stockholm)| BuildAlignment {
+                msa: record.msa,
+                cutoffs: record.cutoffs,
+                force_hand_arch: false,
+                original_stockholm: Some(original_stockholm),
             })
             .collect())
     }
@@ -1188,11 +1215,7 @@ fn build_single_sequence_hmm(
         std::process::exit(1);
     }
     dsq.push(hmmer_pure_rs::alphabet::DSQ_SENTINEL);
-    let name = if !msa.name.is_empty() {
-        msa.name.as_str()
-    } else {
-        msa.sqname[0].as_str()
-    };
+    let name = msa.sqname[0].as_str();
     let mut hmm = seqmodel::build_single_seq_hmm_with_matrix(
         name,
         &dsq,
@@ -1263,27 +1286,63 @@ fn apply_fixed_gap_params(hmm: &mut hmmer_pure_rs::Hmm, popen: Option<f32>, pext
     hmm.t[hmm.m][DD] = 0.0;
 }
 
-fn write_processed_msa(out: &mut dyn Write, msa: &msa::Msa, model_mask: &[u8]) {
-    let name_width = msa.sqname.iter().map(|name| name.len()).max().unwrap_or(0);
-    writeln!(out, "# STOCKHOLM 1.0").unwrap();
-    if !msa.name.is_empty() {
-        writeln!(out, "#=GF ID {}", msa.name).unwrap();
-    }
-    if let Some(ref acc) = msa.acc {
-        writeln!(out, "#=GF AC {}", acc).unwrap();
-    }
-    if let Some(ref desc) = msa.desc {
-        writeln!(out, "#=GF DE {}", desc).unwrap();
-    }
-    writeln!(out).unwrap();
-
-    for (idx, name) in msa.sqname.iter().enumerate() {
-        let seq = String::from_utf8_lossy(&msa.aseq[idx]);
-        writeln!(out, "{:<width$} {}", name, seq, width = name_width).unwrap();
-    }
-    let rf = String::from_utf8_lossy(model_mask);
-    writeln!(out, "#=GC RF {}", rf).unwrap();
-    writeln!(out, "//").unwrap();
+fn write_processed_msa(
+    out: &mut dyn Write,
+    alignment: &BuildAlignment,
+    model_mask: &[u8],
+    abc: &Alphabet,
+    fragthresh: f32,
+    hand_arch: bool,
+    weighting_strategy: builder::RelativeWeighting,
+) {
+    let msa = &alignment.msa;
+    let (rf, aseq) = builder::tracealigned_post_msa_rows(msa, abc, model_mask, fragthresh);
+    let wgt = match weighting_strategy {
+        builder::RelativeWeighting::None => None,
+        builder::RelativeWeighting::PositionBased => {
+            Some(builder::pb_weights(msa, abc, !hand_arch))
+        }
+        builder::RelativeWeighting::Gsc => Some(builder::gsc_weights(msa, abc)),
+        builder::RelativeWeighting::Blosum { identity_cutoff } => {
+            Some(builder::blosum_weights(msa, abc, identity_cutoff))
+        }
+        builder::RelativeWeighting::Given => msa.weights.clone(),
+    };
+    let (name, acc, desc, sqname) = if let Some(original) = alignment.original_stockholm.as_ref() {
+        (
+            original.name.clone(),
+            original.acc.clone(),
+            original.desc.clone(),
+            original.sqname.clone(),
+        )
+    } else {
+        (
+            (!msa.name.is_empty()).then(|| msa.name.clone()),
+            msa.acc.clone(),
+            msa.desc.clone(),
+            msa.sqname.clone(),
+        )
+    };
+    let alen = rf.len();
+    let nseq = sqname.len();
+    let full = msa::FullStockholm {
+        name,
+        acc,
+        desc,
+        sqname,
+        aseq,
+        has_wgts: wgt.is_some(),
+        wgt: wgt.unwrap_or_else(|| vec![-1.0; nseq]),
+        sqacc: vec![None; nseq],
+        sqdesc: vec![None; nseq],
+        ss: vec![None; nseq],
+        sa: vec![None; nseq],
+        pp: vec![None; nseq],
+        rf: Some(rf),
+        alen,
+        ..Default::default()
+    };
+    msa::write_stockholm_full(out, &full, 200, None).unwrap();
 }
 
 fn guess_msa_alphabet(msa: &msa::Msa) -> Result<AlphabetType, String> {

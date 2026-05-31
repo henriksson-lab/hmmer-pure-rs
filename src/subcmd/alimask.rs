@@ -425,7 +425,12 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 full.wgt = weights;
             }
         }
-        msa::write_stockholm_full(&mut out, &full, 200, Some(&write_abc)).unwrap();
+        let cpl = if is_pfam_format(&args.outformat) {
+            full.alen
+        } else {
+            200
+        };
+        msa::write_stockholm_full(&mut out, &full, cpl, Some(&write_abc)).unwrap();
     }
 
     std::process::ExitCode::SUCCESS
@@ -539,9 +544,6 @@ fn write_summary_report_to<W: Write + ?Sized>(
     }
     if args.rna {
         writeln!(out, "# input alignment is asserted as:   RNA")?;
-    }
-    if args.fast {
-        writeln!(out, "# model architecture construction:  fast/heuristic")?;
     }
     if args.hand {
         writeln!(
@@ -875,4 +877,8 @@ fn is_stockholm_format(format: &str) -> bool {
     format.eq_ignore_ascii_case("stockholm")
         || format.eq_ignore_ascii_case("sto")
         || format.eq_ignore_ascii_case("pfam")
+}
+
+fn is_pfam_format(format: &str) -> bool {
+    format.eq_ignore_ascii_case("pfam")
 }

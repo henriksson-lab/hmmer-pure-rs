@@ -700,7 +700,7 @@ pub fn included_alignment(
         let mut aseq = Vec::with_capacity(sequences.len());
         let mut pp = Vec::with_capacity(sequences.len());
         let mut sqname = Vec::with_capacity(sequences.len());
-        let mut pp_totals = vec![0.0_f32; alen];
+        let mut pp_totals = vec![0.0_f64; alen];
         let mut pp_counts = vec![0usize; alen];
         for (sq, tr) in sequences.iter().zip(traces.iter()) {
             let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
@@ -732,6 +732,7 @@ pub fn included_alignment(
             desc: None,
             author: None,
             sqname,
+            sqacc: sequences.iter().map(|sq| sq.acc.clone()).collect(),
             sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
             weights: None,
             pp,
@@ -769,7 +770,7 @@ pub fn included_alignment(
     let mut aseq = Vec::with_capacity(sequences.len());
     let mut pp = Vec::with_capacity(sequences.len());
     let mut sqname = Vec::with_capacity(sequences.len());
-    let mut pp_totals = vec![0.0_f32; alen];
+    let mut pp_totals = vec![0.0_f64; alen];
     let mut pp_counts = vec![0usize; alen];
     for (sq, tr) in sequences.iter().zip(traces.iter()) {
         let mut row = make_text_row(abc, sq, tr, &matuse, &matmap, alen);
@@ -800,6 +801,7 @@ pub fn included_alignment(
         desc: None,
         author: None,
         sqname,
+        sqacc: sequences.iter().map(|sq| sq.acc.clone()).collect(),
         sqdesc: sequences.iter().map(|sq| sq.desc.clone()).collect(),
         weights: None,
         pp,
@@ -895,10 +897,11 @@ fn alidisplay_backconvert(
 /// Encode a posterior probability as a single ASCII character ('0'..'9' or '*').
 /// Port of `p7_alidisplay_EncodePostProb()`.
 fn encode_postprob(p: f32) -> u8 {
-    if p + 0.05 >= 1.0 {
+    let shifted = p as f64 + 0.05_f64;
+    if shifted >= 1.0 {
         b'*'
     } else {
-        ((p + 0.05) * 10.0) as u8 + b'0'
+        (shifted * 10.0) as u8 + b'0'
     }
 }
 
@@ -916,7 +919,7 @@ fn decode_postprob(pc: u8) -> f32 {
 
 /// Compute the per-column consensus PP line by averaging recorded values and
 /// encoding the mean. Returns `None` if no column had any PP-bearing row.
-fn pp_consensus(pp_totals: &[f32], pp_counts: &[usize]) -> Option<Vec<u8>> {
+fn pp_consensus(pp_totals: &[f64], pp_counts: &[usize]) -> Option<Vec<u8>> {
     if pp_counts.iter().all(|&count| count == 0) {
         return None;
     }
@@ -926,7 +929,7 @@ fn pp_consensus(pp_totals: &[f32], pp_counts: &[usize]) -> Option<Vec<u8>> {
             .zip(pp_counts.iter())
             .map(|(&total, &count)| {
                 if count > 0 {
-                    encode_postprob(total / count as f32)
+                    encode_postprob((total / count as f64) as f32)
                 } else {
                     b'.'
                 }
@@ -1042,7 +1045,7 @@ fn make_pp_row(
     matmap: &[usize],
     model_len: usize,
     alen: usize,
-    pp_totals: &mut [f32],
+    pp_totals: &mut [f64],
     pp_counts: &mut [usize],
 ) -> Option<Vec<u8>> {
     let pp_values = tr.pp.as_ref()?;
@@ -1054,7 +1057,7 @@ fn make_pp_row(
                 let idx = matmap[tr.k[z]] - 1;
                 let value = pp_values[z];
                 pp[idx] = encode_postprob(value);
-                pp_totals[idx] += value;
+                pp_totals[idx] += value as f64;
                 pp_counts[idx] += 1;
                 apos = matmap[tr.k[z]];
             }
@@ -1063,13 +1066,15 @@ fn make_pp_row(
             }
             State::I => {
                 if tr.k[z] != 0 && tr.k[z] != model_len && apos < alen {
-                    pp[apos] = encode_postprob(pp_values[z]);
+                    let value = pp_values[z];
+                    pp[apos] = encode_postprob(value);
                     apos += 1;
                 }
             }
             State::N | State::C => {
                 if tr.i[z] > 0 && apos < alen {
-                    pp[apos] = encode_postprob(pp_values[z]);
+                    let value = pp_values[z];
+                    pp[apos] = encode_postprob(value);
                     apos += 1;
                 }
             }

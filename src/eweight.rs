@@ -186,16 +186,17 @@ fn scale_counts_exponential(hmm: &mut Hmm, exp: f64) {
     for k in 1..=hmm.m {
         let count: f32 = hmm.mat[k][..hmm.abc_k].iter().sum();
         let scale = if count > 0.0 {
-            (count as f64).powf(exp) / count as f64
+            let new_count = (count as f64).powf(exp) as f32;
+            new_count / count
         } else {
-            1.0
+            1.0_f32
         };
         for t in &mut hmm.t[k] {
-            *t *= scale as f32;
+            *t *= scale;
         }
         for x in 0..hmm.abc_k {
-            hmm.mat[k][x] *= scale as f32;
-            hmm.ins[k][x] *= scale as f32;
+            hmm.mat[k][x] *= scale;
+            hmm.ins[k][x] *= scale;
         }
     }
 }
@@ -206,10 +207,8 @@ fn mean_match_count(hmm: &Hmm) -> f64 {
     }
     let mut total = 0.0;
     for k in 1..=hmm.m {
-        total += hmm.mat[k][..hmm.abc_k]
-            .iter()
-            .map(|&v| v as f64)
-            .sum::<f64>();
+        let row_sum: f32 = hmm.mat[k][..hmm.abc_k].iter().sum();
+        total += row_sum as f64;
     }
     total / hmm.m as f64
 }
