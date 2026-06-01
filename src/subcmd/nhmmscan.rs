@@ -232,6 +232,7 @@ fn parse_window_beta(s: &str) -> Result<f64, String> {
 /// to `serial_master()`/`serial_loop()` in `hmmer/src/nhmmscan.c`.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
+    let table_cmdline = normalize_nhmmscan_table_cmdline(&cmdline);
     let args = hmmer_pure_rs::util::apply_hmmer_ncpu_env_default(args);
     let args = Args::parse_from(&args);
     validate_sequence_format("nhmmscan --qformat", args.qformat.as_deref());
@@ -708,7 +709,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             "SCAN",
             &args.seqfile,
             &args.hmmdb,
-            &cmdline,
+            &table_cmdline,
         );
     }
     writeln!(out, "[ok]").unwrap();
@@ -806,6 +807,21 @@ fn command_line_has_option(cmdline: &str, option: &str) -> bool {
             || compact_short
                 .is_some_and(|short| token.starts_with(short) && token.len() > short.len())
     })
+}
+
+fn normalize_nhmmscan_table_cmdline(cmdline: &str) -> String {
+    let mut tokens = cmdline.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some(_wrapper), Some("nhmmscan")) => {
+            let rest = tokens.collect::<Vec<_>>();
+            if rest.is_empty() {
+                "nhmmscan".to_string()
+            } else {
+                format!("nhmmscan {}", rest.join(" "))
+            }
+        }
+        _ => cmdline.to_string(),
+    }
 }
 
 fn validate_sequence_format(label: &str, format: Option<&str>) {

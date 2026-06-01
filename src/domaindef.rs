@@ -1,5 +1,9 @@
 //! Domain definition using posterior probabilities.
 //! Port of p7_domaindef.c p7_domaindef_ByPosteriorHeuristics().
+#![cfg_attr(
+    not(target_arch = "x86_64"),
+    allow(dead_code, unused_imports, unused_mut, unused_variables)
+)]
 
 use crate::alphabet::{Alphabet, Dsq};
 use crate::bg::Bg;
@@ -94,10 +98,6 @@ pub(crate) struct DomainSimdScratch {
     exp_i: Vec<f32>,
     pp_gmx: Gmx,
     oa_gmx: Gmx,
-    trim_fwd_pmx: crate::simd::probmx::ProbMx,
-    trim_bck_pmx: crate::simd::probmx::ProbMx,
-    trim_pp_pmx: crate::simd::probmx::ProbMx,
-    trim_oa_pmx: crate::simd::probmx::ProbMx,
     trim_pp_gmx: Gmx,
     trim_sub_dsq: Vec<Dsq>,
     btot: Vec<f32>,
@@ -123,10 +123,6 @@ impl DomainSimdScratch {
             exp_i: Vec::new(),
             pp_gmx: Gmx::new(0, 0),
             oa_gmx: Gmx::new(0, 0),
-            trim_fwd_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
-            trim_bck_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
-            trim_pp_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
-            trim_oa_pmx: crate::simd::probmx::ProbMx::new_full(0, 0),
             trim_pp_gmx: Gmx::new(0, 0),
             trim_sub_dsq: Vec::new(),
             btot: Vec::new(),
@@ -1817,7 +1813,7 @@ fn score_domain_envelope(
             // p7_domaindef.c:2115 `reparameterize_model(bg, om, sq, i, j-i+1, ...)`.
             let (env_om, pre_trim_local_bg_f_inner) = if do_longtarget_length {
                 let mut clone = env_om.clone();
-                clone.reconfig_length(env_len as i32);
+                clone.reconfig_rest_length(env_len as i32);
                 let local_bg_f = if do_longtarget_reparam {
                     let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
                     let local_bg = long_target_local_bg(dsq, ienv, jenv, bg, &abc_lt, seq_len);
@@ -1846,7 +1842,7 @@ fn score_domain_envelope(
                     scratch.fwd_pmx.resize_full(gm.m, env_len);
                     env_fwd_sc = unsafe {
                         if canonical_env {
-                            crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                            crate::simd::fwd_filter::forward_parser_pmx_offset_direct(
                                 dsq,
                                 dsq_offset,
                                 env_len,
@@ -1879,7 +1875,7 @@ fn score_domain_envelope(
                     scratch.bck_pmx.resize_full(gm.m, env_len);
                     unsafe {
                         if canonical_env {
-                            crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                            crate::simd::bck_filter::backward_parser_pmx_offset_direct(
                                 dsq,
                                 dsq_offset,
                                 env_len,
@@ -2249,7 +2245,7 @@ fn score_domain_envelope(
                         // Reconfigure env_om for the trimmed region and re-run
                         // Forward (mirrors p7_domaindef.c:2168-2176).
                         let mut trim_om = base_om.clone();
-                        trim_om.reconfig_length(new_env_len as i32);
+                        trim_om.reconfig_rest_length(new_env_len as i32);
                         let trim_local_bg_f = if do_longtarget_reparam {
                             let abc_lt = crate::alphabet::Alphabet::new(hmm.abc_type);
                             let local_bg =
@@ -2269,15 +2265,15 @@ fn score_domain_envelope(
                             is_canonical_window(dsq, new_dsq_offset, new_env_len, trim_om.abc_k);
                         if make_alignment {
                             let scratch = &mut *simd_scratch;
-                            scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                            scratch.fwd_pmx.resize_full(gm.m, new_env_len);
                             env_fwd_sc_current = unsafe {
                                 if canonical_trim {
-                                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_direct(
                                         dsq,
                                         new_dsq_offset,
                                         new_env_len,
                                         &trim_om,
-                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_pmx,
                                     )
                                 } else {
                                     crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
@@ -2285,21 +2281,21 @@ fn score_domain_envelope(
                                         new_dsq_offset,
                                         new_env_len,
                                         &trim_om,
-                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_pmx,
                                         &mut scratch.fwd_dp,
                                     )
                                 }
                             };
-                            scratch.trim_bck_pmx.resize_full(gm.m, new_env_len);
+                            scratch.bck_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
                                 if canonical_trim {
-                                    crate::simd::bck_filter::backward_parser_pmx_offset_canonical(
+                                    crate::simd::bck_filter::backward_parser_pmx_offset_direct(
                                         dsq,
                                         new_dsq_offset,
                                         new_env_len,
                                         &trim_om,
-                                        &mut scratch.trim_bck_pmx,
-                                        Some(&scratch.trim_fwd_pmx.row_scale),
+                                        &mut scratch.bck_pmx,
+                                        Some(&scratch.fwd_pmx.row_scale),
                                     );
                                 } else {
                                     crate::simd::bck_filter::backward_parser_pmx_offset_with_scratch(
@@ -2308,35 +2304,33 @@ fn score_domain_envelope(
                                         new_env_len,
                                         &trim_om,
                                         env_fwd_sc_current,
-                                        &mut scratch.trim_bck_pmx,
-                                        Some(&scratch.trim_fwd_pmx.row_scale),
+                                        &mut scratch.bck_pmx,
+                                        Some(&scratch.fwd_pmx.row_scale),
                                         &mut scratch.bck_prev,
                                         &mut scratch.bck_cur,
                                     );
                                 }
                             }
-                            scratch.trim_pp_pmx.resize_full(gm.m, new_env_len);
                             unsafe {
                                 crate::simd::optacc::posterior_decoding_pmx(
-                                    &scratch.trim_fwd_pmx,
-                                    &scratch.trim_bck_pmx,
+                                    &scratch.fwd_pmx,
+                                    &scratch.bck_pmx,
                                     &trim_om,
-                                    &mut scratch.trim_pp_pmx,
+                                    &mut scratch.pp_pmx,
                                 );
                             }
-                            scratch.trim_oa_pmx.resize_full(gm.m, new_env_len);
                             let trim_oasc = unsafe {
                                 crate::simd::optacc::optimal_accuracy_pmx(
                                     &trim_om,
-                                    &scratch.trim_pp_pmx,
-                                    &mut scratch.trim_oa_pmx,
+                                    &scratch.pp_pmx,
+                                    &mut scratch.oa_pmx,
                                 )
                             };
                             let trim_tr = unsafe {
                                 crate::simd::optacc::oa_trace_pmx(
                                     &trim_om,
-                                    &scratch.trim_pp_pmx,
-                                    &scratch.trim_oa_pmx,
+                                    &scratch.pp_pmx,
+                                    &scratch.oa_pmx,
                                 )
                             };
                             scratch.trim_pp_gmx.grow_to_zeroed(gm.m, new_env_len);
@@ -2349,8 +2343,8 @@ fn score_domain_envelope(
                                     [crate::simd::oprofile::P7O_LOOP],
                             ];
                             crate::simd::probmx::p_decoding_to_gmx(
-                                &scratch.trim_fwd_pmx,
-                                &scratch.trim_bck_pmx,
+                                &scratch.fwd_pmx,
+                                &scratch.bck_pmx,
                                 gm.m,
                                 njc_loop_trim,
                                 &mut scratch.trim_pp_gmx,
@@ -2381,15 +2375,15 @@ fn score_domain_envelope(
                             }
                         } else {
                             let scratch = &mut *simd_scratch;
-                            scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                            scratch.fwd_pmx.resize_full(gm.m, new_env_len);
                             env_fwd_sc_current = unsafe {
                                 if canonical_trim {
-                                    crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                    crate::simd::fwd_filter::forward_parser_pmx_offset_direct(
                                         dsq,
                                         new_dsq_offset,
                                         new_env_len,
                                         &trim_om,
-                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_pmx,
                                     )
                                 } else {
                                     crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
@@ -2397,7 +2391,7 @@ fn score_domain_envelope(
                                         new_dsq_offset,
                                         new_env_len,
                                         &trim_om,
-                                        &mut scratch.trim_fwd_pmx,
+                                        &mut scratch.fwd_pmx,
                                         &mut scratch.fwd_dp,
                                     )
                                 }
@@ -2409,20 +2403,20 @@ fn score_domain_envelope(
                 let (envsc_min, lt_domcorrection, default_fwd_sc) = if do_longtarget_reparam {
                     // Default-model Forward on the (possibly trimmed) region.
                     let mut default_om = base_om.clone();
-                    default_om.reconfig_length(new_env_len as i32);
+                    default_om.reconfig_rest_length(new_env_len as i32);
                     let default_fwd_sc = {
                         let scratch = &mut *simd_scratch;
-                        scratch.trim_fwd_pmx.resize_full(gm.m, new_env_len);
+                        scratch.fwd_pmx.resize_full(gm.m, new_env_len);
                         let canonical_default =
                             is_canonical_window(dsq, new_dsq_offset, new_env_len, default_om.abc_k);
                         unsafe {
                             if canonical_default {
-                                crate::simd::fwd_filter::forward_parser_pmx_offset_canonical(
+                                crate::simd::fwd_filter::forward_parser_pmx_offset_direct(
                                     dsq,
                                     new_dsq_offset,
                                     new_env_len,
                                     &default_om,
-                                    &mut scratch.trim_fwd_pmx,
+                                    &mut scratch.fwd_pmx,
                                 )
                             } else {
                                 crate::simd::fwd_filter::forward_parser_pmx_offset_with_scratch(
@@ -2430,7 +2424,7 @@ fn score_domain_envelope(
                                     new_dsq_offset,
                                     new_env_len,
                                     &default_om,
-                                    &mut scratch.trim_fwd_pmx,
+                                    &mut scratch.fwd_pmx,
                                     &mut scratch.fwd_dp,
                                 )
                             }

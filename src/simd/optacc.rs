@@ -337,18 +337,18 @@ pub unsafe fn oa_trace_coords_pmx(
         let scur = match sprv {
             State::M => {
                 let s = select_m(om, ox, i, k);
-                k = k.saturating_sub(1);
-                i = i.saturating_sub(1);
+                k -= 1;
+                i -= 1;
                 s
             }
             State::D => {
                 let s = select_d(om, ox, i, k);
-                k = k.saturating_sub(1);
+                k -= 1;
                 s
             }
             State::I => {
                 let s = select_i(om, ox, i, k);
-                i = i.saturating_sub(1);
+                i -= 1;
                 s
             }
             State::N => {
@@ -392,7 +392,7 @@ pub unsafe fn oa_trace_coords_pmx(
         }
 
         if matches!(scur, State::N | State::J | State::C) && scur == sprv {
-            i = i.saturating_sub(1);
+            i -= 1;
         }
         sprv = scur;
     }
@@ -433,18 +433,18 @@ pub unsafe fn oa_trace_pmx(om: &OProfile, pp: &ProbMx, ox: &ProbMx) -> Trace {
         let scur = match sprv {
             State::M => {
                 let s = select_m(om, ox, i, k);
-                k = k.saturating_sub(1);
-                i = i.saturating_sub(1);
+                k -= 1;
+                i -= 1;
                 s
             }
             State::D => {
                 let s = select_d(om, ox, i, k);
-                k = k.saturating_sub(1);
+                k -= 1;
                 s
             }
             State::I => {
                 let s = select_i(om, ox, i, k);
-                i = i.saturating_sub(1);
+                i -= 1;
                 s
             }
             State::N => {
@@ -463,12 +463,9 @@ pub unsafe fn oa_trace_pmx(om: &OProfile, pp: &ProbMx, ox: &ProbMx) -> Trace {
 
         tr.append(scur, k, i);
         if matches!(scur, State::N | State::J | State::C) && scur == sprv {
-            i = i.saturating_sub(1);
+            i -= 1;
         }
         sprv = scur;
-        if tr.n > ox.l + om.m + 100 {
-            break;
-        }
     }
 
     tr.st.reverse();
@@ -506,10 +503,6 @@ unsafe fn tdd_lane(om: &OProfile, q: usize, lane: usize) -> f32 {
 /// Pick the predecessor state of an M_k at row `i`: one of M, I, D, or B,
 /// whichever scored the OA cell. Mirrors C `select_m` in optacc.c.
 unsafe fn select_m(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
-    if k == 0 || k > om.m || i == 0 {
-        debug_assert!(k >= 1 && k <= om.m && i > 0);
-        return State::B;
-    }
     let q_count = ox.q_count();
     let q = (k - 1) % q_count;
     let lane = (k - 1) / q_count;
@@ -559,10 +552,6 @@ unsafe fn select_m(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
 
 /// Pick the predecessor of a D_k cell: M (M->D) or D (D->D). Mirrors C `select_d`.
 unsafe fn select_d(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
-    if k == 0 || k > om.m {
-        debug_assert!(k >= 1 && k <= om.m);
-        return State::M;
-    }
     let q_count = ox.q_count();
     let q = (k - 1) % q_count;
     let lane = (k - 1) / q_count;
@@ -594,10 +583,6 @@ unsafe fn select_d(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
 
 /// Pick the predecessor of an I_k cell: M (M->I) or I (I->I). Mirrors C `select_i`.
 unsafe fn select_i(om: &OProfile, ox: &ProbMx, i: usize, k: usize) -> State {
-    if k == 0 || k > om.m || i == 0 {
-        debug_assert!(k >= 1 && k <= om.m && i > 0);
-        return State::M;
-    }
     let q_count = ox.q_count();
     let q = (k - 1) % q_count;
     let lane = (k - 1) / q_count;
@@ -664,6 +649,7 @@ fn select_j(om: &OProfile, pp: &ProbMx, ox: &ProbMx, i: usize) -> State {
 /// (M ties beat D via `>=`) then all D_k (D wins only on strict `>`).
 /// Mirrors C `select_e` iteration order exactly so tie-break picks match.
 unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> State {
+    let _ = om;
     // Mirror C hmmer/src/impl_sse/optacc.c:select_e iteration order: for each
     // q, check all 4 M lanes first (M ties beat D via `>=`), then all 4 D
     // lanes (D only wins on strict `>`). Interleaving M/D per lane changes
@@ -675,9 +661,6 @@ unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> S
     for q in 0..q_count {
         for lane in 0..4 {
             let k = lane * q_count + q + 1;
-            if k > om.m {
-                continue;
-            }
             let m = cell_lane(ox, i, q, OM_M, lane);
             if m >= max {
                 max = m;
@@ -687,9 +670,6 @@ unsafe fn select_e(om: &OProfile, ox: &ProbMx, i: usize, ret_k: &mut usize) -> S
         }
         for lane in 0..4 {
             let k = lane * q_count + q + 1;
-            if k > om.m {
-                continue;
-            }
             let d = cell_lane(ox, i, q, OM_D, lane);
             if d > max {
                 max = d;

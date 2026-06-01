@@ -220,18 +220,18 @@ pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
         let scur = match sprv {
             State::M => {
                 let s = select_m(gm, ox, i, k);
-                k = k.saturating_sub(1);
-                i = i.saturating_sub(1);
+                k -= 1;
+                i -= 1;
                 s
             }
             State::D => {
                 let s = select_d(gm, ox, i, k);
-                k = k.saturating_sub(1);
+                k -= 1;
                 s
             }
             State::I => {
                 let s = select_i(gm, ox, i, k);
-                i = i.saturating_sub(1);
+                i -= 1;
                 s
             }
             State::N => select_n(i),
@@ -246,13 +246,9 @@ pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
         tr.append_with_pp(scur, k, i, postprob);
 
         if matches!(scur, State::N | State::J | State::C) && scur == sprv {
-            i = i.saturating_sub(1);
+            i -= 1;
         }
         sprv = scur;
-
-        if tr.n > ox.l + gm.m + 100 {
-            break;
-        }
     }
 
     tr.st.reverse();

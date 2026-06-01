@@ -352,9 +352,9 @@ pub unsafe fn backward_parser_pmx_offset(
 /// Mirrors the fused `backward_engine` in `impl_sse/fwdback.c` that backs both
 /// `p7_Backward` and `p7_BackwardParser`. Two SSE row buffers (`dpp_buf`, `dpc_buf`)
 /// roll backward from row L to row 0, computing M/D/I per stripe with D->D wing
-/// unfolding and sparse rescaling. When `pmx.has_dp` is set and the sequence is
-/// fully canonical, dispatches to `backward_parser_pmx_offset_direct` for the
-/// in-place full-matrix path; otherwise fills only the special states. If
+/// unfolding and sparse rescaling. When `pmx.has_dp` is set and the sequence has
+/// only valid digital codes, dispatches to `backward_parser_pmx_offset_direct`
+/// for the in-place full-matrix path; otherwise fills only the special states. If
 /// `fwd_row_scales` is `Some`, those scales are reused for cancellation against
 /// a paired Forward; if `None`, Backward picks its own when xB grows large.
 ///
@@ -497,29 +497,6 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     // Main recursion: i = L-1 down to 1
     for i in (1..l).rev() {
         let xi_next = dsq[dsq_offset + i + 1] as usize;
-        if xi_next >= om.abc_kp {
-            // Non-canonical residue: copy previous row, update specials
-            for v in dpc_buf.iter_mut() {
-                *v = zerov;
-            }
-            x_c *= c_loop;
-            x_j = x_b * j_move + x_j * j_loop;
-            x_n = x_b * n_move + x_n * n_loop;
-            x_e = x_c * e_move + x_j * e_loop;
-            pmx.set_xmx(i, PXE, x_e);
-            pmx.set_xmx(i, PXN, x_n);
-            pmx.set_xmx(i, PXJ, x_j);
-            pmx.set_xmx(i, PXB, x_b);
-            pmx.set_xmx(i, PXC, x_c);
-            pmx.scale[i] = if track_scales { totscale } else { 0.0 };
-            pmx.row_scale[i] = fwd_row_scales.map(|s| s[i]).unwrap_or(1.0);
-            if pmx.has_dp {
-                pmx.zero_simd_row(i);
-            }
-            std::mem::swap(dpp_buf, dpc_buf);
-            continue;
-        }
-
         let dpp = dpp_buf.as_ptr();
         let dpc = dpc_buf.as_mut_ptr();
 
@@ -759,23 +736,21 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     {
         let dp = dpp_buf.as_ptr();
         let xi1 = dsq[dsq_offset + 1] as usize;
-        if xi1 < om.abc_kp {
-            let mut x_bv = zerov;
-            for qi in 0..q {
-                let tbm = load_tfv(om, qi, 0);
-                let mpv = _mm_mul_ps(*dp.add(qi * 3), load_rfv(om, xi1, qi));
-                x_bv = _mm_add_ps(x_bv, _mm_mul_ps(mpv, tbm));
-            }
-            x_bv = _mm_add_ps(
-                x_bv,
-                _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(x_bv, x_bv),
-            );
-            x_bv = _mm_add_ps(
-                x_bv,
-                _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(x_bv, x_bv),
-            );
-            _mm_store_ss(&mut x_b, x_bv);
+        let mut x_bv = zerov;
+        for qi in 0..q {
+            let tbm = load_tfv(om, qi, 0);
+            let mpv = _mm_mul_ps(*dp.add(qi * 3), load_rfv(om, xi1, qi));
+            x_bv = _mm_add_ps(x_bv, _mm_mul_ps(mpv, tbm));
         }
+        x_bv = _mm_add_ps(
+            x_bv,
+            _mm_shuffle_ps::<{ super::shuffle_mask(0, 3, 2, 1) }>(x_bv, x_bv),
+        );
+        x_bv = _mm_add_ps(
+            x_bv,
+            _mm_shuffle_ps::<{ super::shuffle_mask(1, 0, 3, 2) }>(x_bv, x_bv),
+        );
+        _mm_store_ss(&mut x_b, x_bv);
         x_n = x_b * n_move + x_n * n_loop;
     }
 
@@ -789,29 +764,6 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
     pmx.has_own_scales = has_own_scales;
 
     (totscale + c_log_f64(x_n as f64)) as f32
-}
-
-/// Backward full-matrix fill assuming a canonical (no degenerate residues) sequence.
-///
-/// Variant of C `backward_engine`: the caller asserts `pmx.has_dp` and that all
-/// residues are within the canonical alphabet, allowing the routine to skip the
-/// degenerate-residue branch and write directly into the striped DP matrix via
-/// `backward_parser_pmx_offset_direct`.
-///
-/// # Safety
-/// Requires SSE2 support and `pmx.has_dp` must be true.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn backward_parser_pmx_offset_canonical(
-    dsq: &[Dsq],
-    dsq_offset: usize,
-    l: usize,
-    om: &OProfile,
-    pmx: &mut super::probmx::ProbMx,
-    fwd_row_scales: Option<&[f32]>,
-) -> f32 {
-    debug_assert!(pmx.has_dp);
-    backward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx, fwd_row_scales)
 }
 
 /// Backward full-matrix fill, writing directly into the striped ProbMx (variant of
@@ -831,7 +783,7 @@ pub unsafe fn backward_parser_pmx_offset_canonical(
 /// `dsq_offset+l` must be in bounds.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn backward_parser_pmx_offset_direct(
+pub(crate) unsafe fn backward_parser_pmx_offset_direct(
     dsq: &[Dsq],
     dsq_offset: usize,
     l: usize,
@@ -1122,7 +1074,7 @@ unsafe fn backward_parser_pmx_offset_direct(
 }
 
 /// Returns `true` iff every residue in `dsq[dsq_offset+1..=dsq_offset+l]` is a
-/// canonical alphabet symbol (`< abc_kp`).
+/// valid digital alphabet symbol (`< abc_kp`).
 ///
 /// Used to decide whether the Backward engine can take the fast in-place path.
 /// Returns `false` on empty windows or out-of-bounds spans.

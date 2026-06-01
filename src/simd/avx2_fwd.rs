@@ -40,9 +40,7 @@ impl OProfileAvx2Fwd {
                     if node <= m {
                         let sse_q = (node - 1) % nq_sse;
                         let sse_z = (node - 1) / nq_sse;
-                        if sse_z < 4 && sse_q < om.rfv[x].len() {
-                            tmp[z] = om.rfv[x][sse_q][sse_z];
-                        }
+                        tmp[z] = om.rfv[x][sse_q][sse_z];
                     }
                 }
                 rfv[x][q] = tmp;
@@ -140,10 +138,9 @@ pub unsafe fn avx2_forward_parser(dsq: &[Dsq], l: usize, om: &OProfileAvx2Fwd) -
     let mut totscale: f32 = 0.0;
 
     for i in 1..=l {
+        // Match C/SSE: rfv is built for every valid digital code and every
+        // dsq[1..=L] row advances unconditionally.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rfv[xi];
 
         let mut dcv = zerov;

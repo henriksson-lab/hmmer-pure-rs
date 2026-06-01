@@ -46,7 +46,7 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
         };
     }
 
-    let mut xe: f32 = 0.0;
+    let mut xe: f32;
     let mut xn: f32 = 1.0;
     let mut xj: f32 = 0.0;
     let mut xb: f32 = om.xf[P7O_N][P7O_MOVE];
@@ -54,10 +54,9 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     let mut totscale: f32 = 0.0;
 
     for i in 1..=l {
+        // Match C/SSE: rfv is built for every valid digital code and every
+        // dsq[1..=L] row advances unconditionally.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rfv[xi];
 
         let mut dcv = zerov;
@@ -148,7 +147,6 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
                 imo!(q) = vmulq_f32(imo!(q), sv);
             }
             totscale += c_log_f64(xe as f64) as f32;
-            xe = 1.0;
         }
     }
 

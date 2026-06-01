@@ -8,7 +8,9 @@
 )]
 
 use crate::profile::*;
-use crate::util::cmath::{c_expf_to_f32, c_log_to_f32, c_logf_to_f32, ESL_CONST_LOG2};
+#[cfg(target_arch = "x86_64")]
+use crate::util::cmath::c_log_to_f32;
+use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32, ESL_CONST_LOG2};
 
 /// Striped segment length for byte-precision (MSV) vectors: ceil(M/16), min 2.
 /// Mirrors C macro `p7O_NQB`.
@@ -358,6 +360,299 @@ fn esl_sse_expf_lane(mut x: f32) -> f32 {
     y * pow2
 }
 
+struct MfConversion {
+    rbv: Vec<Vec<[u8; 16]>>,
+    sbv: Vec<Vec<[u8; 16]>>,
+    tbm_b: u8,
+    tec_b: u8,
+    tjb_b: u8,
+    scale_b: f32,
+    base_b: u8,
+    bias_b: u8,
+}
+
+/// Port of C `mf_conversion()`: build the MSV/SSV byte-score profile.
+fn mf_conversion(gm: &Profile) -> MfConversion {
+    let m = gm.m;
+    let nq = nqb(m);
+    let kp = gm.abc_kp;
+    let k = gm.abc_k;
+    let scale_b = (3.0 / ESL_CONST_LOG2) as f32;
+    let base_b: u8 = 190;
+
+    let mut max_sc = 0.0_f32;
+    for x in 0..k {
+        for node in 1..=m {
+            let sc = gm.msc(node, x);
+            if sc.is_finite() && sc > max_sc {
+                max_sc = sc;
+            }
+        }
+    }
+
+    let bias_b = unbiased_byteify(scale_b, -max_sc);
+    let mut rbv = vec![vec![[0u8; 16]; nq]; kp];
+    for x in 0..kp {
+        for q in 0..nq {
+            let mut tmp = [0u8; 16];
+            for z in 0..16 {
+                let node = q + 1 + z * nq;
+                tmp[z] = if node <= m {
+                    biased_byteify(scale_b, bias_b, gm.msc(node, x))
+                } else {
+                    255
+                };
+            }
+            rbv[x][q] = tmp;
+        }
+    }
+
+    let extra_sb = 17;
+    let mut sbv = vec![vec![[0u8; 16]; nq + extra_sb]; kp];
+    for x in 0..kp {
+        for q in 0..(nq + extra_sb) {
+            let src = rbv[x][q % nq];
+            let mut tmp = [0u8; 16];
+            for z in 0..16 {
+                tmp[z] = (bias_b.wrapping_add(127).saturating_sub(src[z])) ^ 127;
+            }
+            sbv[x][q] = tmp;
+        }
+    }
+
+    let tbm_b = unbiased_byteify(
+        scale_b,
+        c_logf_to_f32(2.0_f32 / (m as f32 * (m as f32 + 1.0))),
+    );
+    let tec_b = unbiased_byteify(scale_b, c_logf_to_f32(0.5_f32));
+    let tjb_b = unbiased_byteify(scale_b, c_logf_to_f32(3.0_f32 / (gm.l as f32 + 3.0)));
+
+    MfConversion {
+        rbv,
+        sbv,
+        tbm_b,
+        tec_b,
+        tjb_b,
+        scale_b,
+        base_b,
+        bias_b,
+    }
+}
+
+struct VfConversion {
+    rwv: Vec<Vec<[i16; 8]>>,
+    twv: Vec<[i16; 8]>,
+    xw: [[i16; P7O_NXTRANS]; P7O_NXSTATES],
+    scale_w: f32,
+    base_w: i16,
+    ddbound_w: i16,
+}
+
+/// Port of C `vf_conversion()`: build the Viterbi word-score profile.
+fn vf_conversion(gm: &Profile) -> VfConversion {
+    let m = gm.m;
+    let kp = gm.abc_kp;
+    let scale_w = (500.0 / ESL_CONST_LOG2) as f32;
+    let base_w: i16 = 12000;
+    let nqw = nqw(m);
+
+    let mut rwv = vec![vec![[0i16; 8]; nqw]; kp];
+    for x in 0..kp {
+        for q in 0..nqw {
+            let mut tmp = [0i16; 8];
+            for z in 0..8 {
+                let node = q + 1 + z * nqw;
+                tmp[z] = if node <= m {
+                    wordify(scale_w, gm.msc(node, x))
+                } else {
+                    -32768
+                };
+            }
+            rwv[x][q] = tmp;
+        }
+    }
+
+    let mut twv = vec![[0i16; 8]; 8 * nqw];
+    let mut j = 0;
+    for q in 0..nqw {
+        let k = q + 1;
+        let trans_specs: [(usize, usize, i16); 7] = [
+            (P7P_BM, k.wrapping_sub(1), 0),
+            (P7P_MM, k.wrapping_sub(1), 0),
+            (P7P_IM, k.wrapping_sub(1), 0),
+            (P7P_DM, k.wrapping_sub(1), 0),
+            (P7P_MD, k, 0),
+            (P7P_MI, k, 0),
+            (P7P_II, k, -1),
+        ];
+        for &(tg, kb, maxval) in &trans_specs {
+            let mut tmp = [0i16; 8];
+            for z in 0..8 {
+                let node = kb + z * nqw;
+                let val = if node < m {
+                    wordify(scale_w, gm.tsc(node, tg))
+                } else {
+                    -32768
+                };
+                tmp[z] = if val >= maxval { maxval } else { val };
+            }
+            twv[j] = tmp;
+            j += 1;
+        }
+    }
+    for q in 0..nqw {
+        let k = q + 1;
+        let mut tmp = [0i16; 8];
+        for z in 0..8 {
+            let node = k + z * nqw;
+            tmp[z] = if node < m {
+                wordify(scale_w, gm.tsc(node, P7P_DD))
+            } else {
+                -32768
+            };
+        }
+        twv[j] = tmp;
+        j += 1;
+    }
+
+    let mut xw = [[0i16; P7O_NXTRANS]; P7O_NXSTATES];
+    xw[P7O_E][P7O_LOOP] = wordify(scale_w, gm.xsc[P7P_E][P7P_LOOP]);
+    xw[P7O_E][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_E][P7P_MOVE]);
+    xw[P7O_N][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_N][P7P_MOVE]);
+    xw[P7O_N][P7O_LOOP] = 0;
+    xw[P7O_C][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_C][P7P_MOVE]);
+    xw[P7O_C][P7O_LOOP] = 0;
+    xw[P7O_J][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_J][P7P_MOVE]);
+    xw[P7O_J][P7O_LOOP] = 0;
+
+    let mut ddbound_w: i16 = -32768;
+    for node in 2..m.saturating_sub(1) {
+        let dd = wordify(scale_w, gm.tsc(node, P7P_DD)) as i32;
+        let dm = wordify(scale_w, gm.tsc(node + 1, P7P_DM)) as i32;
+        let bm = wordify(scale_w, gm.tsc(node + 1, P7P_BM)) as i32;
+        let ddtmp = dd + dm - bm;
+        if ddtmp > ddbound_w as i32 {
+            ddbound_w = ddtmp.min(32767) as i16;
+        }
+    }
+
+    VfConversion {
+        rwv,
+        twv,
+        xw,
+        scale_w,
+        base_w,
+        ddbound_w,
+    }
+}
+
+struct FbConversion {
+    rfv: Vec<Vec<[f32; 4]>>,
+    tfv: Vec<[f32; 4]>,
+    xf: [[f32; P7O_NXTRANS]; P7O_NXSTATES],
+}
+
+/// Port of C `fb_conversion()`: build Forward/Backward probability vectors.
+fn fb_conversion(gm: &Profile) -> FbConversion {
+    let m = gm.m;
+    let kp = gm.abc_kp;
+    let nqf = nqf(m);
+    let mut rfv = vec![vec![[0.0f32; 4]; nqf]; kp];
+    for x in 0..kp {
+        for q in 0..nqf {
+            let mut tmp = [0.0f32; 4];
+            for z in 0..4 {
+                let node = q + 1 + z * nqf;
+                tmp[z] = if node <= m {
+                    gm.msc(node, x)
+                } else {
+                    f32::NEG_INFINITY
+                };
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                rfv[x][q] = unsafe { esl_sse_expf4(tmp) };
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                rfv[x][q] = esl_sse_expf4(tmp);
+            }
+        }
+    }
+
+    let mut tfv = vec![[0.0f32; 4]; 8 * nqf];
+    let mut j = 0;
+    for q in 0..nqf {
+        let k = q + 1;
+        let trans_specs: [(usize, usize); 7] = [
+            (P7P_BM, k.wrapping_sub(1)),
+            (P7P_MM, k.wrapping_sub(1)),
+            (P7P_IM, k.wrapping_sub(1)),
+            (P7P_DM, k.wrapping_sub(1)),
+            (P7P_MD, k),
+            (P7P_MI, k),
+            (P7P_II, k),
+        ];
+        for &(tg, kb) in &trans_specs {
+            let mut tmp = [0.0f32; 4];
+            for z in 0..4 {
+                let node = kb + z * nqf;
+                tmp[z] = if node < m {
+                    gm.tsc(node, tg)
+                } else {
+                    f32::NEG_INFINITY
+                };
+            }
+            #[cfg(feature = "tracehash")]
+            trace_oprofile_tfv_source(m, j, &tmp);
+            #[cfg(target_arch = "x86_64")]
+            {
+                tfv[j] = unsafe { esl_sse_expf4(tmp) };
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                tfv[j] = esl_sse_expf4(tmp);
+            }
+            j += 1;
+        }
+    }
+    for q in 0..nqf {
+        let k = q + 1;
+        let mut tmp = [0.0f32; 4];
+        for z in 0..4 {
+            let node = k + z * nqf;
+            tmp[z] = if node < m {
+                gm.tsc(node, P7P_DD)
+            } else {
+                f32::NEG_INFINITY
+            };
+        }
+        #[cfg(feature = "tracehash")]
+        trace_oprofile_tfv_source(m, j, &tmp);
+        #[cfg(target_arch = "x86_64")]
+        {
+            tfv[j] = unsafe { esl_sse_expf4(tmp) };
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            tfv[j] = esl_sse_expf4(tmp);
+        }
+        j += 1;
+    }
+
+    let mut xf = [[0.0f32; P7O_NXTRANS]; P7O_NXSTATES];
+    xf[P7O_E][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_E][P7P_LOOP]);
+    xf[P7O_E][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_E][P7P_MOVE]);
+    xf[P7O_N][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_N][P7P_LOOP]);
+    xf[P7O_N][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_N][P7P_MOVE]);
+    xf[P7O_C][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_C][P7P_LOOP]);
+    xf[P7O_C][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_C][P7P_MOVE]);
+    xf[P7O_J][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_J][P7P_LOOP]);
+    xf[P7O_J][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_J][P7P_MOVE]);
+
+    FbConversion { rfv, tfv, xf }
+}
+
 impl OProfile {
     /// Convert a standard `Profile` into the SSE-striped optimized profile.
     ///
@@ -367,301 +662,50 @@ impl OProfile {
     /// `nj`, `evparam`, `cutoff`, `compo`, and copies the model name.
     pub fn convert(gm: &Profile) -> Self {
         let m = gm.m;
-        let nq = nqb(m);
         let kp = gm.abc_kp;
         let k = gm.abc_k;
 
-        // Determine scale and bias for MSV byte scores
-        let scale_b = (3.0 / ESL_CONST_LOG2) as f32;
-        let base_b: u8 = 190;
-
-        // Find maximum match emission score across all residues and positions
-        let mut max_sc = 0.0_f32;
-        for x in 0..k {
-            for node in 1..=m {
-                let sc = gm.msc(node, x);
-                if sc.is_finite() && sc > max_sc {
-                    max_sc = sc;
-                }
-            }
-        }
-
-        let bias_b = unbiased_byteify(scale_b, -max_sc);
-
-        // Build striped MSV match score vectors
-        let mut rbv = vec![vec![[0u8; 16]; nq]; kp];
-
-        for x in 0..kp {
-            for q in 0..nq {
-                let mut tmp = [0u8; 16];
-                for z in 0..16 {
-                    let node = q + 1 + z * nq;
-                    if node <= m {
-                        tmp[z] = biased_byteify(scale_b, bias_b, gm.msc(node, x));
-                    } else {
-                        tmp[z] = 255; // -infinity in offset arithmetic
-                    }
-                }
-                rbv[x][q] = tmp;
-            }
-        }
-
-        let extra_sb = 17;
-        let mut sbv = vec![vec![[0u8; 16]; nq + extra_sb]; kp];
-        for x in 0..kp {
-            for q in 0..(nq + extra_sb) {
-                let src = rbv[x][q % nq];
-                let mut tmp = [0u8; 16];
-                for z in 0..16 {
-                    tmp[z] = (bias_b.wrapping_add(127).saturating_sub(src[z])) ^ 127;
-                }
-                sbv[x][q] = tmp;
-            }
-        }
-
-        // Transition costs
-        let tbm_b = unbiased_byteify(
-            scale_b,
-            c_logf_to_f32(2.0_f32 / (m as f32 * (m as f32 + 1.0))),
-        );
-        let tec_b = unbiased_byteify(scale_b, c_logf_to_f32(0.5_f32));
-        let tjb_b = unbiased_byteify(scale_b, c_logf_to_f32(3.0_f32 / (gm.l as f32 + 3.0)));
-
-        // === Viterbi word-precision conversion ===
-        let scale_w = (500.0 / ESL_CONST_LOG2) as f32;
-        let base_w: i16 = 12000;
-        let nqw = nqw(m);
-
-        // Striped word match scores
-        let mut rwv = vec![vec![[0i16; 8]; nqw]; kp];
-        for x in 0..kp {
-            let mut qi = 0;
-            let mut ki = 1;
-            while qi < nqw {
-                let mut tmp = [0i16; 8];
-                for z in 0..8 {
-                    let node = ki + z * nqw;
-                    tmp[z] = if node <= m {
-                        wordify(scale_w, gm.msc(node, x))
-                    } else {
-                        -32768
-                    };
-                }
-                rwv[x][qi] = tmp;
-                qi += 1;
-                ki += 1;
-            }
-        }
-
-        // Transition scores (7 per q, then DD at end)
-        let mut twv = vec![[0i16; 8]; 8 * nqw];
-        let mut j = 0;
-        for qi in 0..nqw {
-            let ki = qi + 1;
-            // 7 transitions: BM, MM, IM, DM, MD, MI, II
-            let trans_specs: [(usize, usize, i16); 7] = [
-                (P7P_BM, ki.wrapping_sub(1), 0), // BM: off-by-one, starts from k=0
-                (P7P_MM, ki.wrapping_sub(1), 0), // MM: rotated by -1
-                (P7P_IM, ki.wrapping_sub(1), 0), // IM: rotated by -1
-                (P7P_DM, ki.wrapping_sub(1), 0), // DM: rotated by -1
-                (P7P_MD, ki, 0),                 // MD: straight
-                (P7P_MI, ki, 0),                 // MI: straight
-                (P7P_II, ki, -1),                // II: maxval=-1 (prevent zero-cost II)
-            ];
-
-            for &(tg, kb, maxval) in &trans_specs {
-                let mut tmp = [0i16; 8];
-                for z in 0..8 {
-                    let node = kb + z * nqw;
-                    let val = if node < m {
-                        wordify(scale_w, gm.tsc(node, tg))
-                    } else {
-                        -32768
-                    };
-                    tmp[z] = if val >= maxval { maxval } else { val };
-                }
-                twv[j] = tmp;
-                j += 1;
-            }
-        }
-        // DD transitions at the end
-        for qi in 0..nqw {
-            let ki = qi + 1;
-            let mut tmp = [0i16; 8];
-            for z in 0..8 {
-                let node = ki + z * nqw;
-                tmp[z] = if node < m {
-                    wordify(scale_w, gm.tsc(node, P7P_DD))
-                } else {
-                    -32768
-                };
-            }
-            twv[j] = tmp;
-            j += 1;
-        }
-
-        // Special state word scores
-        let mut xw = [[0i16; P7O_NXTRANS]; P7O_NXSTATES];
-        xw[P7O_E][P7O_LOOP] = wordify(scale_w, gm.xsc[P7P_E][P7P_LOOP]);
-        xw[P7O_E][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_E][P7P_MOVE]);
-        xw[P7O_N][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_N][P7P_MOVE]);
-        xw[P7O_N][P7O_LOOP] = 0; // hardcoded: -3nat approximation
-        xw[P7O_C][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_C][P7P_MOVE]);
-        xw[P7O_C][P7O_LOOP] = 0;
-        xw[P7O_J][P7O_MOVE] = wordify(scale_w, gm.xsc[P7P_J][P7P_MOVE]);
-        xw[P7O_J][P7O_LOOP] = 0;
-
-        // DD bound for lazy F evaluation
-        let mut ddbound_w: i16 = -32768;
-        for node in 2..m.saturating_sub(1) {
-            let dd = wordify(scale_w, gm.tsc(node, P7P_DD)) as i32;
-            let dm = wordify(scale_w, gm.tsc(node + 1, P7P_DM)) as i32;
-            let bm = wordify(scale_w, gm.tsc(node + 1, P7P_BM)) as i32;
-            let ddtmp = dd + dm - bm;
-            if ddtmp > ddbound_w as i32 {
-                ddbound_w = ddtmp.min(32767) as i16;
-            }
-        }
-
-        // === Forward/Backward float-precision conversion ===
-        let nqf = nqf(m);
-
-        // Float emission scores (probability ratios = exp(log-odds scores))
-        let mut rfv = vec![vec![[0.0f32; 4]; nqf]; kp];
-        for x in 0..kp {
-            let mut qi = 0;
-            let mut ki = 1;
-            while qi < nqf {
-                let mut tmp = [0.0f32; 4];
-                for z in 0..4 {
-                    let node = ki + z * nqf;
-                    tmp[z] = if node <= m {
-                        gm.msc(node, x)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                }
-                #[cfg(target_arch = "x86_64")]
-                {
-                    rfv[x][qi] = unsafe { esl_sse_expf4(tmp) };
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    rfv[x][qi] = esl_sse_expf4(tmp);
-                }
-                qi += 1;
-                ki += 1;
-            }
-        }
-
-        // Float transition scores (probabilities = exp(log scores))
-        let mut tfv = vec![[0.0f32; 4]; 8 * nqf];
-        let mut j = 0;
-        for qi in 0..nqf {
-            let ki = qi + 1;
-            let trans_specs: [(usize, usize); 7] = [
-                (P7P_BM, ki.wrapping_sub(1)),
-                (P7P_MM, ki.wrapping_sub(1)),
-                (P7P_IM, ki.wrapping_sub(1)),
-                (P7P_DM, ki.wrapping_sub(1)),
-                (P7P_MD, ki),
-                (P7P_MI, ki),
-                (P7P_II, ki),
-            ];
-            for &(tg, kb) in &trans_specs {
-                let mut tmp = [0.0f32; 4];
-                for z in 0..4 {
-                    let node = kb + z * nqf;
-                    tmp[z] = if node < m {
-                        gm.tsc(node, tg)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                }
-                #[cfg(target_arch = "x86_64")]
-                {
-                    #[cfg(feature = "tracehash")]
-                    trace_oprofile_tfv_source(m, j, &tmp);
-                    tfv[j] = unsafe { esl_sse_expf4(tmp) };
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    #[cfg(feature = "tracehash")]
-                    trace_oprofile_tfv_source(m, j, &tmp);
-                    tfv[j] = esl_sse_expf4(tmp);
-                }
-                j += 1;
-            }
-        }
-        // DD transitions at the end
-        for qi in 0..nqf {
-            let ki = qi + 1;
-            let mut tmp = [0.0f32; 4];
-            for z in 0..4 {
-                let node = ki + z * nqf;
-                tmp[z] = if node < m {
-                    gm.tsc(node, P7P_DD)
-                } else {
-                    f32::NEG_INFINITY
-                };
-            }
-            #[cfg(target_arch = "x86_64")]
-            {
-                #[cfg(feature = "tracehash")]
-                trace_oprofile_tfv_source(m, j, &tmp);
-                tfv[j] = unsafe { esl_sse_expf4(tmp) };
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                #[cfg(feature = "tracehash")]
-                trace_oprofile_tfv_source(m, j, &tmp);
-                tfv[j] = esl_sse_expf4(tmp);
-            }
-            j += 1;
-        }
-
-        // Special state float scores
-        let mut xf = [[0.0f32; P7O_NXTRANS]; P7O_NXSTATES];
-        xf[P7O_E][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_E][P7P_LOOP]);
-        xf[P7O_E][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_E][P7P_MOVE]);
-        xf[P7O_N][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_N][P7P_LOOP]);
-        xf[P7O_N][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_N][P7P_MOVE]);
-        xf[P7O_C][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_C][P7P_LOOP]);
-        xf[P7O_C][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_C][P7P_MOVE]);
-        xf[P7O_J][P7O_LOOP] = c_expf_to_f32(gm.xsc[P7P_J][P7P_LOOP]);
-        xf[P7O_J][P7O_MOVE] = c_expf_to_f32(gm.xsc[P7P_J][P7P_MOVE]);
+        let mf = mf_conversion(gm);
+        let vf = vf_conversion(gm);
+        let fb = fb_conversion(gm);
 
         #[cfg(target_arch = "x86_64")]
-        let rfv_a: Vec<Vec<AlignedF32x4>> = rfv
+        let rfv_a: Vec<Vec<AlignedF32x4>> = fb
+            .rfv
             .iter()
             .map(|rows| rows.iter().copied().map(AlignedF32x4::from_array).collect())
             .collect();
         #[cfg(target_arch = "x86_64")]
-        let tfv_a: Vec<AlignedF32x4> = tfv.iter().copied().map(AlignedF32x4::from_array).collect();
+        let tfv_a: Vec<AlignedF32x4> = fb
+            .tfv
+            .iter()
+            .copied()
+            .map(AlignedF32x4::from_array)
+            .collect();
 
         let om = OProfile {
-            rbv,
-            sbv,
-            tbm_b,
-            tec_b,
-            tjb_b,
-            scale_b,
-            base_b,
-            bias_b,
-            rwv,
-            twv,
-            xw,
-            scale_w,
-            base_w,
-            ddbound_w,
+            rbv: mf.rbv,
+            sbv: mf.sbv,
+            tbm_b: mf.tbm_b,
+            tec_b: mf.tec_b,
+            tjb_b: mf.tjb_b,
+            scale_b: mf.scale_b,
+            base_b: mf.base_b,
+            bias_b: mf.bias_b,
+            rwv: vf.rwv,
+            twv: vf.twv,
+            xw: vf.xw,
+            scale_w: vf.scale_w,
+            base_w: vf.base_w,
+            ddbound_w: vf.ddbound_w,
             ncj_roundoff: 0.0,
-            rfv,
-            tfv,
+            rfv: fb.rfv,
+            tfv: fb.tfv,
             #[cfg(target_arch = "x86_64")]
             rfv_a,
             #[cfg(target_arch = "x86_64")]
             tfv_a,
-            xf,
+            xf: fb.xf,
             m,
             l: gm.l,
             max_length: gm.max_length,
@@ -699,11 +743,18 @@ impl OProfile {
     /// (caller must also `p7_bg_SetLength`). Must be fast — sits in the hot
     /// path, called once per target sequence.
     pub fn reconfig_length(&mut self, l: i32) {
-        self.l = l;
+        self.reconfig_msv_length(l);
+        self.reconfig_rest_length(l);
+    }
+
+    /// Set the target sequence length of the main profile, excluding MSVFilter.
+    ///
+    /// Ports `p7_oprofile_ReconfigRestLength`: updates N/C/J transition floats
+    /// and words for Forward/Viterbi filters without touching `tjb_b`.
+    pub fn reconfig_rest_length(&mut self, l: i32) {
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
         let ploop = 1.0 - pmove;
 
-        self.tjb_b = unbiased_byteify(self.scale_b, c_logf_to_f32(3.0_f32 / (l as f32 + 3.0)));
         let log_pmove = c_logf_to_f32(pmove);
         self.xw[P7O_N][P7O_MOVE] = wordify(self.scale_w, log_pmove);
         self.xw[P7O_C][P7O_MOVE] = wordify(self.scale_w, log_pmove);
@@ -715,6 +766,8 @@ impl OProfile {
         self.xf[P7O_C][P7O_MOVE] = pmove;
         self.xf[P7O_J][P7O_LOOP] = ploop;
         self.xf[P7O_J][P7O_MOVE] = pmove;
+
+        self.l = l;
     }
 
     /// Reconfigure the optimized profile into multihit mode for target length `l`.
@@ -909,15 +962,10 @@ impl OProfile {
         }
     }
 
-    /// Recover a profile transition log-odds score from the striped Viterbi `twv`.
-    ///
-    /// Rust-only helper used by AVX2/NEON restripers when only the SSE-built
-    /// `OProfile` is available. Maps `(node, tsc_type)` back to the striped
-    /// layout and de-scales by `scale_w`; returns `NEG_INFINITY` out of range.
-    pub fn tsc_at(&self, node: usize, tsc_type: usize) -> f32 {
-        // Look up from the generic profile's transition score
-        // This requires the profile data stored in word-precision twv
-        // For restriping, we approximate from the word value
+    /// Read an already-quantized Viterbi transition word from the SSE-striped
+    /// `twv` layout. Used by wider SIMD restripers to preserve C/SSE word
+    /// scores exactly, including `maxval` clamping for II and padding lanes.
+    pub fn twv_word_at(&self, node: usize, tsc_type: usize) -> i16 {
         let nq = nqw(self.m);
         let q = (node) % nq;
         let z = (node) / nq;
@@ -932,13 +980,13 @@ impl OProfile {
                 P7P_MI => q * 7 + P7O_MI,
                 P7P_II => q * 7 + P7O_II,
                 P7P_DD => 7 * nq + q,
-                _ => return f32::NEG_INFINITY,
+                _ => return -32768,
             };
             if idx < self.twv.len() && z < 8 {
-                return self.twv[idx][z] as f32 / self.scale_w;
+                return self.twv[idx][z];
             }
         }
-        f32::NEG_INFINITY
+        -32768
     }
 }
 

@@ -49,11 +49,7 @@ impl OProfileAvx2Vit {
                     if node <= m {
                         let sse_q = (node - 1) % nq_sse;
                         let sse_z = (node - 1) / nq_sse;
-                        if sse_z < 8 && sse_q < om.rwv[x].len() {
-                            tmp[z] = om.rwv[x][sse_q][sse_z];
-                        } else {
-                            tmp[z] = -32768;
-                        }
+                        tmp[z] = om.rwv[x][sse_q][sse_z];
                     } else {
                         tmp[z] = -32768;
                     }
@@ -62,30 +58,31 @@ impl OProfileAvx2Vit {
             }
         }
 
-        // Restripe transition scores
+        // Restripe already-quantized transition scores exactly from the SSE
+        // profile. Do not dequantize/requantize: C parity depends on preserving
+        // wordify rounding and maxval clamping byte-for-byte.
         let mut twv = vec![[0i16; 16]; 8 * nq];
         let mut j = 0;
         for qi in 0..nq {
             let ki = qi + 1;
-            let trans_specs: [(usize, usize, i16); 7] = [
-                (P7P_BM, ki.wrapping_sub(1), 0),
-                (P7P_MM, ki.wrapping_sub(1), 0),
-                (P7P_IM, ki.wrapping_sub(1), 0),
-                (P7P_DM, ki.wrapping_sub(1), 0),
-                (P7P_MD, ki, 0),
-                (P7P_MI, ki, 0),
-                (P7P_II, ki, -1),
+            let trans_specs: [(usize, usize); 7] = [
+                (P7P_BM, ki.wrapping_sub(1)),
+                (P7P_MM, ki.wrapping_sub(1)),
+                (P7P_IM, ki.wrapping_sub(1)),
+                (P7P_DM, ki.wrapping_sub(1)),
+                (P7P_MD, ki),
+                (P7P_MI, ki),
+                (P7P_II, ki),
             ];
-            for &(tg, kb, maxval) in &trans_specs {
+            for &(tg, kb) in &trans_specs {
                 let mut tmp = [0i16; 16];
                 for z in 0..16 {
                     let node = kb + z * nq;
-                    let val = if node < m {
-                        crate::simd::oprofile::wordify_pub(om.scale_w, om.tsc_at(node, tg))
+                    tmp[z] = if node < m {
+                        om.twv_word_at(node, tg)
                     } else {
-                        -32768
+                        i16::MIN
                     };
-                    tmp[z] = if val >= maxval { maxval } else { val };
                 }
                 twv[j] = tmp;
                 j += 1;
@@ -98,9 +95,9 @@ impl OProfileAvx2Vit {
             for z in 0..16 {
                 let node = ki + z * nq;
                 tmp[z] = if node < m {
-                    crate::simd::oprofile::wordify_pub(om.scale_w, om.tsc_at(node, P7P_DD))
+                    om.twv_word_at(node, P7P_DD)
                 } else {
-                    -32768
+                    i16::MIN
                 };
             }
             twv[j] = tmp;

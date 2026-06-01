@@ -146,20 +146,16 @@ rust  = "forward_parser_pmx_offset_with_scratch"
 other = "forward_engine"
 
 [[entries]]
-rust  = "forward_parser_pmx_offset_canonical"
+rust  = "forward_parser_pmx_offset_direct"
 other = "forward_engine"
 
 [[entries]]
-rust  = "forward_parser_pmx_offset_direct"
-other = "p7_Forward"
-
-[[entries]]
 rust  = "forward_parser"
-other = "p7_Forward"
+other = "p7_ForwardParser"
 
 [[entries]]
 rust  = "forward_parser_offset"
-other = "p7_Forward"
+other = "p7_ForwardParser"
 
 [[entries]]
 rust  = "avx2_forward_parser"
@@ -182,12 +178,8 @@ rust  = "backward_parser_pmx_offset_with_scratch"
 other = "backward_engine"
 
 [[entries]]
-rust  = "backward_parser_pmx_offset_canonical"
-other = "backward_engine"
-
-[[entries]]
 rust  = "backward_parser_pmx_offset_direct"
-other = "p7_Backward"
+other = "backward_engine"
 
 [[entries]]
 rust  = "backward_parser_pmx_offset_with_fwd_scales"
@@ -278,12 +270,28 @@ rust  = "convert"
 other = "p7_oprofile_Convert"
 
 [[entries]]
+rust  = "mf_conversion"
+other = "mf_conversion"
+
+[[entries]]
+rust  = "vf_conversion"
+other = "vf_conversion"
+
+[[entries]]
+rust  = "fb_conversion"
+other = "fb_conversion"
+
+[[entries]]
 rust  = "reconfig_length"
 other = "p7_oprofile_ReconfigLength"
 
 [[entries]]
 rust  = "reconfig_msv_length"
 other = "p7_oprofile_ReconfigMSVLength"
+
+[[entries]]
+rust  = "reconfig_rest_length"
+other = "p7_oprofile_ReconfigRestLength"
 
 [[entries]]
 rust  = "reconfig_multihit"

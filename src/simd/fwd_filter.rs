@@ -940,8 +940,8 @@ pub unsafe fn forward_parser_pmx_offset(
 /// unrolling (with serial vs. parallel-with-early-termination branches), xE
 /// horizontal sum, scalar BENCJ specials, sparse rescaling triggered by
 /// `xE > 1e4`, and accumulation of `totscale` in f64. Writes specials and
-/// row scales to `pmx`; if `pmx.has_dp` is set and the sequence is canonical
-/// (no degenerate residues) it dispatches to the direct full-DP variant.
+/// row scales to `pmx`; if `pmx.has_dp` is set and the sequence has only valid
+/// digital codes it dispatches to the direct full-DP variant.
 ///
 /// # Safety
 /// Requires SSE2.
@@ -1010,29 +1010,6 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
 
     for i in 1..=l {
         let xi = dsq[dsq_offset + i] as usize;
-        // Defensive branch for out-of-range codes (>= Kp), which never occur in a
-        // well-formed dsq (all valid codes, including degenerate X/*/~, are < Kp
-        // and have filled rfv rows). C has no such branch and would read OOB here;
-        // for valid input this is a no-op and the normal recurrence below runs.
-        if xi >= om.abc_kp {
-            if pmx.has_dp {
-                pmx.zero_simd_row(i);
-            }
-            xn *= om.xf[P7O_N][P7O_LOOP];
-            xe = 0.0;
-            xc = xc * om.xf[P7O_C][P7O_LOOP] + xe * om.xf[P7O_E][P7O_MOVE];
-            xj = xj * om.xf[P7O_J][P7O_LOOP] + xe * om.xf[P7O_E][P7O_LOOP];
-            xb = xn * om.xf[P7O_N][P7O_MOVE] + xj * om.xf[P7O_J][P7O_MOVE];
-            pmx.set_xmx(i, PXE, xe);
-            pmx.set_xmx(i, PXN, xn);
-            pmx.set_xmx(i, PXJ, xj);
-            pmx.set_xmx(i, PXB, xb);
-            pmx.set_xmx(i, PXC, xc);
-            pmx.scale[i] = totscale as f64;
-            pmx.row_scale[i] = 1.0;
-            continue;
-        }
-
         let rsc_ptr = (*rfv_ptr.add(xi)).as_ptr();
         let xbv = _mm_set1_ps(xb);
         let mut dcv = zerov;
@@ -1299,26 +1276,6 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
     score
 }
 
-/// Canonical-sequence fast path: enters the direct full-DP variant of
-/// `forward_engine` unconditionally (caller guarantees no degenerate residues
-/// and `pmx.has_dp`). Variant of `forward_engine` that skips the dispatch
-/// check inside [`forward_parser_pmx_offset_with_scratch`].
-///
-/// # Safety
-/// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn forward_parser_pmx_offset_canonical(
-    dsq: &[Dsq],
-    dsq_offset: usize,
-    l: usize,
-    om: &OProfile,
-    pmx: &mut super::probmx::ProbMx,
-) -> f32 {
-    debug_assert!(pmx.has_dp);
-    forward_parser_pmx_offset_direct(dsq, dsq_offset, l, om, pmx)
-}
-
 /// Direct full-DP forward engine: writes each row straight into the striped
 /// posterior matrix in `pmx`, reading the previous row from the same buffer
 /// (no per-call scratch). Variant of `p7_Forward` / `forward_engine` for the
@@ -1329,7 +1286,7 @@ pub unsafe fn forward_parser_pmx_offset_canonical(
 /// contains no degenerate residues.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn forward_parser_pmx_offset_direct(
+pub(crate) unsafe fn forward_parser_pmx_offset_direct(
     dsq: &[Dsq],
     dsq_offset: usize,
     l: usize,
@@ -1596,9 +1553,9 @@ unsafe fn forward_parser_pmx_offset_direct(
     }
 }
 
-/// Returns true if `dsq[dsq_offset+1..=dsq_offset+l]` contains only canonical
-/// residue codes (`< abc_kp`); used to gate entry to the direct full-DP
-/// engine, which assumes no degenerate residues.
+/// Returns true if `dsq[dsq_offset+1..=dsq_offset+l]` contains only valid
+/// digital residue codes (`< abc_kp`); used to gate entry to the direct full-DP
+/// engine.
 #[inline(always)]
 fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> bool {
     if l == 0 {

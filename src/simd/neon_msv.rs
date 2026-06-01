@@ -41,10 +41,9 @@ pub unsafe fn neon_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonMsvRe
     let mut xbv = vqsubq_u8(basev, tjbmv);
 
     for i in 1..=l {
+        // Match C/SSE: rbv is built for every valid digital code and every
+        // dsq[1..=L] row advances unconditionally.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rbv[xi];
 
         let mut xev = vdupq_n_u8(0);
@@ -66,13 +65,15 @@ pub unsafe fn neon_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonMsvRe
         // Overflow test
         let tempv = vqaddq_u8(xev, biasv);
         let cmpv = vceqq_u8(tempv, vdupq_n_u8(255));
-        if vmaxvq_u8(cmpv) != 0 {
-            return NeonMsvResult::Overflow;
-        }
+        let overflow = vmaxvq_u8(cmpv) != 0;
 
         // Horizontal max of xev
         let xe_max = vmaxvq_u8(xev);
         xev = vdupq_n_u8(xe_max);
+
+        if overflow {
+            return NeonMsvResult::Overflow;
+        }
 
         xev = vqsubq_u8(xev, tecv);
         xjv = vmaxq_u8(xjv, xev);

@@ -7,6 +7,7 @@
 //! makehmmerdb FM-index containers are loaded by reconstructing targets for the
 //! long-target path, with container FM records used to seed candidate windows
 //! when exact consensus seeds can be mapped back to sequence coordinates.
+#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_variables))]
 
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1567,6 +1568,15 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let threshold_config = NhmmerThresholdConfig::from_pipeline(&pli);
         let fm_seed_config = NhmmerFmSeedConfig::from_args(&args);
         let effective_block_length = args.block_length.unwrap_or(NHMMER_DEFAULT_BLOCK_LENGTH);
+        let fm_window_cache = precompute_c_faithful_fm_windows(
+            &target_db,
+            &sequences,
+            hmm,
+            &bg,
+            max_length,
+            f1,
+            fm_seed_config,
+        );
 
         // Atomic counters for pipeline filter residues, aggregated across
         // threads and per-window sub-pipelines.
@@ -1585,16 +1595,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 // Search top strand (watson)
                 if do_watson {
                     let strand_msv_counter = AtomicU64::new(0);
-                    let fm_windows = fm_seed_candidate_windows_with_config(
-                        &target_db,
-                        seq_idx,
-                        hmm,
-                        &bg,
-                        max_length,
-                        f1,
-                        false,
-                        fm_seed_config,
-                    );
+                    let fm_windows = if let Some(cache) = fm_window_cache.as_ref() {
+                        cache[seq_idx][0].clone()
+                    } else {
+                        fm_seed_candidate_windows_with_config(
+                            &target_db,
+                            seq_idx,
+                            hmm,
+                            &bg,
+                            max_length,
+                            f1,
+                            false,
+                            fm_seed_config,
+                        )
+                    };
                     let initial_windows = if target_db.fm_index_records.is_empty() {
                         fm_windows.as_deref()
                     } else {
@@ -1640,6 +1654,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     )?);
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(target_arch = "x86_64")]
                     let strand_msv_count = if target_db.fm_index_records.is_empty()
                         && !do_max
                         && sq.n > effective_block_length
@@ -1662,8 +1677,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 // Search complement strand (crick)
                 if do_crick && abc.complement.is_some() {
                     let strand_msv_counter = AtomicU64::new(0);
-                    let mut rc_dsq = sq.dsq.clone();
-                    abc.revcomp(&mut rc_dsq, sq.n);
+                    let rc_dsq = if target_db.fm_index_records.is_empty() {
+                        let mut rc_dsq = sq.dsq.clone();
+                        abc.revcomp(&mut rc_dsq, sq.n);
+                        rc_dsq
+                    } else {
+                        vec![DSQ_SENTINEL, DSQ_SENTINEL]
+                    };
                     let rc_sq = Sequence {
                         name: sq.name.clone(),
                         acc: sq.acc.clone(),
@@ -1673,16 +1693,20 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                         l: sq.l,
                         taxid: -1,
                     };
-                    let fm_windows = fm_seed_candidate_windows_with_config(
-                        &target_db,
-                        seq_idx,
-                        hmm,
-                        &bg,
-                        max_length,
-                        f1,
-                        true,
-                        fm_seed_config,
-                    );
+                    let fm_windows = if let Some(cache) = fm_window_cache.as_ref() {
+                        cache[seq_idx][1].clone()
+                    } else {
+                        fm_seed_candidate_windows_with_config(
+                            &target_db,
+                            seq_idx,
+                            hmm,
+                            &bg,
+                            max_length,
+                            f1,
+                            true,
+                            fm_seed_config,
+                        )
+                    };
                     let initial_windows = if target_db.fm_index_records.is_empty() {
                         fm_windows.as_deref()
                     } else {
@@ -1728,6 +1752,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     )?;
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(target_arch = "x86_64")]
                     let strand_msv_count = if target_db.fm_index_records.is_empty()
                         && !do_max
                         && rc_sq.n > effective_block_length
@@ -1769,20 +1794,23 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     // nothing observable (seq_start is constant 1) while risking
                     // the currently-green crick coordinate parity, so the
                     // verified-equivalent two-step form is kept deliberately.
+                    let fm_complement_adjust = i64::from(!target_db.fm_index_records.is_empty());
                     for hit in &mut rc_hits {
                         for dom in &mut hit.dcl {
                             // Both forward coords; ali higher first, lower second.
-                            let ali_hi = sq.n as i64 - dom.iali + 1;
-                            let ali_lo = sq.n as i64 - dom.jali + 1;
+                            let ali_hi = sq.n as i64 - dom.iali + 1 - fm_complement_adjust;
+                            let ali_lo = sq.n as i64 - dom.jali + 1 - fm_complement_adjust;
                             dom.iali = ali_hi;
                             dom.jali = ali_lo;
-                            let env_hi = sq.n as i64 - dom.ienv + 1;
-                            let env_lo = sq.n as i64 - dom.jenv + 1;
+                            let env_hi = sq.n as i64 - dom.ienv + 1 - fm_complement_adjust;
+                            let env_lo = sq.n as i64 - dom.jenv + 1 - fm_complement_adjust;
                             dom.ienv = env_hi;
                             dom.jenv = env_lo;
                             if let Some(ref mut ad) = dom.ad {
-                                let ad_hi = sq.n.saturating_sub(ad.sqfrom) + 1;
-                                let ad_lo = sq.n.saturating_sub(ad.sqto) + 1;
+                                let ad_hi = sq.n.saturating_sub(ad.sqfrom) + 1
+                                    - fm_complement_adjust as usize;
+                                let ad_lo = sq.n.saturating_sub(ad.sqto) + 1
+                                    - fm_complement_adjust as usize;
                                 ad.sqfrom = ad_hi;
                                 ad.sqto = ad_lo;
                             }
@@ -3329,6 +3357,7 @@ fn parse_makehmmerdb_target_database(
     let (fwd_only, freq_sa, freq_cnt_b, block_count, sequences, ambiguities) =
         read_makehmmerdb_c_metadata_payload(&mut payload)?;
     let mut records_by_block = Vec::with_capacity(block_count);
+    let mut reverse_records_by_block = Vec::with_capacity(block_count);
     let mut c_stream_records = Vec::with_capacity(block_count * if fwd_only { 1 } else { 2 });
     for block_id in 0..block_count {
         let record = read_makehmmerdb_c_fm_record(
@@ -3337,6 +3366,7 @@ fn parse_makehmmerdb_target_database(
             freq_cnt_b,
             true,
             payload_base_offset,
+            mapped_bytes.is_none(),
         )?;
         c_stream_records.push(NhmmerFmOccSource::from_record(block_id, 0, &record));
         records_by_block.push(record);
@@ -3347,8 +3377,12 @@ fn parse_makehmmerdb_target_database(
                 freq_cnt_b,
                 false,
                 payload_base_offset,
+                mapped_bytes.is_none(),
             )?;
             c_stream_records.push(NhmmerFmOccSource::from_record(block_id, 1, &reverse_record));
+            reverse_records_by_block.push(Some(reverse_record));
+        } else {
+            reverse_records_by_block.push(None);
         }
     }
     if makehmmerdb_remaining(&payload) != 0 {
@@ -3376,23 +3410,59 @@ fn parse_makehmmerdb_target_database(
             ambiguities.len(),
         )?;
     }
-    let mut fm_index_records = if !container_index_records.is_empty() {
-        container_index_records
+    let (mut fm_index_records, raw_block_texts) = if !container_index_records.is_empty() {
+        (container_index_records, Vec::new())
     } else if !is_container {
-        build_raw_c_stream_fm_index_records(&records_by_block, fwd_only)?
+        build_raw_c_stream_fm_index_records(
+            &mut records_by_block,
+            &mut reverse_records_by_block,
+            fwd_only,
+            mapped_bytes.clone(),
+        )?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     if !fm_index_records.is_empty() {
-        let block_texts: Vec<Arc<[u8]>> = records_by_block
-            .iter()
-            .map(|record| Arc::<[u8]>::from(record.text[..record.text_bases_len].to_vec()))
-            .collect();
+        let block_texts = if raw_block_texts.is_empty() {
+            records_by_block
+                .iter_mut()
+                .map(|record| {
+                    let text = std::mem::take(&mut record.text);
+                    if text.len() == record.text_bases_len {
+                        Arc::<[u8]>::from(text.into_boxed_slice())
+                    } else {
+                        Arc::<[u8]>::from(text[..record.text_bases_len].to_vec())
+                    }
+                })
+                .collect()
+        } else {
+            raw_block_texts
+        };
         for record in &mut fm_index_records {
-            record.text = Arc::clone(&block_texts[record.block_id]);
+            if record.text.is_empty() {
+                record.text = Arc::clone(&block_texts[record.block_id]);
+            }
+            if record.packed_text.is_empty() {
+                record.packed_text =
+                    Arc::from(records_by_block[record.block_id].packed_text.clone());
+            }
+            if record.mapped_packed_text.is_none() {
+                if let Some(bytes) = mapped_bytes.as_ref() {
+                    let block = &records_by_block[record.block_id];
+                    if block.packed_text_bytes != 0 {
+                        record.mapped_packed_text = Some(MappedPackedBytes {
+                            bytes: Arc::clone(bytes),
+                            offset: block.packed_text_offset,
+                            len: block.packed_text_bytes,
+                        });
+                    }
+                }
+            }
         }
     }
 
+    let fm_target_has_text =
+        !fm_index_records.is_empty() && fm_index_records.iter().any(|record| record.has_text());
     let mut out = Vec::with_capacity(sequences.len());
     for (seq_idx, seq_meta) in sequences.iter().enumerate() {
         let block = records_by_block
@@ -3400,7 +3470,7 @@ fn parse_makehmmerdb_target_database(
             .find(|record| {
                 seq_idx >= record.seq_offset
                     && seq_idx < record.seq_offset + record.seq_count
-                    && seq_meta.fm_start + seq_meta.length <= record.text.len()
+                    && seq_meta.fm_start + seq_meta.length <= record.text_bases_len
             })
             .ok_or_else(|| {
                 format!(
@@ -3408,14 +3478,40 @@ fn parse_makehmmerdb_target_database(
                     seq_meta.name
                 )
             })?;
-        let text = &block.text[seq_meta.fm_start..seq_meta.fm_start + seq_meta.length];
         let mut seq = Sequence::new();
         seq.name = seq_meta.name.clone();
         seq.acc = seq_meta.acc.clone();
         seq.desc = seq_meta.desc.clone();
-        seq.dsq = abc.digitize(text);
-        seq.n = text.len();
-        seq.l = text.len();
+        if fm_target_has_text {
+            seq.dsq = vec![DSQ_SENTINEL, DSQ_SENTINEL];
+            seq.n = seq_meta.length;
+            seq.l = seq_meta.length;
+        } else if !block.packed_text.is_empty() {
+            let text =
+                unpack_dna_quads_range(&block.packed_text, seq_meta.fm_start, seq_meta.length)?;
+            seq.dsq = abc.digitize(&text);
+            seq.n = text.len();
+            seq.l = text.len();
+        } else if let Some(bytes) = mapped_bytes
+            .as_ref()
+            .filter(|_| block.packed_text_bytes != 0)
+        {
+            let packed_text = MappedPackedBytes {
+                bytes: Arc::clone(bytes),
+                offset: block.packed_text_offset,
+                len: block.packed_text_bytes,
+            };
+            let text =
+                unpack_mapped_dna_quads_range(&packed_text, seq_meta.fm_start, seq_meta.length)?;
+            seq.dsq = abc.digitize(&text);
+            seq.n = text.len();
+            seq.l = text.len();
+        } else {
+            let text = &block.text[seq_meta.fm_start..seq_meta.fm_start + seq_meta.length];
+            seq.dsq = abc.digitize(text);
+            seq.n = text.len();
+            seq.l = text.len();
+        }
         out.push(seq);
     }
     Ok(NhmmerTargetDb {
@@ -3426,6 +3522,25 @@ fn parse_makehmmerdb_target_database(
     })
 }
 
+#[derive(Debug, Clone)]
+struct MappedPackedBytes {
+    bytes: Arc<MmapBytes>,
+    offset: usize,
+    len: usize,
+}
+
+impl MappedPackedBytes {
+    fn byte_at(&self, idx: usize) -> Option<u8> {
+        if idx >= self.len {
+            return None;
+        }
+        self.bytes
+            .as_slice()
+            .get(self.offset.checked_add(idx)?)
+            .copied()
+    }
+}
+
 #[derive(Debug)]
 struct NhmmerFmIndexRecord {
     block_id: usize,
@@ -3433,12 +3548,20 @@ struct NhmmerFmIndexRecord {
     text_start: usize,
     text_len: usize,
     text: Arc<[u8]>,
+    packed_text: Arc<[u8]>,
+    mapped_packed_text: Option<MappedPackedBytes>,
     seq_offset: usize,
     seq_count: usize,
     ambig_offset: usize,
     ambig_count: usize,
     overlap_bases: usize,
     fm: FmIndex,
+}
+
+impl NhmmerFmIndexRecord {
+    fn has_text(&self) -> bool {
+        !self.text.is_empty() || !self.packed_text.is_empty() || self.mapped_packed_text.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -3627,6 +3750,8 @@ fn parse_makehmmerdb_index_extension_mapped(
             text_start,
             text_len,
             text: Arc::from([]),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset,
             seq_count,
             ambig_offset,
@@ -3752,52 +3877,128 @@ fn validate_makehmmerdb_index_records(
 }
 
 fn build_raw_c_stream_fm_index_records(
-    records_by_block: &[NhmmerFmRecord],
+    records_by_block: &mut [NhmmerFmRecord],
+    reverse_records_by_block: &mut [Option<NhmmerFmRecord>],
     fwd_only: bool,
-) -> Result<Vec<NhmmerFmIndexRecord>, String> {
+    mapped_bytes: Option<Arc<MmapBytes>>,
+) -> Result<(Vec<NhmmerFmIndexRecord>, Vec<Arc<[u8]>>), String> {
     let record_passes = if fwd_only { 1 } else { 2 };
     let mut records = Vec::with_capacity(records_by_block.len() * record_passes);
+    let mut block_texts = Vec::with_capacity(records_by_block.len());
     let mut text_start = 0usize;
 
-    for (block_id, block) in records_by_block.iter().enumerate() {
+    for (block_id, block) in records_by_block.iter_mut().enumerate() {
         let text_len = block.text_bases_len;
         if text_len == 0 {
+            block_texts.push(Arc::from([]));
             text_start = text_start
                 .checked_add(text_len)
                 .ok_or_else(|| "raw makehmmerdb C-stream text span overflows usize".to_string())?;
             continue;
         }
 
-        let block_text = &block.text[..text_len];
-        let block_text: Arc<[u8]> = Arc::from(block_text.to_vec());
-        let reversed_text: Vec<u8> = block_text.iter().rev().copied().collect();
+        let block_text = Arc::from([]);
+        let block_mapped_packed_text = mapped_bytes.as_ref().map(|bytes| MappedPackedBytes {
+            bytes: Arc::clone(bytes),
+            offset: block.packed_text_offset,
+            len: block.packed_text_bytes,
+        });
+        let block_packed_text = if block_mapped_packed_text.is_some() {
+            Arc::from([])
+        } else {
+            Arc::<[u8]>::from(std::mem::take(&mut block.packed_text))
+        };
+        block_texts.push(Arc::clone(&block_text));
+        let fm = if let Some(mapped_bytes) = mapped_bytes.clone() {
+            FmIndex::from_makehmmerdb_mapped_packed_dna_parts_mapped_sa(
+                Arc::clone(&mapped_bytes),
+                block.packed_bwt_offset,
+                block.packed_bwt_bytes,
+                block.bwt_len,
+                mapped_bytes,
+                block.raw_sa_offset,
+                block.raw_sa_count,
+                block.term_loc,
+                block.freq_sa,
+                block.freq_cnt_b,
+                std::mem::take(&mut block.occ_b_codes),
+                std::mem::take(&mut block.occ_sb_codes),
+            )?
+        } else {
+            FmIndex::from_makehmmerdb_packed_dna_parts(
+                std::mem::take(&mut block.packed_bwt),
+                block.bwt_len,
+                std::mem::take(&mut block.raw_sa_samples),
+                block.term_loc,
+                block.freq_sa,
+                block.freq_cnt_b,
+                std::mem::take(&mut block.occ_b_codes),
+                std::mem::take(&mut block.occ_sb_codes),
+            )?
+        };
         records.push(NhmmerFmIndexRecord {
             block_id,
             kind: 0,
             text_start,
             text_len,
             text: Arc::clone(&block_text),
+            packed_text: Arc::clone(&block_packed_text),
+            mapped_packed_text: block_mapped_packed_text.clone(),
             seq_offset: block.seq_offset,
             seq_count: block.seq_count,
             ambig_offset: block.ambig_offset,
             ambig_count: block.ambig_count,
             overlap_bases: block.overlap_bases,
-            fm: FmIndex::build(&reversed_text),
+            fm,
         });
 
         if !fwd_only {
+            let reverse = reverse_records_by_block
+                .get_mut(block_id)
+                .and_then(|record| record.as_mut())
+                .ok_or_else(|| {
+                    "raw makehmmerdb C-stream is missing reverse FM record".to_string()
+                })?;
             records.push(NhmmerFmIndexRecord {
                 block_id,
                 kind: 1,
                 text_start,
                 text_len,
                 text: Arc::clone(&block_text),
+                packed_text: Arc::clone(&block_packed_text),
+                mapped_packed_text: block_mapped_packed_text.clone(),
                 seq_offset: block.seq_offset,
                 seq_count: block.seq_count,
                 ambig_offset: block.ambig_offset,
                 ambig_count: block.ambig_count,
                 overlap_bases: block.overlap_bases,
-                fm: FmIndex::build(&block_text),
+                fm: if let Some(mapped_bytes) = mapped_bytes.clone() {
+                    FmIndex::from_makehmmerdb_mapped_packed_dna_parts_mapped_sa(
+                        Arc::clone(&mapped_bytes),
+                        reverse.packed_bwt_offset,
+                        reverse.packed_bwt_bytes,
+                        reverse.bwt_len,
+                        mapped_bytes,
+                        reverse.raw_sa_offset,
+                        reverse.raw_sa_count,
+                        reverse.term_loc,
+                        reverse.freq_sa,
+                        reverse.freq_cnt_b,
+                        std::mem::take(&mut reverse.occ_b_codes),
+                        std::mem::take(&mut reverse.occ_sb_codes),
+                    )?
+                } else {
+                    FmIndex::from_makehmmerdb_packed_dna_parts(
+                        std::mem::take(&mut reverse.packed_bwt),
+                        reverse.bwt_len,
+                        std::mem::take(&mut reverse.raw_sa_samples),
+                        reverse.term_loc,
+                        reverse.freq_sa,
+                        reverse.freq_cnt_b,
+                        std::mem::take(&mut reverse.occ_b_codes),
+                        std::mem::take(&mut reverse.occ_sb_codes),
+                    )?
+                },
             });
         }
 
@@ -3806,7 +4007,81 @@ fn build_raw_c_stream_fm_index_records(
             .ok_or_else(|| "raw makehmmerdb C-stream text span overflows usize".to_string())?;
     }
 
-    Ok(records)
+    Ok((records, block_texts))
+}
+
+fn precompute_c_faithful_fm_windows(
+    target_db: &NhmmerTargetDb,
+    sequences: &[Sequence],
+    hmm: &Hmm,
+    bg: &Bg,
+    max_length: i32,
+    f1: f64,
+    config: NhmmerFmSeedConfig,
+) -> Option<Vec<[Option<Vec<NhmmerCandidateWindow>>; 2]>> {
+    if target_db.fm_index_records.is_empty() {
+        return None;
+    }
+    if !target_db
+        .fm_index_records
+        .iter()
+        .all(NhmmerFmIndexRecord::has_text)
+    {
+        return None;
+    }
+
+    let mut scored_by_seq: Vec<[Vec<NhmmerScoredCandidateWindow>; 2]> = (0..sequences.len())
+        .map(|_| [Vec::new(), Vec::new()])
+        .collect();
+
+    for record in &target_db.fm_index_records {
+        let strand_idx = record.kind as usize;
+        if strand_idx > 1 {
+            continue;
+        }
+        let sibling_kind = if record.kind == 0 { 1 } else { 0 };
+        let Some(sibling) = target_db
+            .fm_index_records
+            .iter()
+            .find(|r| r.block_id == record.block_id && r.kind == sibling_kind)
+        else {
+            continue;
+        };
+        let is_complement = record.kind == 1;
+        let (fmf, fmb) = if is_complement {
+            (&sibling.fm, &record.fm)
+        } else {
+            (&record.fm, &sibling.fm)
+        };
+        let Some(block_windows) = fm_ssv_collect_block_windows(
+            fmf,
+            fmb,
+            record,
+            &target_db.fm_ambiguities,
+            &target_db.fm_sequence_meta,
+            hmm,
+            bg,
+            config,
+            is_complement,
+            max_length,
+            f1,
+        ) else {
+            continue;
+        };
+        for (seq_idx, windows) in block_windows.into_iter().enumerate() {
+            if seq_idx < scored_by_seq.len() && !windows.is_empty() {
+                scored_by_seq[seq_idx][strand_idx].extend(windows);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(sequences.len());
+    for (seq_idx, [watson, crick]) in scored_by_seq.into_iter().enumerate() {
+        let watson = fm_finalize_seed_windows(watson, 1, &sequences[seq_idx], hmm, bg, true);
+        let crick = fm_finalize_seed_windows(crick, 1, &sequences[seq_idx], hmm, bg, true);
+        out.push([watson, crick]);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -3889,11 +4164,52 @@ fn fm_seed_candidate_windows_with_config(
             continue;
         }
 
+        let sibling_kind = if is_complement { 0 } else { 1 };
+        let sibling = target_db
+            .fm_index_records
+            .iter()
+            .find(|r| r.block_id == record.block_id && r.kind == sibling_kind);
+        if let Some(sibling) = sibling {
+            let (fmf, fmb) = if is_complement {
+                (&sibling.fm, &record.fm)
+            } else {
+                (&record.fm, &sibling.fm)
+            };
+            let mut augment_windows = Vec::new();
+            let c_faithful = fm_ssv_augment_windows(
+                fmf,
+                fmb,
+                record,
+                &target_db.fm_ambiguities,
+                &target_db.fm_sequence_meta,
+                seq_idx,
+                seq,
+                hmm,
+                bg,
+                config,
+                is_complement,
+                max_length,
+                f1,
+                desired_len,
+                &mut augment_windows,
+            );
+            if c_faithful && !augment_windows.is_empty() {
+                augment_c_faithful = true;
+                windows = augment_windows;
+                continue;
+            }
+            windows.extend(augment_windows);
+        }
+
+        if seq.dsq.len() <= 2 && seq.n > 0 {
+            continue;
+        }
+
         let seed_queries =
             fm_seed_queries_for_record(&seeds, record, seq.n, is_complement, hmm, bg);
-        for (seed, fm_pos) in
-            fm_locate_seed_queries(&record.fm, &seed_queries, NHMMER_FM_WINDOW_SOURCE_LIMIT)
-        {
+        let located =
+            fm_locate_seed_queries(&record.fm, &seed_queries, NHMMER_FM_WINDOW_SOURCE_LIMIT);
+        for (seed, fm_pos) in located {
             fm_push_seed_window(
                 &mut windows,
                 &target_db.fm_ambiguities,
@@ -3967,60 +4283,6 @@ fn fm_seed_candidate_windows_with_config(
                 );
             }
         }
-
-        // Exact two-sweep SSV-over-FM augmentation. The kernel needs the block's
-        // kind=0 (reversed-text, fmf) and kind=1 (forward-text, fmb) indices as a
-        // bi-directional pair. `FmIndex` carries C's `occCnts_sb`/`occCnts_b`
-        // sampled rank, so `occ` is O(FREQ_CNT_B) and the exhaustive `FM_Recurse`
-        // traversal is tractable on genome-scale blocks.
-        // Exact two-sweep SSV-over-FM augmentation, both strands. `record` is the
-        // current strand's own record (kind=0 Watson, kind=1 Crick); the kernel
-        // always needs the bi-directional pair fmf=kind0 (reversed text) +
-        // fmb=kind1 (forward text). Extended diagonals are filtered by C's
-        // `sc_thresh` inside the augment, so the kernel's extra seeds don't leak
-        // through the lenient seed-then-rescore window gate.
-        let sibling_kind = if is_complement { 0 } else { 1 };
-        if let Some(sibling) = target_db
-            .fm_index_records
-            .iter()
-            .find(|r| r.block_id == record.block_id && r.kind == sibling_kind)
-        {
-            let (fmf, fmb) = if is_complement {
-                (&sibling.fm, &record.fm)
-            } else {
-                (&record.fm, &sibling.fm)
-            };
-            let mut augment_windows = Vec::new();
-            let c_faithful = fm_ssv_augment_windows(
-                fmf,
-                fmb,
-                record,
-                &target_db.fm_ambiguities,
-                &target_db.fm_sequence_meta,
-                seq_idx,
-                seq,
-                hmm,
-                bg,
-                config,
-                is_complement,
-                max_length,
-                f1,
-                desired_len,
-                &mut augment_windows,
-            );
-            if c_faithful && !augment_windows.is_empty() {
-                // The C-faithful augment alone reproduces C `p7_SSVFM_longlarget`'s
-                // window list, so discard the Rust-only seed sources for this
-                // block. (When the augment legitimately finds nothing — e.g. a
-                // model too short for the FM seeding constraints — we keep the
-                // Rust-only seeds rather than forcing an empty list, preserving
-                // pre-existing behavior for those degenerate cases.)
-                augment_c_faithful = true;
-                windows = augment_windows;
-            } else {
-                windows.extend(augment_windows);
-            }
-        }
     }
 
     if windows.is_empty() {
@@ -4067,17 +4329,7 @@ fn fm_finalize_seed_windows(
             .cmp(&(b.window.n, b.window.length, b.window.k))
             .then_with(|| b.score_bits.total_cmp(&a.score_bits))
     });
-    let mut deduped = Vec::with_capacity(windows.len());
-    for scored in windows {
-        if deduped
-            .last()
-            .is_some_and(|prev: &NhmmerScoredCandidateWindow| prev.window == scored.window)
-        {
-            continue;
-        }
-        deduped.push(scored);
-    }
-    let mut windows = deduped;
+    windows.dedup_by(|next, prev| next.window == prev.window);
     windows.sort_by(|a, b| {
         b.score_bits
             .total_cmp(&a.score_bits)
@@ -4201,20 +4453,30 @@ fn fm_convert_range_to_dsq(
             .checked_sub(1)?;
     }
     let end = first.checked_add(length)?;
-    if end > record.text.len() {
+    if end > record.text_len {
         return None;
     }
 
     let mut dsq = Vec::with_capacity(length + 2);
     dsq.push(DSQ_SENTINEL);
-    for &base in &record.text[first..end] {
-        dsq.push(match base {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' | b'U' | b'u' => 3,
-            _ => 0,
-        });
+    if let Some(packed_text) = &record.mapped_packed_text {
+        for pos in first..end {
+            dsq.push(packed_dna_quad_dsq_at_mapped(packed_text, pos)?);
+        }
+    } else if !record.packed_text.is_empty() {
+        for pos in first..end {
+            dsq.push(packed_dna_quad_dsq_at(&record.packed_text, pos)?);
+        }
+    } else {
+        for &base in &record.text[first..end] {
+            dsq.push(match base {
+                b'A' | b'a' => 0,
+                b'C' | b'c' => 1,
+                b'G' | b'g' => 2,
+                b'T' | b't' | b'U' | b'u' => 3,
+                _ => 0,
+            });
+        }
     }
     dsq.push(DSQ_SENTINEL);
 
@@ -4333,6 +4595,16 @@ fn complement_dna_dsq(code: u8) -> u8 {
         3 => 0,
         _ => code,
     }
+}
+
+fn packed_dna_quad_dsq_at(packed: &[u8], pos: usize) -> Option<u8> {
+    let byte = *packed.get(pos / 4)?;
+    Some((byte >> (6 - ((pos & 0x3) * 2))) & 0b11)
+}
+
+fn packed_dna_quad_dsq_at_mapped(packed: &MappedPackedBytes, pos: usize) -> Option<u8> {
+    let byte = packed.byte_at(pos / 4)?;
+    Some((byte >> (6 - ((pos & 0x3) * 2))) & 0b11)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4465,7 +4737,7 @@ fn fm_window_from_diag(
         n: seq_seed_start + 1,
         length: seed_len,
         k: model_end,
-        fm_frame: (record.seq_count > 1).then_some(NhmmerCandidateFmFrame {
+        fm_frame: Some(NhmmerCandidateFmFrame {
             fm_n: fm_pos as i64,
             id: pos.segment_id as i32,
             target_len: seq_len,
@@ -4480,6 +4752,53 @@ fn fm_window_from_diag(
         window,
         score_bits: diag.score,
     })
+}
+
+/// Convert an FM-coordinate diagonal into whichever original sequence segment
+/// it belongs to, matching C `FM_window_from_diag()`'s block-level use.
+fn fm_window_from_diag_any_segment(
+    record: &NhmmerFmIndexRecord,
+    seq_meta: &[NhmmerFmSequenceMeta],
+    diag: &crate::simd::fm_ssv::FmDiag,
+) -> Option<(usize, NhmmerScoredCandidateWindow)> {
+    if diag.length <= 0 || diag.n < 0 || !diag.score.is_finite() {
+        return None;
+    }
+    let is_complement = diag.complementarity == crate::simd::fm_ssv::Complementarity::Complement;
+    let seed_len = diag.length as usize;
+    let fm_pos = diag.n as usize;
+    let model_end = (diag.k + diag.length - 1) as usize;
+    let pos = fm_get_original_position(record, seq_meta, seed_len, is_complement, fm_pos)?;
+    if pos.seg_pos == 0 {
+        return None;
+    }
+    let seq_len = seq_meta.get(pos.segment_id)?.length;
+    let seq_seed_start = pos.seg_pos - 1;
+    if seq_seed_start >= seq_len {
+        return None;
+    }
+    let window = NhmmerCandidateWindow {
+        n: seq_seed_start + 1,
+        length: seed_len,
+        k: model_end,
+        fm_frame: Some(NhmmerCandidateFmFrame {
+            fm_n: fm_pos as i64,
+            id: pos.segment_id as i32,
+            target_len: seq_len,
+            fm_start: seq_meta
+                .get(pos.segment_id)
+                .map(|meta| meta.fm_start as i64)
+                .unwrap_or(0),
+            fm_bwt_len: record.fm.bwt_len() as i64,
+        }),
+    };
+    Some((
+        pos.segment_id,
+        NhmmerScoredCandidateWindow {
+            window,
+            score_bits: diag.score,
+        },
+    ))
 }
 
 /// Faithful Rust counterpart of C `FM_extendSeed()`: compute the candidate
@@ -4535,9 +4854,9 @@ fn fm_extend_seed(
     let mut max_hit_end: i64 = n as i64;
 
     while k <= model_end {
-        let c = tmp_sq.get(n).copied().unwrap_or(0) as usize;
+        let c = tmp_sq[n] as usize;
         let cidx = (k as usize) * kp + c;
-        sc += scores.scores.get(cidx).copied().unwrap_or(0.0);
+        sc += scores.scores[cidx];
         if sc < 0.0 {
             sc = 0.0;
             hit_start = n as i64 + 1;
@@ -4590,6 +4909,137 @@ fn fm_extend_seed(
 /// pre-merge / window gate (`fm_finalize_seed_windows`), matching C's residue
 /// counters. Returns `false` for the fallback (seed-then-rescore) path, where
 /// those Rust-specific guards stay in place.
+#[allow(clippy::too_many_arguments)]
+fn fm_ssv_collect_block_windows(
+    fmf: &FmIndex,
+    fmb: &FmIndex,
+    record: &NhmmerFmIndexRecord,
+    ambiguities: &[(usize, usize)],
+    seq_meta: &[NhmmerFmSequenceMeta],
+    hmm: &Hmm,
+    bg: &Bg,
+    config: NhmmerFmSeedConfig,
+    is_complement: bool,
+    max_length: i32,
+    f1: f64,
+) -> Option<Vec<Vec<NhmmerScoredCandidateWindow>>> {
+    use crate::simd::fm_ssv;
+    let m = hmm.m;
+    if m == 0 || !record.has_text() {
+        return None;
+    }
+    let kp = 4usize;
+    let ln2 = std::f32::consts::LN_2;
+
+    let mut scores = fm_ssv::SsvScores::new(m as i32, kp);
+    let mut best_sc_sum = 0.0f64;
+    for k in 1..=m {
+        let mut best = 0.0f32;
+        for x in 0..kp {
+            let p = hmm
+                .mat
+                .get(k)
+                .and_then(|r| r.get(x))
+                .copied()
+                .unwrap_or(0.0);
+            let q = bg.f.get(x).copied().unwrap_or(0.0);
+            let v = if p > 0.0 && q > 0.0 {
+                ((p as f64) / (q as f64)).ln() as f32
+            } else {
+                -1.0e9
+            };
+            scores.set(k as i32, x, v);
+            if v > best {
+                best = v;
+            }
+        }
+        best_sc_sum += best as f64;
+    }
+
+    let cons_bytes = nhmmer_consensus_bytes(hmm);
+    let mut consensus = vec![0usize; m + 1];
+    for (i, &b) in cons_bytes.iter().enumerate().take(m) {
+        consensus[i + 1] = match b {
+            b'C' => 1,
+            b'G' => 2,
+            b'T' => 3,
+            _ => 0,
+        };
+    }
+
+    let best_sc_avg = (best_sc_sum / (m as f64).sqrt()).max(5.0);
+    let ratio = (best_sc_avg / 7.0).min(1.0) as f32;
+    let sc_thresh_fm = config.score_threshold_bits * ratio * ln2;
+    let fm_config = fm_ssv::FmSsvConfig {
+        max_depth: config.max_depth,
+        drop_max_len: config.drop_max_len,
+        drop_lim: config.drop_lim_bits * ln2,
+        consec_pos_req: config.consec_pos_req,
+        consensus_match_req: config.consensus_match_req,
+        score_density_req: config.score_density_bits * ln2,
+        ssv_length: config.ssv_length.max(1),
+    };
+
+    let sc_thresh_bits = {
+        let ml = max_length.max(1) as f32;
+        let tloop_total = (ml / (ml + 3.0)).ln() * ml;
+        let tmove = (3.0 / (ml + 3.0)).ln();
+        let tbmk = (2.0 / (m as f32 * (m as f32 + 1.0))).ln();
+        let tec = (1.0f32 / 2.0).ln();
+        let mut bg_ml = bg.clone();
+        bg_ml.set_length(ml as usize);
+        let nullsc = bg_ml.null_one(ml as usize);
+        let mmu = hmm.evparam[p7hmm::P7_MMU] as f64;
+        let mlambda = hmm.evparam[p7hmm::P7_MLAMBDA] as f64;
+        let inv_p = hmmer_pure_rs::stats::gumbel::invsurv(f1, mmu, mlambda) as f32;
+        let sc_thresh_nats = inv_p * ln2 + nullsc - (tmove + tloop_total + tmove + tbmk + tec);
+        sc_thresh_nats / ln2
+    };
+
+    let want = if is_complement {
+        fm_ssv::Complementarity::Complement
+    } else {
+        fm_ssv::Complementarity::NoComplement
+    };
+    let alph = fm_ssv::FmAlphabet::dna();
+    let diags = fm_ssv::fm_get_seeds(
+        fmf,
+        fmb,
+        &alph,
+        &scores,
+        &consensus,
+        sc_thresh_fm,
+        &fm_config,
+        !is_complement,
+        is_complement,
+    );
+
+    let mut out: Vec<Vec<NhmmerScoredCandidateWindow>> =
+        (0..seq_meta.len()).map(|_| Vec::new()).collect();
+    let fm_n = record.fm.bwt_len() as i64;
+    for mut diag in diags {
+        if diag.complementarity != want || diag.length <= 0 || diag.k < 1 {
+            continue;
+        }
+        if !fm_extend_seed(&mut diag, record, ambiguities, &scores, &fm_config, fm_n) {
+            continue;
+        }
+        if diag.length <= 0 || diag.score < sc_thresh_bits * ln2 {
+            continue;
+        }
+        let model_end = (diag.k + diag.length - 1) as usize;
+        if model_end == 0 || model_end > hmm.m || diag.n < 0 {
+            continue;
+        }
+        if let Some((seq_idx, window)) = fm_window_from_diag_any_segment(record, seq_meta, &diag) {
+            if let Some(windows) = out.get_mut(seq_idx) {
+                windows.push(window);
+            }
+        }
+    }
+    Some(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fm_ssv_augment_windows(
     fmf: &FmIndex,
@@ -4716,7 +5166,7 @@ fn fm_ssv_augment_windows(
         /* bottom_only (Crick / Complement) */ is_complement,
     );
 
-    let c_faithful = !record.text.is_empty();
+    let c_faithful = record.has_text();
     let text_len = record.text_len as i64;
     // C's FM_DATA.N is the BWT length, including the terminal symbol. Rust
     // `FmIndex::n` stores only the biological text length, so use the serialized
@@ -4901,7 +5351,7 @@ fn fm_locate_seed_queries_recurse<'a>(
                     .then_with(|| queries[a].seed.model_end.cmp(&queries[b].seed.model_end))
                     .then_with(|| queries[a].seed.bases.cmp(&queries[b].seed.bases))
             });
-            let positions = fm.locate_interval(interval);
+            let positions = fm.locate_interval_limited(interval, limit - located.len());
             for query_id in terminals {
                 let terminal_query = &queries[query_id];
                 for &fm_pos in &positions {
@@ -5429,7 +5879,7 @@ fn fm_model_consensus_seed_dfs(
             bases: current.clone(),
             model_end: start0 + len,
         };
-        for fm_pos in fm.locate_interval(child_interval) {
+        for fm_pos in fm.locate_interval_limited(child_interval, limit - located.len()) {
             located.push((seed.clone(), fm_pos));
             if located.len() >= limit {
                 current.pop();
@@ -5773,7 +6223,7 @@ fn fm_model_score_seed_dfs(
                 bases: current.clone(),
                 model_end: start + len - 1,
             };
-            for fm_pos in fm.locate_interval(child_interval) {
+            for fm_pos in fm.locate_interval_limited(child_interval, limit - located.len()) {
                 located.push((seed.clone(), fm_pos));
                 if located.len() >= limit {
                     current.pop();
@@ -5871,7 +6321,7 @@ fn fm_model_score_seed_reverse_dfs(
                 bases: current_rev.iter().rev().copied().collect(),
                 model_end: end,
             };
-            for fm_pos in fm.locate_interval(child_interval) {
+            for fm_pos in fm.locate_interval_limited(child_interval, limit - located.len()) {
                 located.push((seed.clone(), fm_pos));
                 if located.len() >= limit {
                     current_rev.pop();
@@ -6197,7 +6647,20 @@ struct NhmmerFmRecord {
     occ_b_count: usize,
     occ_sb_offset: usize,
     occ_sb_count: usize,
+    freq_sa: usize,
     freq_cnt_b: usize,
+    bwt_len: usize,
+    packed_bwt_offset: usize,
+    packed_bwt_bytes: usize,
+    packed_bwt: Vec<u8>,
+    packed_text_offset: usize,
+    packed_text_bytes: usize,
+    packed_text: Vec<u8>,
+    raw_sa_offset: usize,
+    raw_sa_count: usize,
+    raw_sa_samples: Vec<i32>,
+    occ_b_codes: Vec<u16>,
+    occ_sb_codes: Vec<u32>,
     text: Vec<u8>,
 }
 
@@ -6307,6 +6770,7 @@ fn read_makehmmerdb_c_fm_record(
     freq_cnt_b: usize,
     has_text_and_sa: bool,
     payload_base_offset: usize,
+    read_raw_sa_samples: bool,
 ) -> Result<NhmmerFmRecord, String> {
     if freq_sa == 0 {
         return Err("makehmmerdb FM-index suffix-array sampling frequency is zero".to_string());
@@ -6322,8 +6786,11 @@ fn read_makehmmerdb_c_fm_record(
     let seq_count = read_u32(cursor)? as usize;
     let ambig_count = read_u32(cursor)? as usize;
 
-    let mut text = Vec::new();
+    let mut packed_text = Vec::new();
+    let mut raw_sa_samples = Vec::new();
     let packed_len = n.div_ceil(4);
+    let mut packed_text_offset = 0usize;
+    let mut packed_text_bytes = 0usize;
     let text_bytes = if has_text_and_sa { packed_len } else { 0 };
     let bwt_bytes = packed_len;
     let sa_count = if has_text_and_sa {
@@ -6361,27 +6828,63 @@ fn read_makehmmerdb_c_fm_record(
     }
 
     if has_text_and_sa {
-        text = unpack_dna_quads(cursor, n)?;
+        packed_text_offset = payload_base_offset
+            .checked_add(cursor.position() as usize)
+            .ok_or_else(|| "makehmmerdb FM-index text offset overflows usize".to_string())?;
+        packed_text_bytes = text_bytes;
+        if read_raw_sa_samples {
+            packed_text = read_packed_dna_quads(cursor, n)?;
+        } else {
+            advance_makehmmerdb_cursor(cursor, text_bytes)?;
+        }
         if n == 0 {
             return Err("makehmmerdb FM-index text record is missing terminal symbol".to_string());
         }
     }
-    advance_makehmmerdb_cursor(cursor, bwt_bytes)?;
+    let packed_bwt_offset = payload_base_offset
+        .checked_add(cursor.position() as usize)
+        .ok_or_else(|| "makehmmerdb FM-index BWT offset overflows usize".to_string())?;
+    let packed_bwt_bytes = bwt_bytes;
+    let packed_bwt = if read_raw_sa_samples {
+        read_packed_dna_quads(cursor, n)?
+    } else {
+        advance_makehmmerdb_cursor(cursor, bwt_bytes)?;
+        Vec::new()
+    };
+    if term_loc >= n {
+        return Err("makehmmerdb FM-index terminal location is outside BWT".to_string());
+    }
+    let raw_sa_offset = payload_base_offset
+        .checked_add(cursor.position() as usize)
+        .ok_or_else(|| "makehmmerdb FM-index suffix-array offset overflows usize".to_string())?;
     if has_text_and_sa {
-        advance_makehmmerdb_cursor(cursor, sa_bytes)?;
+        if read_raw_sa_samples {
+            raw_sa_samples.reserve(sa_count);
+            for _ in 0..sa_count {
+                raw_sa_samples.push(read_i32(cursor)?);
+            }
+        } else {
+            advance_makehmmerdb_cursor(cursor, sa_bytes)?;
+        }
     }
     let occ_b_offset = payload_base_offset
         .checked_add(cursor.position() as usize)
         .ok_or_else(|| {
             "makehmmerdb FM-index occurrence table offset overflows usize".to_string()
         })?;
-    advance_makehmmerdb_cursor(cursor, occ_b_bytes)?;
+    let mut occ_b_codes = Vec::with_capacity(occ_b_count);
+    for _ in 0..occ_b_count {
+        occ_b_codes.push(read_u16(cursor)?);
+    }
     let occ_sb_offset = payload_base_offset
         .checked_add(cursor.position() as usize)
         .ok_or_else(|| {
             "makehmmerdb FM-index superblock occurrence table offset overflows usize".to_string()
         })?;
-    advance_makehmmerdb_cursor(cursor, occ_sb_bytes)?;
+    let mut occ_sb_codes = Vec::with_capacity(occ_sb_count);
+    for _ in 0..occ_sb_count {
+        occ_sb_codes.push(read_u32(cursor)?);
+    }
 
     if has_text_and_sa {
         Ok(NhmmerFmRecord {
@@ -6396,8 +6899,21 @@ fn read_makehmmerdb_c_fm_record(
             occ_b_count,
             occ_sb_offset,
             occ_sb_count,
+            freq_sa,
             freq_cnt_b,
-            text,
+            bwt_len: n,
+            packed_bwt_offset,
+            packed_bwt_bytes,
+            packed_bwt,
+            packed_text_offset,
+            packed_text_bytes,
+            packed_text,
+            raw_sa_offset,
+            raw_sa_count: sa_count,
+            raw_sa_samples,
+            occ_b_codes,
+            occ_sb_codes,
+            text: Vec::new(),
         })
     } else {
         Ok(NhmmerFmRecord {
@@ -6412,10 +6928,83 @@ fn read_makehmmerdb_c_fm_record(
             occ_b_count,
             occ_sb_offset,
             occ_sb_count,
+            freq_sa,
             freq_cnt_b,
+            bwt_len: n,
+            packed_bwt_offset,
+            packed_bwt_bytes,
+            packed_bwt,
+            packed_text_offset,
+            packed_text_bytes,
+            packed_text,
+            raw_sa_offset,
+            raw_sa_count: sa_count,
+            raw_sa_samples,
+            occ_b_codes,
+            occ_sb_codes,
             text: Vec::new(),
         })
     }
+}
+
+fn unpack_dna_quads_range(packed: &[u8], start: usize, len: usize) -> Result<Vec<u8>, String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| "packed FM DNA text range overflows usize".to_string())?;
+    if packed.len() < end.div_ceil(4) {
+        return Err("packed FM DNA text range is truncated".to_string());
+    }
+    let mut out = Vec::with_capacity(len);
+    for pos in start..end {
+        out.push(
+            match packed_dna_quad_dsq_at(packed, pos)
+                .ok_or_else(|| "packed FM DNA text range is truncated".to_string())?
+            {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => unreachable!(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn unpack_mapped_dna_quads_range(
+    packed: &MappedPackedBytes,
+    start: usize,
+    len: usize,
+) -> Result<Vec<u8>, String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| "packed FM DNA text range overflows usize".to_string())?;
+    if packed.len < end.div_ceil(4) {
+        return Err("packed FM DNA text range is truncated".to_string());
+    }
+    let mut out = Vec::with_capacity(len);
+    for pos in start..end {
+        out.push(
+            match packed_dna_quad_dsq_at_mapped(packed, pos)
+                .ok_or_else(|| "packed FM DNA text range is truncated".to_string())?
+            {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => unreachable!(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn read_packed_dna_quads<R: Read>(cursor: &mut R, len: usize) -> Result<Vec<u8>, String> {
+    let mut packed = vec![0u8; len.div_ceil(4)];
+    cursor
+        .read_exact(&mut packed)
+        .map_err(|e| format!("truncated packed FM DNA text: {e}"))?;
+    Ok(packed)
 }
 
 fn advance_makehmmerdb_cursor(cursor: &mut Cursor<&[u8]>, byte_count: usize) -> Result<(), String> {
@@ -6425,29 +7014,6 @@ fn advance_makehmmerdb_cursor(cursor: &mut Cursor<&[u8]>, byte_count: usize) -> 
         .ok_or_else(|| "makehmmerdb FM-index record payload is truncated".to_string())?;
     cursor.set_position(next as u64);
     Ok(())
-}
-
-fn unpack_dna_quads<R: Read>(cursor: &mut R, len: usize) -> Result<Vec<u8>, String> {
-    let mut packed = vec![0u8; len.div_ceil(4)];
-    cursor
-        .read_exact(&mut packed)
-        .map_err(|e| format!("truncated packed FM DNA text: {e}"))?;
-    let mut out = Vec::with_capacity(len);
-    for byte in packed {
-        for shift in [6, 4, 2, 0] {
-            if out.len() == len {
-                break;
-            }
-            out.push(match (byte >> shift) & 0b11 {
-                0 => b'A',
-                1 => b'C',
-                2 => b'G',
-                3 => b'T',
-                _ => unreachable!(),
-            });
-        }
-    }
-    Ok(out)
 }
 
 fn read_nul_string<R: Read>(cursor: &mut R, len: usize) -> Result<String, String> {
@@ -6579,6 +7145,112 @@ impl Default for NhmmerBiasWindowLengths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_raw_fm_record(text: &[u8], freq_sa: usize, freq_cnt_b: usize) -> NhmmerFmRecord {
+        test_raw_fm_record_with_target_text(text, text, freq_sa, freq_cnt_b)
+    }
+
+    fn test_raw_fm_record_with_target_text(
+        fm_text: &[u8],
+        target_text: &[u8],
+        freq_sa: usize,
+        freq_cnt_b: usize,
+    ) -> NhmmerFmRecord {
+        let fm = FmIndex::build(fm_text);
+        let raw_bwt = fm.bwt.clone();
+        let term_loc = raw_bwt
+            .iter()
+            .position(|&ch| ch == 0)
+            .expect("test FM index must contain sentinel");
+        let raw_sa_samples: Vec<i32> = fm
+            .sa
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &pos)| {
+                (row % freq_sa == 0).then_some(if pos as usize == fm_text.len() {
+                    -1
+                } else {
+                    pos
+                })
+            })
+            .collect();
+
+        let mut occ_b_codes = Vec::new();
+        let nb = raw_bwt.len().div_ceil(freq_cnt_b) + 1;
+        for row in 0..nb {
+            let pos = (row * freq_cnt_b).min(raw_bwt.len());
+            let sb_start = (pos / 65_536) * 65_536;
+            occ_b_codes.extend(test_raw_fm_counts(&raw_bwt[sb_start..pos]));
+        }
+        let mut occ_sb_codes = Vec::new();
+        let nsb = raw_bwt.len().div_ceil(65_536) + 1;
+        for row in 0..nsb {
+            let pos = (row * 65_536).min(raw_bwt.len());
+            occ_sb_codes.extend(
+                test_raw_fm_counts(&raw_bwt[..pos])
+                    .into_iter()
+                    .map(|count| count as u32),
+            );
+        }
+
+        NhmmerFmRecord {
+            term_loc,
+            seq_offset: 0,
+            seq_count: 1,
+            ambig_offset: 0,
+            ambig_count: 0,
+            overlap_bases: 0,
+            text_bases_len: target_text.len(),
+            occ_b_offset: 0,
+            occ_b_count: occ_b_codes.len(),
+            occ_sb_offset: 0,
+            occ_sb_count: occ_sb_codes.len(),
+            freq_sa,
+            freq_cnt_b,
+            bwt_len: raw_bwt.len(),
+            packed_bwt_offset: 0,
+            packed_bwt_bytes: raw_bwt.len().div_ceil(4),
+            packed_bwt: test_pack_raw_bwt(&raw_bwt),
+            packed_text_offset: 0,
+            packed_text_bytes: target_text.len().div_ceil(4),
+            packed_text: test_pack_raw_bwt(target_text),
+            raw_sa_offset: 0,
+            raw_sa_count: raw_sa_samples.len(),
+            raw_sa_samples,
+            occ_b_codes,
+            occ_sb_codes,
+            text: target_text.to_vec(),
+        }
+    }
+
+    fn test_raw_fm_counts(bytes: &[u8]) -> [u16; 4] {
+        let mut counts = [0u16; 4];
+        for &byte in bytes {
+            match byte {
+                0 | b'A' => counts[0] += 1,
+                b'C' => counts[1] += 1,
+                b'G' => counts[2] += 1,
+                b'T' => counts[3] += 1,
+                _ => {}
+            }
+        }
+        counts
+    }
+
+    fn test_pack_raw_bwt(raw_bwt: &[u8]) -> Vec<u8> {
+        let mut packed = vec![0u8; raw_bwt.len().div_ceil(4)];
+        for (idx, &byte) in raw_bwt.iter().enumerate() {
+            let code = match byte {
+                0 | b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
+                _ => unreachable!(),
+            };
+            packed[idx / 4] |= code << (6 - ((idx & 0x3) * 2));
+        }
+        packed
+    }
 
     #[test]
     fn search_dfam_query_accession_uses_dash_when_absent() {
@@ -6752,21 +7424,7 @@ mod tests {
         let mut positions = records[0].fm.locate(b"TGC");
         positions.sort();
         assert_eq!(positions, vec![0, 4]);
-        let blocks = vec![NhmmerFmRecord {
-            term_loc: 0,
-            seq_offset: 0,
-            seq_count: 1,
-            ambig_offset: 0,
-            ambig_count: 0,
-            overlap_bases: 0,
-            text_bases_len: 8,
-            occ_b_offset: 0,
-            occ_b_count: 0,
-            occ_sb_offset: 0,
-            occ_sb_count: 0,
-            freq_cnt_b: 8,
-            text: b"ACGTACGT".to_vec(),
-        }];
+        let blocks = vec![test_raw_fm_record(b"ACGTACGT", 4, 8)];
         validate_makehmmerdb_index_records(&records, &blocks, true, 0).unwrap();
     }
 
@@ -6900,14 +7558,14 @@ mod tests {
     #[test]
     fn makehmmerdb_c_fm_record_rejects_zero_sampling_frequencies() {
         let mut empty = Cursor::new([].as_slice());
-        let err = read_makehmmerdb_c_fm_record(&mut empty, 0, 8, true, 0).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 0, 8, true, 0, true).unwrap_err();
         assert!(
             err.contains("suffix-array sampling frequency is zero"),
             "unexpected error: {err}"
         );
 
         let mut empty = Cursor::new([].as_slice());
-        let err = read_makehmmerdb_c_fm_record(&mut empty, 4, 0, true, 0).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut empty, 4, 0, true, 0, true).unwrap_err();
         assert!(
             err.contains("occurrence sampling frequency is zero"),
             "unexpected error: {err}"
@@ -6929,9 +7587,10 @@ mod tests {
         bytes.extend(std::iter::repeat_n(0u8, 8 * 4));
         let mut cursor = Cursor::new(bytes.as_slice());
 
-        let record = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0).unwrap();
+        let record = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0, true).unwrap();
         assert_eq!(record.text_bases_len, 5);
-        assert_eq!(&record.text[..4], b"ACGT");
+        assert_eq!(record.text, Vec::<u8>::new());
+        assert_eq!(record.packed_text, vec![0b00011011, 0]);
     }
 
     #[test]
@@ -6943,7 +7602,7 @@ mod tests {
         }
         let mut cursor = Cursor::new(bytes.as_slice());
 
-        let err = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0).unwrap_err();
+        let err = read_makehmmerdb_c_fm_record(&mut cursor, 4, 8, true, 0, true).unwrap_err();
         assert!(
             err.contains("makehmmerdb FM-index record payload"),
             "unexpected error: {err}"
@@ -6982,6 +7641,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7013,6 +7674,8 @@ mod tests {
             text_start: 0,
             text_len: text.len(),
             text: Arc::from(text.to_vec()),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset: 0,
             seq_count: 2,
             ambig_offset: 0,
@@ -7071,6 +7734,8 @@ mod tests {
             text_start: 0,
             text_len: text.len(),
             text: Arc::from(text.to_vec()),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset: 0,
             seq_count: 2,
             ambig_offset: 0,
@@ -7165,6 +7830,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7251,6 +7918,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7323,6 +7992,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.clone()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7391,6 +8062,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.clone()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7566,6 +8239,8 @@ mod tests {
             text_start: 0,
             text_len: text.len(),
             text: Arc::from(text.to_vec()),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -7756,6 +8431,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7822,6 +8499,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.clone()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -7904,6 +8583,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.clone()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8393,6 +9074,8 @@ mod tests {
             text_start: 0,
             text_len: 12,
             text: Arc::from(b"ACGTACGTACGT".to_vec()),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -8459,6 +9142,8 @@ mod tests {
             text_start: 0,
             text_len: text.len(),
             text: Arc::from(text.to_vec()),
+            packed_text: Arc::from([]),
+            mapped_packed_text: None,
             seq_offset: 0,
             seq_count: 1,
             ambig_offset: 0,
@@ -8509,6 +9194,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8554,6 +9241,8 @@ mod tests {
                 text_start: 2,
                 text_len: block_text.len(),
                 text: Arc::from(block_text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8609,6 +9298,8 @@ mod tests {
                 text_start: 2,
                 text_len: block_text.len(),
                 text: Arc::from(block_text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8653,6 +9344,8 @@ mod tests {
                 text_start: 7,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8697,6 +9390,8 @@ mod tests {
                 text_start: 7,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8750,6 +9445,8 @@ mod tests {
                 text_start: 0,
                 text_len: text.len(),
                 text: Arc::from(text.to_vec()),
+                packed_text: Arc::from([]),
+                mapped_packed_text: None,
                 seq_offset: 0,
                 seq_count: 1,
                 ambig_offset: 0,
@@ -8787,23 +9484,20 @@ mod tests {
         hmm.name = "query".to_string();
         hmm.consensus = Some(vec![b' ', b'A', b'C', b'G', b'T', b' ']);
 
-        let fm_index_records = build_raw_c_stream_fm_index_records(
-            &[NhmmerFmRecord {
-                term_loc: 0,
-                seq_offset: 0,
-                seq_count: 1,
-                ambig_offset: 0,
-                ambig_count: 0,
-                overlap_bases: 0,
-                text_bases_len: text.len(),
-                occ_b_offset: 0,
-                occ_b_count: 0,
-                occ_sb_offset: 0,
-                occ_sb_count: 0,
-                freq_cnt_b: 8,
-                text: text.to_vec(),
-            }],
+        let mut reversed_text = text.to_vec();
+        reversed_text.reverse();
+        let mut records_by_block = vec![test_raw_fm_record_with_target_text(
+            &reversed_text,
+            text,
+            4,
+            8,
+        )];
+        let mut reverse_records_by_block = vec![Some(test_raw_fm_record(text, 4, 8))];
+        let (fm_index_records, _) = build_raw_c_stream_fm_index_records(
+            &mut records_by_block,
+            &mut reverse_records_by_block,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(fm_index_records.len(), 2);
@@ -8851,23 +9545,20 @@ mod tests {
         hmm.name = "query".to_string();
         hmm.consensus = Some(vec![b' ', b'A', b'A', b'G', b' ']);
 
-        let fm_index_records = build_raw_c_stream_fm_index_records(
-            &[NhmmerFmRecord {
-                term_loc: 0,
-                seq_offset: 0,
-                seq_count: 1,
-                ambig_offset: 0,
-                ambig_count: 0,
-                overlap_bases: 0,
-                text_bases_len: text.len(),
-                occ_b_offset: 0,
-                occ_b_count: 0,
-                occ_sb_offset: 0,
-                occ_sb_count: 0,
-                freq_cnt_b: 8,
-                text: text.to_vec(),
-            }],
+        let mut reversed_text = text.to_vec();
+        reversed_text.reverse();
+        let mut records_by_block = vec![test_raw_fm_record_with_target_text(
+            &reversed_text,
+            text,
+            4,
+            8,
+        )];
+        let mut reverse_records_by_block = vec![Some(test_raw_fm_record(text, 4, 8))];
+        let (fm_index_records, _) = build_raw_c_stream_fm_index_records(
+            &mut records_by_block,
+            &mut reverse_records_by_block,
             false,
+            None,
         )
         .unwrap();
         let target_db = NhmmerTargetDb {
@@ -9759,6 +10450,11 @@ fn p7_pipeline_longtarget(
             let mut prev_end: Option<usize> = None;
             for w in sub_windows {
                 let abs_n = msv_start + w.n - 1;
+                let fm_n = if msv.fm_n >= 0 {
+                    msv.fm_n + w.n as i64 - 1
+                } else {
+                    -1
+                };
                 let mut add = w.length as i64;
                 if let Some(pe) = prev_end {
                     if pe > abs_n {
@@ -9774,10 +10470,10 @@ fn p7_pipeline_longtarget(
                     score: w.score,
                     target_len: sq.n,
                     complement: is_complement,
-                    id: 0,
-                    fm_n: -1,
-                    fm_start: -1,
-                    fm_bwt_len: 0,
+                    id: msv.id,
+                    fm_n,
+                    fm_start: msv.fm_start,
+                    fm_bwt_len: msv.fm_bwt_len,
                 });
             }
         }
@@ -9816,9 +10512,25 @@ fn p7_pipeline_longtarget(
         }
 
         // Create window sub-sequence
-        let mut win_dsq = vec![DSQ_SENTINEL];
-        win_dsq.extend_from_slice(&sq.dsq[win_start..=win_end]);
-        win_dsq.push(DSQ_SENTINEL);
+        let win_dsq = if let Some(ctx) = fm_context.filter(|_| win.fm_n >= 0) {
+            let Some(win_dsq) = fm_convert_range_to_dsq(
+                ctx.record,
+                ctx.ambiguities,
+                win.fm_n as usize,
+                win_len,
+                win.complement,
+                true,
+            ) else {
+                fwd_overlap = 0;
+                continue;
+            };
+            win_dsq
+        } else {
+            let mut win_dsq = vec![DSQ_SENTINEL];
+            win_dsq.extend_from_slice(&sq.dsq[win_start..=win_end]);
+            win_dsq.push(DSQ_SENTINEL);
+            win_dsq
+        };
 
         let win_sq = Sequence {
             name: sq.name.clone(),

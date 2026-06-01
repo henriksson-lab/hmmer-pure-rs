@@ -282,7 +282,7 @@ run_pair alimask_pfam_dnaj 7 "$rust_bin" alimask --amino --modelrange 5..25 "$pf
 run_pair makehmmerdb_yeast_genome 4 "$rust_bin" makehmmerdb "$dna_fasta" "$rust_fm_index" \
   "$c_dir/makehmmerdb" "$dna_fasta" "$c_fm_index"
 
-run_pair hmmsearch_pfam_panel_yeast 7 "$rust_bin" search --noali --tblout "$out_dir/hmmsearch_pfam_panel_yeast.rust.tblout" "$rust_panel_db" "$protein_fasta" \
+run_pair hmmsearch_pfam_panel_yeast 7 "$rust_bin" search --tblout "$out_dir/hmmsearch_pfam_panel_yeast.rust.tblout" --noali "$rust_panel_db" "$protein_fasta" \
   "$c_dir/hmmsearch" --noali --tblout "$out_dir/hmmsearch_pfam_panel_yeast.c.tblout" "$c_panel_db" "$protein_fasta"
 run_pair hmmscan_pfam_panel_yeast 6 "$rust_bin" scan --tblout "$out_dir/hmmscan_pfam_panel_yeast.rust.tblout" "$rust_panel_db" "$protein_fasta_gz" \
   "$c_dir/hmmscan" --tblout "$out_dir/hmmscan_pfam_panel_yeast.c.tblout" "$c_panel_db" "$protein_fasta_gz"
@@ -296,6 +296,50 @@ run_pair nhmmer_trna_yeast_fm 6 "$rust_bin" nhmmer --tblout "$out_dir/nhmmer_trn
   "$c_dir/nhmmer" --tblout "$out_dir/nhmmer_trna_yeast_fm.c.tblout" "$dna_hmm" "$c_fm_index"
 run_pair nhmmscan_trna_yeast 6 "$rust_bin" nhmmscan --tblout "$out_dir/nhmmscan_trna_yeast.rust.tblout" "$rust_dna_db" "$dna_fasta" \
   "$c_dir/nhmmscan" --tblout "$out_dir/nhmmscan_trna_yeast.c.tblout" "$c_dna_db" "$dna_fasta"
+
+normalize_tblout_for_parity() {
+  local input="$1"
+  local output="$2"
+  sed -E \
+    -e 's#hmmer/src/(hmmsearch|hmmscan|phmmer|jackhmmer|nhmmer|nhmmscan)#\1#g' \
+    -e 's|^(# Date:            ).*|\1<normalized>|' \
+    -e 's#\.rust\.tblout#\.tblout#g' \
+    -e 's#\.c\.tblout#\.tblout#g' \
+    -e 's#/derived/rust\.#/derived/#g' \
+    -e 's#/derived/c\.#/derived/#g' \
+    "$input" > "$output"
+}
+
+write_tblout_parity() {
+  local parity_file="$out_dir/tblout_parity.tsv"
+  local case_name rust_tbl c_tbl rust_norm c_norm rust_rows c_rows status
+
+  printf "case\tstatus\trust_rows\tc_rows\n" > "$parity_file"
+  for rust_tbl in "$out_dir"/*.rust.tblout; do
+    [[ -f "$rust_tbl" ]] || continue
+    case_name="$(basename "$rust_tbl" .rust.tblout)"
+    c_tbl="$out_dir/${case_name}.c.tblout"
+    [[ -f "$c_tbl" ]] || continue
+
+    rust_norm="$out_dir/${case_name}.rust.normalized.tblout"
+    c_norm="$out_dir/${case_name}.c.normalized.tblout"
+    normalize_tblout_for_parity "$rust_tbl" "$rust_norm"
+    normalize_tblout_for_parity "$c_tbl" "$c_norm"
+    rust_rows="$(awk 'NF && $1 !~ /^#/ { n++ } END { print n + 0 }' "$rust_tbl")"
+    c_rows="$(awk 'NF && $1 !~ /^#/ { n++ } END { print n + 0 }' "$c_tbl")"
+
+    if cmp -s "$rust_norm" "$c_norm"; then
+      status="ok"
+    else
+      status="diff"
+      failures=$((failures + 1))
+      diff -u "$c_norm" "$rust_norm" > "$out_dir/${case_name}.normalized.diff" || true
+    fi
+    printf "%s\t%s\t%s\t%s\n" "$case_name" "$status" "$rust_rows" "$c_rows" >> "$parity_file"
+  done
+}
+
+write_tblout_parity
 
 if [[ "$failures" -ne 0 ]]; then
   echo "$failures realistic Rust/C comparison command(s) failed; see $out_dir/results.tsv" >&2
@@ -312,7 +356,6 @@ awk -F '\t' '
     rss[key, impl] = $7
   }
   END {
-    print "case\trust_wall_s\tc_wall_s\trust_vs_c_wall\trust_rss_kb\tc_rss_kb\trust_vs_c_rss"
     for (k in wall) {
       split(k, parts, SUBSEP)
       cases[parts[1]] = 1

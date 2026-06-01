@@ -9,10 +9,14 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
 use crate::alphabet::Dsq;
+#[cfg(target_arch = "x86_64")]
 use crate::bg::Bg;
 use crate::simd::oprofile::OProfile;
+#[cfg(target_arch = "x86_64")]
 use crate::stats;
+#[cfg(target_arch = "x86_64")]
 use crate::util::cmath::ESL_CONST_LOG2;
 
 /// A window hit from the SSV long-target filter.
@@ -81,14 +85,8 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
     let mut arr = vec![0u8; cell_cnt];
 
     for x in 0..kp {
-        if x >= om.rbv.len() {
-            break;
-        }
         let mut k = 1;
         for q in 0..nq {
-            if q >= om.rbv[x].len() {
-                break;
-            }
             let vec = &om.rbv[x][q];
             for z in 0..16 {
                 let idx = kp * (k + z * nq) + x;
@@ -209,10 +207,6 @@ pub unsafe fn p7_ssv_filter_longtarget(
     let mut i = 1usize;
     while i <= l {
         let x = dsq[i] as usize;
-        if x >= om.rbv.len() {
-            i += 1;
-            continue;
-        }
 
         let mut xe_v = _mm_setzero_si128();
 
@@ -221,12 +215,8 @@ pub unsafe fn p7_ssv_filter_longtarget(
 
         for q in 0..q_count {
             // Load emission score for this residue at this vector position
-            let rsc = if q < om.rbv[x].len() {
-                let bytes = om.rbv[x][q];
-                _mm_loadu_si128(bytes.as_ptr() as *const __m128i)
-            } else {
-                _mm_setzero_si128()
-            };
+            let bytes = om.rbv[x][q];
+            let rsc = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
 
             // sv = max(mpv, xBv): continue diagonal or start from B
             let mut sv = _mm_max_epu8(mpv, xb_v);
@@ -279,25 +269,18 @@ pub unsafe fn p7_ssv_filter_longtarget(
             // C: entry_cost = base_b - tjb_b - tbm_b (all uint8_t, subtraction in int)
             let entry_cost: i32 = om.base_b as i32 - tjb_b as i32 - om.tbm_b as i32;
 
-            // Match C msvfilter.c:385 exactly: no bounds check on start or
-            // target_start. C relies on `rem_sc <= entry_cost` firing before
-            // the indices go out of bounds. We use saturating subtraction so
-            // out-of-bounds access becomes a zero emission rather than a
-            // panic; entering this branch is rare enough in practice that
-            // the saturation should be neutral, but it matches C behavior
-            // when it does occur. Previously this loop had `start > 1 &&
-            // target_start > 1` guards that caused early termination on a
-            // few MADE1 peaks, perturbing the pre-merge SSV window list.
+            // Match C msvfilter.c:385: the score table is indexed directly.
+            // The remaining zero-bound break avoids Rust underflow if an invalid
+            // diagonal violates C's implicit "entry_cost fires first" invariant.
+            // Previously this loop had `start > 1 && target_start > 1` guards
+            // that caused early termination on a few MADE1 peaks, perturbing the
+            // pre-merge SSV window list.
             while rem_sc > entry_cost {
                 if start == 0 || target_start == 0 {
                     break;
                 }
                 let score_idx = start * kp + dsq[target_start] as usize;
-                let emission = if score_idx < ssv_scores.len() {
-                    ssv_scores[score_idx]
-                } else {
-                    0
-                };
+                let emission = ssv_scores[score_idx];
                 rem_sc -= om.bias_b as i32 - emission as i32;
                 start -= 1;
                 target_start -= 1;
@@ -316,11 +299,7 @@ pub unsafe fn p7_ssv_filter_longtarget(
             // Match C: `while (k<om->M && n<=L)` — k strictly less than M.
             while k < m && n <= l {
                 let score_idx = k * kp + dsq[n] as usize;
-                let emission = if score_idx < ssv_scores.len() {
-                    ssv_scores[score_idx]
-                } else {
-                    0
-                };
+                let emission = ssv_scores[score_idx];
                 running_sc += om.bias_b as i32 - emission as i32;
 
                 if running_sc >= max_sc {
@@ -537,9 +516,12 @@ pub fn p7_pli_extend_and_merge_windows(
     let base_frac = 0.1_f64;
     let ml = max_length as f64;
     for w in windows.iter_mut() {
-        let k = w.k.min(prefix_lengths.len().saturating_sub(1));
-        let prefix_k = (w.k.saturating_sub(w.length).saturating_add(1))
-            .min(prefix_lengths.len().saturating_sub(1));
+        debug_assert!(w.k < suffix_lengths.len());
+        debug_assert!(w.length <= w.k + 1);
+        debug_assert!(w.k + 1 - w.length < prefix_lengths.len());
+
+        let k = w.k;
+        let prefix_k = w.k + 1 - w.length;
         let pre_ext_f = ml * (base_frac + prefix_lengths[prefix_k] as f64);
         let suf_ext_f = ml * (base_frac + suffix_lengths[k] as f64);
 
@@ -695,6 +677,11 @@ pub fn split_long_windows(
             new_n += shift;
             new_len -= shift;
             let chunk = (max_window_len as i64).min(new_len);
+            let fm_n = if w.fm_n >= 0 {
+                w.fm_n + new_n - w.n as i64
+            } else {
+                -1
+            };
             out.push(HmmWindow {
                 n: new_n.max(0) as usize,
                 k: 0,
@@ -703,9 +690,9 @@ pub fn split_long_windows(
                 target_len: w.target_len,
                 complement: w.complement,
                 id: w.id,
-                fm_n: -1,
-                fm_start: -1,
-                fm_bwt_len: 0,
+                fm_n,
+                fm_start: w.fm_start,
+                fm_bwt_len: w.fm_bwt_len,
             });
             if new_len <= max_window_len as i64 {
                 break;
@@ -722,7 +709,7 @@ mod tests {
     fn win(n: usize, length: usize, complement: bool, id: i32) -> HmmWindow {
         HmmWindow {
             n,
-            k: 1,
+            k: length,
             length,
             score: 0.0,
             target_len: 1_000_000,

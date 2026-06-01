@@ -47,15 +47,14 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
     }
 
     let mut xn: i16 = om.base_w;
-    let mut xb: i16 = xn.saturating_add(om.xw[P7O_N][P7O_MOVE]);
+    let mut xb: i16 = add_i16(xn, om.xw[P7O_N][P7O_MOVE]);
     let mut xj: i16 = neg_inf;
     let mut xc: i16 = neg_inf;
 
     for i in 1..=l {
+        // Match C/SSE: rwv is built for every valid digital code and every
+        // dsq[1..=L] row advances unconditionally.
         let xi = dsq[i] as usize;
-        if xi >= om.abc_kp {
-            continue;
-        }
         let rsc = &om.rwv[xi];
 
         let mut dcv = vdupq_n_s16(neg_inf);
@@ -111,13 +110,10 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
             return NeonVitResult::Overflow;
         }
 
-        xn = xn.saturating_add(om.xw[P7O_N][P7O_LOOP]);
-        xc = (xc.saturating_add(om.xw[P7O_C][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_MOVE]));
-        xj = (xj.saturating_add(om.xw[P7O_J][P7O_LOOP]))
-            .max(xe.saturating_add(om.xw[P7O_E][P7O_LOOP]));
-        xb = (xj.saturating_add(om.xw[P7O_J][P7O_MOVE]))
-            .max(xn.saturating_add(om.xw[P7O_N][P7O_MOVE]));
+        xn = add_i16(xn, om.xw[P7O_N][P7O_LOOP]);
+        xc = add_i16(xc, om.xw[P7O_C][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_MOVE]));
+        xj = add_i16(xj, om.xw[P7O_J][P7O_LOOP]).max(add_i16(xe, om.xw[P7O_E][P7O_LOOP]));
+        xb = add_i16(xj, om.xw[P7O_J][P7O_MOVE]).max(add_i16(xn, om.xw[P7O_N][P7O_MOVE]));
 
         let dmax = vmaxvq_s16(dmaxv);
         if (dmax as i32) + (om.ddbound_w as i32) > (xb as i32) {
@@ -127,6 +123,22 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
                 dmx!(q) = vmaxq_s16(dcv, dmx!(q));
                 let tdd = vld1q_s16(om.twv[dd_offset + q].as_ptr());
                 dcv = vqaddq_s16(dmx!(q), tdd);
+            }
+            loop {
+                dcv = vextq_s16(vdupq_n_s16(neg_inf), dcv, 7);
+                let mut broke = false;
+                for q in 0..q_count {
+                    if !any_gt_s16(dcv, dmx!(q)) {
+                        broke = true;
+                        break;
+                    }
+                    dmx!(q) = vmaxq_s16(dcv, dmx!(q));
+                    let tdd = vld1q_s16(om.twv[dd_offset + q].as_ptr());
+                    dcv = vqaddq_s16(dmx!(q), tdd);
+                }
+                if broke {
+                    break;
+                }
             }
         } else {
             dcv = vextq_s16(vdupq_n_s16(neg_inf), dcv, 7);
@@ -142,6 +154,18 @@ pub unsafe fn neon_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonV
     } else {
         NeonVitResult::Ok(f32::NEG_INFINITY)
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn add_i16(a: i16, b: i16) -> i16 {
+    (a as i32 + b as i32) as i16
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn any_gt_s16(a: int16x8_t, b: int16x8_t) -> bool {
+    vmaxvq_u16(vcgtq_s16(a, b)) != 0
 }
 
 /// Non-aarch64 stub for [`neon_viterbi_filter`]; always returns `Ok(-inf)`.

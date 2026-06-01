@@ -2503,6 +2503,8 @@ fn nhmmscan_tblout_uses_model_length_and_dfamtblout_has_no_footer_like_c() {
     assert!(tbl.contains(" modlen"));
     assert!(!tbl.contains(" sq len"));
     assert!(tbl.contains("# Program:         nhmmscan\n"));
+    assert!(tbl.contains("# Option settings: nhmmscan --tblout "));
+    assert!(!tbl.contains("hmmer nhmmscan"));
     assert!(tbl.ends_with("# [ok]\n"));
 
     let dfam = std::fs::read_to_string(dfamtblout).unwrap();

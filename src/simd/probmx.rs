@@ -863,9 +863,7 @@ pub fn p_null2_odds_from_pmx(
         let mut val = 0.0_f32;
         for node in 1..=m {
             let odds_idx = x * (m + 1) + node;
-            if odds_idx < match_odds.len() {
-                val += exp_m[node] * match_odds[odds_idx];
-            }
+            val += exp_m[node] * match_odds[odds_idx];
         }
         val += insert_total + xfactor;
         null2[x] = val;
@@ -1277,7 +1275,6 @@ pub fn p_null2_odds_from_gmx_reuse(
         null2.resize(k, 1.0);
         let null2_ptr = null2.as_mut_ptr();
         let odds_ptr = match_odds.as_ptr();
-        let odds_len = match_odds.len();
         for x in 0..k {
             let mut val = 0.0_f32;
             for qi in 0..q {
@@ -1285,7 +1282,7 @@ pub fn p_null2_odds_from_gmx_reuse(
                 for lane in 0..4 {
                     let node = 1 + qi + lane * q;
                     let odds_idx = x * (m + 1) + node;
-                    if node <= m && odds_idx < odds_len {
+                    if node <= m {
                         val += *exp_m_ptr.add(ebase + lane) * *odds_ptr.add(odds_idx);
                     }
                 }
@@ -1409,7 +1406,6 @@ fn p_null2_odds_from_striped_pmx(
         let mut null2 = vec![1.0_f32; k];
         let null2_ptr = null2.as_mut_ptr();
         let odds_ptr = match_odds.as_ptr();
-        let odds_len = match_odds.len();
         for x in 0..k {
             let mut val = 0.0_f32;
             for qi in 0..q {
@@ -1417,7 +1413,7 @@ fn p_null2_odds_from_striped_pmx(
                 for lane in 0..4 {
                     let node = 1 + qi + lane * q;
                     let odds_idx = x * (m + 1) + node;
-                    if node <= m && odds_idx < odds_len {
+                    if node <= m {
                         val += *exp_m_ptr.add(ebase + lane) * *odds_ptr.add(odds_idx);
                     }
                 }
@@ -1546,7 +1542,6 @@ fn p_null2_odds_from_striped_pmx_reuse(
         null2.resize(k, 1.0);
         let null2_ptr = null2.as_mut_ptr();
         let odds_ptr = match_odds.as_ptr();
-        let odds_len = match_odds.len();
         for x in 0..k {
             let mut val = 0.0_f32;
             for qi in 0..q {
@@ -1554,7 +1549,7 @@ fn p_null2_odds_from_striped_pmx_reuse(
                 for lane in 0..4 {
                     let node = 1 + qi + lane * q;
                     let odds_idx = x * (m + 1) + node;
-                    if node <= m && odds_idx < odds_len {
+                    if node <= m {
                         val += *exp_m_ptr.add(ebase + lane) * *odds_ptr.add(odds_idx);
                     }
                 }

@@ -46,11 +46,7 @@ impl OProfileAvx2 {
                         // Look up the byte score from SSE2 profile
                         let sse_q = (node - 1) % crate::simd::oprofile::nqb(m);
                         let sse_z = (node - 1) / crate::simd::oprofile::nqb(m);
-                        if sse_z < 16 && sse_q < om.rbv[x].len() {
-                            tmp[z] = om.rbv[x][sse_q][sse_z];
-                        } else {
-                            tmp[z] = 255;
-                        }
+                        tmp[z] = om.rbv[x][sse_q][sse_z];
                     } else {
                         tmp[z] = 255;
                     }
@@ -146,9 +142,6 @@ pub unsafe fn avx2_msv_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2) -> Avx2M
         let tempv = _mm256_adds_epu8(xev, biasv);
         let tempv = _mm256_cmpeq_epi8(tempv, ceilingv);
         let cmp = _mm256_movemask_epi8(tempv);
-        if cmp != 0 {
-            return Avx2MsvResult::Overflow;
-        }
 
         // Horizontal max across all 32 bytes of xev
         // Reduce 256→128→64→32→16→8 bits
@@ -167,6 +160,10 @@ pub unsafe fn avx2_msv_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2) -> Avx2M
         // Broadcast
         let xev_scalar = _mm_extract_epi16::<0>(max128) as u16 as u8;
         xev = _mm256_set1_epi8(xev_scalar as i8);
+
+        if cmp != 0 {
+            return Avx2MsvResult::Overflow;
+        }
 
         xev = _mm256_subs_epu8(xev, tecv);
         xjv = _mm256_max_epu8(xjv, xev);

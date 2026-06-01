@@ -16,6 +16,45 @@ const FREQ_CNT_SB: usize = 65536;
 const FREQ_CNT_B: usize = 256;
 const DEFAULT_SA_SAMPLE_RATE: usize = 32;
 
+const PACKED_BYTE_EQ_COUNTS: [[u8; 256]; 4] = build_packed_byte_eq_counts();
+const PACKED_BYTE_LT_COUNTS: [[u8; 256]; 4] = build_packed_byte_lt_counts();
+
+const fn build_packed_byte_eq_counts() -> [[u8; 256]; 4] {
+    let mut table = [[0u8; 256]; 4];
+    let mut code = 0usize;
+    while code < 4 {
+        let mut byte = 0usize;
+        while byte < 256 {
+            let b = byte as u8;
+            table[code][byte] = (((b >> 6) & 0b11) == code as u8) as u8
+                + (((b >> 4) & 0b11) == code as u8) as u8
+                + (((b >> 2) & 0b11) == code as u8) as u8
+                + ((b & 0b11) == code as u8) as u8;
+            byte += 1;
+        }
+        code += 1;
+    }
+    table
+}
+
+const fn build_packed_byte_lt_counts() -> [[u8; 256]; 4] {
+    let mut table = [[0u8; 256]; 4];
+    let mut code = 0usize;
+    while code < 4 {
+        let mut byte = 0usize;
+        while byte < 256 {
+            let b = byte as u8;
+            table[code][byte] = (((b >> 6) & 0b11) < code as u8) as u8
+                + (((b >> 4) & 0b11) < code as u8) as u8
+                + (((b >> 2) & 0b11) < code as u8) as u8
+                + ((b & 0b11) < code as u8) as u8;
+            byte += 1;
+        }
+        code += 1;
+    }
+    table
+}
+
 pub struct MmapBytes {
     ptr: *const u8,
     len: usize,
@@ -115,6 +154,184 @@ struct MappedBwt {
     len: usize,
 }
 
+#[derive(Debug)]
+struct PackedDnaBwt {
+    bytes: Vec<u8>,
+    mapped_bytes: Option<Arc<MmapBytes>>,
+    mapped_offset: usize,
+    byte_len: usize,
+    len: usize,
+    term_loc: usize,
+}
+
+impl PackedDnaBwt {
+    #[inline]
+    fn byte_at(&self, idx: usize) -> Option<u8> {
+        if let Some(bytes) = &self.mapped_bytes {
+            bytes
+                .as_slice()
+                .get(self.mapped_offset.checked_add(idx)?)
+                .copied()
+        } else {
+            self.bytes.get(idx).copied()
+        }
+    }
+
+    fn validate_span(&self) -> Result<(), String> {
+        if self.byte_len != self.len.div_ceil(4) {
+            return Err("FM-index packed BWT has unexpected length".to_string());
+        }
+        if let Some(bytes) = &self.mapped_bytes {
+            self.mapped_offset
+                .checked_add(self.byte_len)
+                .filter(|&end| end <= bytes.as_slice().len())
+                .ok_or_else(|| "FM-index mapped packed BWT is outside mapped file".to_string())?;
+        } else if self.bytes.len() != self.byte_len {
+            return Err("FM-index packed BWT has unexpected length".to_string());
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn code_at(&self, pos: usize) -> u8 {
+        (self
+            .byte_at(pos / 4)
+            .expect("validated packed BWT position must be in range")
+            >> (6 - ((pos & 0x3) * 2)))
+            & 0b11
+    }
+
+    #[inline]
+    fn terminal_in_range(&self, start: usize, end: usize) -> usize {
+        usize::from(start <= self.term_loc && self.term_loc < end)
+    }
+
+    #[inline]
+    fn byte_count_eq(byte: u8, code: u8) -> usize {
+        PACKED_BYTE_EQ_COUNTS[code as usize][byte as usize] as usize
+    }
+
+    #[inline]
+    fn byte_count_lt(byte: u8, code: u8) -> usize {
+        PACKED_BYTE_LT_COUNTS[code as usize][byte as usize] as usize
+    }
+
+    #[inline]
+    fn count_code_eq(&self, mut start: usize, end: usize, code: u8) -> usize {
+        let mut count = 0usize;
+        while start < end && (start & 0x3) != 0 {
+            count += usize::from(self.code_at(start) == code);
+            start += 1;
+        }
+        while start + 4 <= end {
+            count += Self::byte_count_eq(
+                self.byte_at(start / 4)
+                    .expect("validated packed BWT position must be in range"),
+                code,
+            );
+            start += 4;
+        }
+        while start < end {
+            count += usize::from(self.code_at(start) == code);
+            start += 1;
+        }
+        count
+    }
+
+    #[inline]
+    fn count_code_lt(&self, mut start: usize, end: usize, code: u8) -> usize {
+        let mut count = 0usize;
+        while start < end && (start & 0x3) != 0 {
+            count += usize::from(self.code_at(start) < code);
+            start += 1;
+        }
+        while start + 4 <= end {
+            count += Self::byte_count_lt(
+                self.byte_at(start / 4)
+                    .expect("validated packed BWT position must be in range"),
+                code,
+            );
+            start += 4;
+        }
+        while start < end {
+            count += usize::from(self.code_at(start) < code);
+            start += 1;
+        }
+        count
+    }
+
+    #[inline]
+    fn count_eq(&self, start: usize, end: usize, ch: u8) -> usize {
+        match ch {
+            0 => self.terminal_in_range(start, end),
+            b'A' => self.count_code_eq(start, end, 0) - self.terminal_in_range(start, end),
+            b'C' => self.count_code_eq(start, end, 1),
+            b'G' => self.count_code_eq(start, end, 2),
+            b'T' => self.count_code_eq(start, end, 3),
+            _ => 0,
+        }
+    }
+
+    #[inline]
+    fn count_lt(&self, start: usize, end: usize, ch: u8) -> usize {
+        match ch {
+            0 => 0,
+            b'A' => self.terminal_in_range(start, end),
+            b'C' => self.count_code_lt(start, end, 1),
+            b'G' => self.count_code_lt(start, end, 2),
+            b'T' => self.count_code_lt(start, end, 3),
+            _ => end - start,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum RegularSaSamples {
+    InMemory {
+        positions: Vec<i32>,
+        freq_sa: usize,
+    },
+    Mapped {
+        bytes: Arc<MmapBytes>,
+        offset: usize,
+        count: usize,
+        freq_sa: usize,
+        text_len: usize,
+    },
+}
+
+impl RegularSaSamples {
+    fn position_for_row(&self, row: usize) -> Option<usize> {
+        match self {
+            RegularSaSamples::InMemory { positions, freq_sa } => {
+                if row % *freq_sa != 0 {
+                    return None;
+                }
+                positions.get(row / *freq_sa).map(|&pos| pos as usize)
+            }
+            RegularSaSamples::Mapped {
+                bytes,
+                offset,
+                count,
+                freq_sa,
+                text_len,
+            } => {
+                if row % *freq_sa != 0 {
+                    return None;
+                }
+                let idx = row / *freq_sa;
+                if idx >= *count {
+                    return None;
+                }
+                let offset = offset.checked_add(idx.checked_mul(4)?)?;
+                let chunk = bytes.as_slice().get(offset..offset + 4)?;
+                let pos = i32::from_le_bytes(chunk.try_into().ok()?);
+                Some(if pos < 0 { *text_len } else { pos as usize })
+            }
+        }
+    }
+}
+
 /// Two-level sampled rank tables over the BWT, mirroring C `FM_DATA`'s
 /// `occCnts_sb` (superblock cumulative) and `occCnts_b` (u16 within-superblock
 /// block cumulative). They make `Occ(c, pos)` O(`FREQ_CNT_B`) instead of O(pos).
@@ -203,8 +420,8 @@ impl OccRank {
         if freq_cnt_b == 0 {
             return Err("FM-index occurrence sampling frequency is zero".to_string());
         }
-        let nb = bwt_len / freq_cnt_b + 1;
-        let nsb = bwt_len / FREQ_CNT_SB + 1;
+        let nb = 1 + bwt_len.div_ceil(freq_cnt_b);
+        let nsb = 1 + bwt_len.div_ceil(FREQ_CNT_SB);
         if occ_b_codes.len() != nb * 4 {
             return Err("FM-index occurrence block table has unexpected length".to_string());
         }
@@ -262,10 +479,12 @@ pub struct FmIndex {
     /// Burrows-Wheeler transform
     pub bwt: Vec<u8>,
     mapped_bwt: Option<MappedBwt>,
+    packed_dna_bwt: Option<PackedDnaBwt>,
     /// Suffix array
     pub sa: Vec<i32>,
     /// Sparse suffix-array samples as `(BWT row, text position)`.
     sa_samples: Vec<(i32, i32)>,
+    regular_sa_samples: Option<RegularSaSamples>,
     mapped_sa: Option<MappedSa>,
     /// Count of each character in BWT prefix (C array)
     pub c: [usize; 256],
@@ -330,8 +549,10 @@ impl FmIndex {
         FmIndex {
             bwt,
             mapped_bwt: None,
+            packed_dna_bwt: None,
             sa,
             sa_samples: Vec::new(),
+            regular_sa_samples: None,
             mapped_sa: None,
             c,
             n: orig_n,
@@ -339,12 +560,373 @@ impl FmIndex {
         }
     }
 
+    /// Build an FM-index over `text`, then retain only row-sampled suffix-array
+    /// entries. This matches `build()` search semantics while avoiding a
+    /// resident full `i32` suffix array for raw makehmmerdb C-stream targets.
+    pub fn build_sampled(text: &[u8]) -> Self {
+        Self::build_sampled_with_rate(text, DEFAULT_SA_SAMPLE_RATE)
+    }
+
+    pub fn build_sampled_with_rate(text: &[u8], sample_rate: usize) -> Self {
+        let mut index = Self::build(text);
+        let sample_rate = sample_rate.max(1);
+        index.sa_samples = index
+            .sa
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &pos)| {
+                (row % sample_rate == 0).then(|| {
+                    (
+                        i32::try_from(row).expect("FM-index row exceeds i32 range"),
+                        pos,
+                    )
+                })
+            })
+            .collect();
+        index.regular_sa_samples = None;
+        index.sa.clear();
+        index.sa.shrink_to_fit();
+        index
+    }
+
+    pub fn from_makehmmerdb_raw_parts(
+        bwt: Vec<u8>,
+        raw_sa_samples: Vec<i32>,
+        term_loc: usize,
+        freq_sa: usize,
+        freq_cnt_b: usize,
+        occ_b_codes: Vec<u16>,
+        occ_sb_codes: Vec<u32>,
+    ) -> Result<Self, String> {
+        let bwt_len = bwt.len();
+        if bwt_len == 0 {
+            return Err("FM-index raw BWT is empty".to_string());
+        }
+        let text_len = bwt_len - 1;
+        let mut char_count = [0usize; 256];
+        for &ch in &bwt {
+            char_count[ch as usize] += 1;
+        }
+        let mut c = [0usize; 256];
+        let mut cumsum = 0usize;
+        for i in 0..256 {
+            c[i] = cumsum;
+            cumsum += char_count[i];
+        }
+        Self::validate_parts_common(&bwt, c, text_len, bwt_len)?;
+
+        let regular_sa_samples =
+            Self::make_regular_sa_samples(raw_sa_samples, freq_sa, text_len, bwt_len)?;
+
+        let occ_rank = OccRank::from_makehmmerdb_dna_tables(
+            bwt_len,
+            term_loc,
+            freq_cnt_b,
+            &occ_b_codes,
+            &occ_sb_codes,
+        )?;
+        Ok(FmIndex {
+            bwt,
+            mapped_bwt: None,
+            packed_dna_bwt: None,
+            sa: Vec::new(),
+            sa_samples: Vec::new(),
+            regular_sa_samples: Some(regular_sa_samples),
+            mapped_sa: None,
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
+    fn make_regular_sa_samples(
+        raw_sa_samples: Vec<i32>,
+        freq_sa: usize,
+        text_len: usize,
+        bwt_len: usize,
+    ) -> Result<RegularSaSamples, String> {
+        if freq_sa == 0 {
+            return Err("FM-index suffix-array sampling frequency is zero".to_string());
+        }
+        let mut positions = Vec::with_capacity(raw_sa_samples.len());
+        for (idx, &pos) in raw_sa_samples.iter().enumerate() {
+            let row = idx
+                .checked_mul(freq_sa)
+                .ok_or_else(|| "FM-index suffix-array sample row overflows usize".to_string())?;
+            if row >= bwt_len {
+                continue;
+            }
+            let pos = if pos < 0 {
+                i32::try_from(text_len)
+                    .map_err(|_| "FM-index suffix-array sample exceeds i32 range".to_string())?
+            } else {
+                pos
+            };
+            if pos as usize >= bwt_len {
+                return Err("FM-index suffix-array sample is outside indexed text".to_string());
+            }
+            positions.push(pos);
+        }
+        Ok(RegularSaSamples::InMemory { positions, freq_sa })
+    }
+
+    fn make_mapped_regular_sa_samples(
+        mapped_bytes: Arc<MmapBytes>,
+        raw_sa_offset: usize,
+        raw_sa_count: usize,
+        freq_sa: usize,
+        text_len: usize,
+        bwt_len: usize,
+    ) -> Result<RegularSaSamples, String> {
+        if freq_sa == 0 {
+            return Err("FM-index suffix-array sampling frequency is zero".to_string());
+        }
+        let raw_sa_bytes = raw_sa_count
+            .checked_mul(4)
+            .ok_or_else(|| "FM-index suffix-array sample span overflows usize".to_string())?;
+        let slice = mapped_bytes
+            .as_slice()
+            .get(raw_sa_offset..raw_sa_offset + raw_sa_bytes)
+            .ok_or_else(|| "FM-index suffix-array samples are outside mapped file".to_string())?;
+        for (idx, chunk) in slice.chunks_exact(4).enumerate() {
+            let row = idx
+                .checked_mul(freq_sa)
+                .ok_or_else(|| "FM-index suffix-array sample row overflows usize".to_string())?;
+            if row >= bwt_len {
+                continue;
+            }
+            let pos = i32::from_le_bytes(chunk.try_into().unwrap());
+            let pos = if pos < 0 {
+                i32::try_from(text_len)
+                    .map_err(|_| "FM-index suffix-array sample exceeds i32 range".to_string())?
+            } else {
+                pos
+            };
+            if pos as usize >= bwt_len {
+                return Err("FM-index suffix-array sample is outside indexed text".to_string());
+            }
+        }
+        Ok(RegularSaSamples::Mapped {
+            bytes: mapped_bytes,
+            offset: raw_sa_offset,
+            count: raw_sa_count,
+            freq_sa,
+            text_len,
+        })
+    }
+
+    pub fn from_makehmmerdb_packed_dna_parts(
+        packed_bwt: Vec<u8>,
+        bwt_len: usize,
+        raw_sa_samples: Vec<i32>,
+        term_loc: usize,
+        freq_sa: usize,
+        freq_cnt_b: usize,
+        occ_b_codes: Vec<u16>,
+        occ_sb_codes: Vec<u32>,
+    ) -> Result<Self, String> {
+        if freq_cnt_b == 0 {
+            return Err("FM-index occurrence sampling frequency is zero".to_string());
+        }
+        if bwt_len == 0 {
+            return Err("FM-index raw BWT is empty".to_string());
+        }
+        let packed_bwt = PackedDnaBwt {
+            byte_len: packed_bwt.len(),
+            bytes: packed_bwt,
+            mapped_bytes: None,
+            mapped_offset: 0,
+            len: bwt_len,
+            term_loc,
+        };
+        packed_bwt.validate_span()?;
+        if term_loc >= bwt_len {
+            return Err("FM-index terminal location is outside BWT".to_string());
+        }
+        let text_len = bwt_len - 1;
+        let nsb = 1 + bwt_len.div_ceil(FREQ_CNT_SB);
+        let final_occ_sb_row = (nsb - 1) * 4;
+        if occ_sb_codes.len() < final_occ_sb_row + 4 {
+            return Err("FM-index occurrence superblock table has unexpected length".to_string());
+        }
+        let code0_total = occ_sb_codes[final_occ_sb_row] as usize;
+        if code0_total == 0 {
+            return Err("FM-index occurrence table is missing terminal symbol".to_string());
+        }
+        let counts = [
+            1usize,
+            code0_total - 1,
+            occ_sb_codes[final_occ_sb_row + 1] as usize,
+            occ_sb_codes[final_occ_sb_row + 2] as usize,
+            occ_sb_codes[final_occ_sb_row + 3] as usize,
+        ];
+        if counts.iter().sum::<usize>() != bwt_len {
+            return Err("FM-index occurrence table totals do not match BWT length".to_string());
+        }
+        let mut c = [0usize; 256];
+        c[0] = 0;
+        c[b'A' as usize] = counts[0];
+        c[b'C' as usize] = counts[0] + counts[1];
+        c[b'G' as usize] = counts[0] + counts[1] + counts[2];
+        c[b'T' as usize] = counts[0] + counts[1] + counts[2] + counts[3];
+
+        let regular_sa_samples =
+            Self::make_regular_sa_samples(raw_sa_samples, freq_sa, text_len, bwt_len)?;
+
+        let occ_rank = OccRank::from_makehmmerdb_dna_tables(
+            bwt_len,
+            term_loc,
+            freq_cnt_b,
+            &occ_b_codes,
+            &occ_sb_codes,
+        )?;
+        Ok(FmIndex {
+            bwt: Vec::new(),
+            mapped_bwt: None,
+            packed_dna_bwt: Some(packed_bwt),
+            sa: Vec::new(),
+            sa_samples: Vec::new(),
+            regular_sa_samples: Some(regular_sa_samples),
+            mapped_sa: None,
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_makehmmerdb_packed_dna_parts_mapped_sa(
+        packed_bwt: Vec<u8>,
+        bwt_len: usize,
+        mapped_bytes: Arc<MmapBytes>,
+        raw_sa_offset: usize,
+        raw_sa_count: usize,
+        term_loc: usize,
+        freq_sa: usize,
+        freq_cnt_b: usize,
+        occ_b_codes: Vec<u16>,
+        occ_sb_codes: Vec<u32>,
+    ) -> Result<Self, String> {
+        let mut index = Self::from_makehmmerdb_packed_dna_parts(
+            packed_bwt,
+            bwt_len,
+            Vec::new(),
+            term_loc,
+            freq_sa,
+            freq_cnt_b,
+            occ_b_codes,
+            occ_sb_codes,
+        )?;
+        index.regular_sa_samples = Some(Self::make_mapped_regular_sa_samples(
+            mapped_bytes,
+            raw_sa_offset,
+            raw_sa_count,
+            freq_sa,
+            index.n,
+            bwt_len,
+        )?);
+        Ok(index)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_makehmmerdb_mapped_packed_dna_parts_mapped_sa(
+        mapped_packed_bwt: Arc<MmapBytes>,
+        packed_bwt_offset: usize,
+        packed_bwt_bytes: usize,
+        bwt_len: usize,
+        mapped_sa_bytes: Arc<MmapBytes>,
+        raw_sa_offset: usize,
+        raw_sa_count: usize,
+        term_loc: usize,
+        freq_sa: usize,
+        freq_cnt_b: usize,
+        occ_b_codes: Vec<u16>,
+        occ_sb_codes: Vec<u32>,
+    ) -> Result<Self, String> {
+        let packed_bwt = PackedDnaBwt {
+            bytes: Vec::new(),
+            mapped_bytes: Some(mapped_packed_bwt),
+            mapped_offset: packed_bwt_offset,
+            byte_len: packed_bwt_bytes,
+            len: bwt_len,
+            term_loc,
+        };
+        packed_bwt.validate_span()?;
+        if freq_cnt_b == 0 {
+            return Err("FM-index occurrence sampling frequency is zero".to_string());
+        }
+        if bwt_len == 0 {
+            return Err("FM-index raw BWT is empty".to_string());
+        }
+        if term_loc >= bwt_len {
+            return Err("FM-index terminal location is outside BWT".to_string());
+        }
+        let text_len = bwt_len - 1;
+        let nsb = 1 + bwt_len.div_ceil(FREQ_CNT_SB);
+        let final_occ_sb_row = (nsb - 1) * 4;
+        if occ_sb_codes.len() < final_occ_sb_row + 4 {
+            return Err("FM-index occurrence superblock table has unexpected length".to_string());
+        }
+        let code0_total = occ_sb_codes[final_occ_sb_row] as usize;
+        if code0_total == 0 {
+            return Err("FM-index occurrence table is missing terminal symbol".to_string());
+        }
+        let counts = [
+            1usize,
+            code0_total - 1,
+            occ_sb_codes[final_occ_sb_row + 1] as usize,
+            occ_sb_codes[final_occ_sb_row + 2] as usize,
+            occ_sb_codes[final_occ_sb_row + 3] as usize,
+        ];
+        if counts.iter().sum::<usize>() != bwt_len {
+            return Err("FM-index occurrence table totals do not match BWT length".to_string());
+        }
+        let mut c = [0usize; 256];
+        c[0] = 0;
+        c[b'A' as usize] = counts[0];
+        c[b'C' as usize] = counts[0] + counts[1];
+        c[b'G' as usize] = counts[0] + counts[1] + counts[2];
+        c[b'T' as usize] = counts[0] + counts[1] + counts[2] + counts[3];
+
+        let regular_sa_samples = Self::make_mapped_regular_sa_samples(
+            mapped_sa_bytes,
+            raw_sa_offset,
+            raw_sa_count,
+            freq_sa,
+            text_len,
+            bwt_len,
+        )?;
+        let occ_rank = OccRank::from_makehmmerdb_dna_tables(
+            bwt_len,
+            term_loc,
+            freq_cnt_b,
+            &occ_b_codes,
+            &occ_sb_codes,
+        )?;
+        Ok(FmIndex {
+            bwt: Vec::new(),
+            mapped_bwt: None,
+            packed_dna_bwt: Some(packed_bwt),
+            sa: Vec::new(),
+            sa_samples: Vec::new(),
+            regular_sa_samples: Some(regular_sa_samples),
+            mapped_sa: None,
+            c,
+            n: text_len,
+            occ_rank,
+        })
+    }
+
     /// Return the full suffix-array interval before any pattern characters are
     /// applied.
     pub fn bwt_len(&self) -> usize {
-        self.mapped_bwt
-            .as_ref()
-            .map_or(self.bwt.len(), |mapped| mapped.len)
+        if let Some(mapped) = &self.mapped_bwt {
+            mapped.len
+        } else if let Some(packed) = &self.packed_dna_bwt {
+            packed.len
+        } else {
+            self.bwt.len()
+        }
     }
 
     fn bwt_slice(&self) -> &[u8] {
@@ -356,6 +938,22 @@ impl FmIndex {
     }
 
     fn bwt_at(&self, pos: usize) -> Option<u8> {
+        if let Some(packed) = &self.packed_dna_bwt {
+            if pos >= packed.len {
+                return None;
+            }
+            if pos == packed.term_loc {
+                return Some(0);
+            }
+            let byte = packed.byte_at(pos / 4)?;
+            return Some(match (byte >> (6 - ((pos & 0x3) * 2))) & 0b11 {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => unreachable!(),
+            });
+        }
         self.bwt_slice().get(pos).copied()
     }
 
@@ -439,8 +1037,10 @@ impl FmIndex {
         Ok(FmIndex {
             bwt,
             mapped_bwt: None,
+            packed_dna_bwt: None,
             sa: Vec::new(),
             sa_samples: Vec::new(),
+            regular_sa_samples: None,
             mapped_sa: Some(MappedSa {
                 bytes: mapped_bytes,
                 offset: sa_offset,
@@ -565,8 +1165,10 @@ impl FmIndex {
                 offset: bwt_offset,
                 len: bwt_len,
             }),
+            packed_dna_bwt: None,
             sa: Vec::new(),
             sa_samples: Vec::new(),
+            regular_sa_samples: None,
             mapped_sa: Some(MappedSa {
                 bytes: mapped_bytes,
                 offset: sa_offset,
@@ -643,8 +1245,10 @@ impl FmIndex {
         Ok(FmIndex {
             bwt,
             mapped_bwt: None,
+            packed_dna_bwt: None,
             sa,
             sa_samples,
+            regular_sa_samples: None,
             mapped_sa: None,
             c,
             n: text_len,
@@ -764,6 +1368,26 @@ impl FmIndex {
             .collect()
     }
 
+    /// Locate at most `limit` text positions in an already-computed suffix-array
+    /// interval. This mirrors `locate_interval()` order without materializing
+    /// very large FM intervals that callers are going to truncate anyway.
+    pub fn locate_interval_limited(&self, interval: FmInterval, limit: usize) -> Vec<usize> {
+        if limit == 0 || interval.is_empty() || interval.hi > self.bwt_len() {
+            return Vec::new();
+        }
+
+        let mut positions = Vec::new();
+        for row in interval.lo..interval.hi {
+            if let Some(pos) = self.suffix_position(row).filter(|&pos| pos < self.n) {
+                positions.push(pos);
+                if positions.len() >= limit {
+                    break;
+                }
+            }
+        }
+        positions
+    }
+
     /// Faithful public counterpart of C `FM_backtrackSeed()` for one BWT row.
     ///
     /// `suffix_position()` already performs the same LF backtracking to a
@@ -785,6 +1409,11 @@ impl FmIndex {
         let mut steps = 0usize;
         let limit = self.bwt_len();
         while steps <= limit {
+            if let Some(samples) = &self.regular_sa_samples {
+                if let Some(sampled_pos) = samples.position_for_row(row) {
+                    return Some((sampled_pos + steps) % self.bwt_len());
+                }
+            }
             let row_i32 = i32::try_from(row).ok()?;
             if let Ok(idx) = self
                 .sa_samples
@@ -823,8 +1452,14 @@ impl FmIndex {
         let ns = rank.n_sym();
         let sb = pos / FREQ_CNT_SB;
         let b = pos / FREQ_CNT_B;
-        let mut cnt = rank.occ_sb[sb * ns + s] + rank.occ_b[b * ns + s] as usize;
+        let mut cnt = rank.occ_sb[sb * ns + s];
+        if b != sb * (FREQ_CNT_SB / FREQ_CNT_B) {
+            cnt += rank.occ_b[b * ns + s] as usize;
+        }
         let block_start = b * FREQ_CNT_B;
+        if let Some(packed) = &self.packed_dna_bwt {
+            return cnt + packed.count_eq(block_start, pos, ch);
+        }
         for idx in block_start..pos {
             if self.bwt_at(idx) == Some(ch) {
                 cnt += 1;
@@ -846,10 +1481,16 @@ impl FmIndex {
         let mut cnt = 0usize;
         for (s, &sym) in rank.symbols.iter().enumerate() {
             if sym < ch {
-                cnt += rank.occ_sb[sb * ns + s] + rank.occ_b[b * ns + s] as usize;
+                cnt += rank.occ_sb[sb * ns + s];
+                if b != sb * (FREQ_CNT_SB / FREQ_CNT_B) {
+                    cnt += rank.occ_b[b * ns + s] as usize;
+                }
             }
         }
         let block_start = b * FREQ_CNT_B;
+        if let Some(packed) = &self.packed_dna_bwt {
+            return cnt + packed.count_lt(block_start, pos, ch);
+        }
         for idx in block_start..pos {
             if self.bwt_at(idx).is_some_and(|x| x < ch) {
                 cnt += 1;
@@ -1214,6 +1855,77 @@ mod tests {
                     std::str::from_utf8(pat).unwrap()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn makehmmerdb_occ_tables_do_not_double_count_superblock_boundary() {
+        let text: Vec<u8> = (0..70_000)
+            .map(|i| [b'A', b'C', b'G', b'T'][(i * 11 + 1) % 4])
+            .collect();
+        let full = FmIndex::build(&text);
+        let term_loc = full.bwt.iter().position(|&ch| ch == 0).unwrap();
+        let raw_sa_samples = full
+            .sa
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &pos)| {
+                (row % 8 == 0).then_some(if pos as usize == text.len() { -1 } else { pos })
+            })
+            .collect::<Vec<_>>();
+
+        let nb = 1 + full.bwt.len().div_ceil(FREQ_CNT_B);
+        let nsb = 1 + full.bwt.len().div_ceil(FREQ_CNT_SB);
+        let mut occ_b = vec![0u16; nb * 4];
+        let mut occ_sb = vec![0u32; nsb * 4];
+        let mut cnt_b = [0u16; 4];
+        let mut cnt_sb = [0u32; 4];
+        for (j, &base) in full.bwt.iter().enumerate() {
+            let code = match base {
+                0 | b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
+                _ => unreachable!(),
+            };
+            cnt_b[code] += 1;
+            cnt_sb[code] += 1;
+            let joffset = j + 1;
+            if joffset % FREQ_CNT_B == 0 {
+                let row = joffset / FREQ_CNT_B;
+                occ_b[row * 4..row * 4 + 4].copy_from_slice(&cnt_b);
+                if joffset % FREQ_CNT_SB == 0 {
+                    let row = joffset / FREQ_CNT_SB;
+                    occ_sb[row * 4..row * 4 + 4].copy_from_slice(&cnt_sb);
+                    cnt_b = [0; 4];
+                }
+            }
+        }
+        occ_b[(nb - 1) * 4..nb * 4].copy_from_slice(&cnt_b);
+        occ_sb[(nsb - 1) * 4..nsb * 4].copy_from_slice(&cnt_sb);
+
+        let raw = FmIndex::from_makehmmerdb_raw_parts(
+            full.bwt.clone(),
+            raw_sa_samples,
+            term_loc,
+            8,
+            FREQ_CNT_B,
+            occ_b,
+            occ_sb,
+        )
+        .unwrap();
+
+        for pat in [&b"ACGT"[..], &b"CGTA"[..], &b"TACG"[..], &b"A"[..]] {
+            assert_eq!(
+                raw.count(pat),
+                full.count(pat),
+                "count mismatch for {pat:?}"
+            );
+            let mut got = raw.locate(pat);
+            got.sort_unstable();
+            let mut want = full.locate(pat);
+            want.sort_unstable();
+            assert_eq!(got, want, "locate mismatch for {pat:?}");
         }
     }
 }

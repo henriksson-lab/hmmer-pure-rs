@@ -16,9 +16,8 @@
 //!   reversed-text index; the `fm_direction == fm_backward` sweep uses
 //!   `FmIndex::update_interval_forward` (C `fm_updateIntervalForward(fmb, ...)`)
 //!   on the forward-text index, carrying the second (fmf-locatable) interval.
-//!   The full `FM_DP_PAIR` state and every pruning clause are reproduced (except
-//!   C's `opt_ext_fwd/rev` look-ahead prune, whose omission only makes Rust
-//!   explore *more*, never fewer — see `fm_recurse`).
+//!   The full `FM_DP_PAIR` state and pruning clauses are reproduced, including
+//!   C's `opt_ext_fwd/rev` look-ahead prune — see `fm_recurse`.
 //!
 //! * The kernel is unit-agnostic in its score inputs: `SsvScores`, `sc_thresh_fm`,
 //!   and the score-valued `FmSsvConfig` fields (`drop_lim`, `score_density_req`)
@@ -350,17 +349,7 @@ fn fm_recurse(
 
     for c in 0..alph.alph_size {
         let base = fm_code_to_base(c);
-        // One interval step for this character `c` (independent of the DP rows).
-        // Returns (next interval_1, interval locatable in fmf), mirroring C's
-        // `fm_updateIntervalReverse(fmf)` (forward sweep) and
-        // `fm_updateIntervalForward(fmb)` (backward sweep).
-        let step: Option<(FmInterval, FmInterval)> = match direction {
-            FmDirection::Forward => fmf.prepend_interval(interval_1, base).map(|iv| (iv, iv)),
-            FmDirection::Backward => {
-                let iv2 = interval_2.expect("backward sweep requires interval_2");
-                fmb.update_interval_forward(interval_1, iv2, base)
-            }
-        };
+        let mut step_cache: Option<Option<(FmInterval, FmInterval)>> = None;
 
         // dppos tracks the last index appended for this character's column.
         let mut dppos = last;
@@ -399,6 +388,15 @@ fn fm_recurse(
             {
                 // A seed to extend: emit all matching target positions from the
                 // fmf-locatable interval for this character.
+                let step = *step_cache.get_or_insert_with(|| match direction {
+                    FmDirection::Forward => {
+                        fmf.prepend_interval(interval_1, base).map(|iv| (iv, iv))
+                    }
+                    FmDirection::Backward => {
+                        let iv2 = interval_2.expect("backward sweep requires interval_2");
+                        fmb.update_interval_forward(interval_1, iv2, base)
+                    }
+                });
                 if let Some((_, locatable)) = step {
                     fm_get_passing_diags(
                         fmf,
@@ -468,6 +466,13 @@ fn fm_recurse(
 
         if dppos > last {
             // At least one extendable diagonal: descend the trie on c.
+            let step = *step_cache.get_or_insert_with(|| match direction {
+                FmDirection::Forward => fmf.prepend_interval(interval_1, base).map(|iv| (iv, iv)),
+                FmDirection::Backward => {
+                    let iv2 = interval_2.expect("backward sweep requires interval_2");
+                    fmb.update_interval_forward(interval_1, iv2, base)
+                }
+            });
             let Some((new_iv1, locatable)) = step else {
                 continue;
             };
@@ -691,9 +696,8 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut out: Vec<FmDiag> = Vec::with_capacity(seeds.len());
-
     let curr = seeds[0];
+    let mut write_pos = 0usize;
     let mut curr_complement = curr.complementarity == Complementarity::Complement;
     let mut curr_n = curr.n;
     let mut curr_k = curr.k;
@@ -701,7 +705,8 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
     let mut curr_end = curr_n + curr_len as i64 - 1;
     let mut curr_diagval = curr.n - curr.k as i64;
 
-    for next in seeds.iter().skip(1).copied() {
+    for read_pos in 1..seeds.len() {
+        let next = seeds[read_pos];
         let next_complement = next.complementarity == Complementarity::Complement;
         if next_complement == curr_complement
             && (next.n - next.k as i64) == curr_diagval
@@ -713,7 +718,7 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
                 curr_len = (curr_end - curr_n + 1) as i32;
             }
         } else {
-            out.push(FmDiag {
+            seeds[write_pos] = FmDiag {
                 n: curr_n,
                 k: curr_k,
                 length: (curr_end - curr_n + 1) as i32,
@@ -723,7 +728,8 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
                 } else {
                     Complementarity::NoComplement
                 },
-            });
+            };
+            write_pos += 1;
             curr_n = next.n;
             curr_k = next.k;
             curr_len = next.length;
@@ -732,7 +738,7 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
             curr_complement = next_complement;
         }
     }
-    out.push(FmDiag {
+    seeds[write_pos] = FmDiag {
         n: curr_n,
         k: curr_k,
         length: (curr_end - curr_n + 1) as i32,
@@ -742,9 +748,10 @@ pub fn fm_merge_seeds(seeds: &mut Vec<FmDiag>, fm_n: i64, m: i32, ssv_length: i3
         } else {
             Complementarity::NoComplement
         },
-    });
+    };
+    write_pos += 1;
 
-    *seeds = out;
+    seeds.truncate(write_pos);
 }
 
 /// Faithful port of C `FM_extendSeed`: extend the seed in both directions
@@ -800,8 +807,8 @@ pub fn fm_extend_seed_core(
 
     while k <= model_end {
         let abs_idx = (target_start + n as i64) as usize;
-        let cidx = (k as usize) * kp + target.get(abs_idx).copied().unwrap_or(0);
-        let delta = scores.scores.get(cidx).copied().unwrap_or(0.0);
+        let cidx = (k as usize) * kp + target[abs_idx] as usize;
+        let delta = scores.scores[cidx];
         sc += delta;
         if sc < 0.0 {
             sc = 0.0;
