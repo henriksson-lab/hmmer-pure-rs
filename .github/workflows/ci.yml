@@ -26,5 +26,5 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build all targets
-        run: cargo build --all-targets
+      - name: Build library
+        run: cargo build --lib

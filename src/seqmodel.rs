@@ -9,7 +9,7 @@ use crate::util::cmath::c_exp_f64;
 use std::io::Read;
 use std::path::Path;
 
-const BUILTIN_SCOREMATRIX_SOURCE: &str = include_str!("../hmmer/easel/esl_scorematrix.c");
+const BUILTIN_SCOREMATRIX_SOURCE: &str = include_str!("data/esl_scorematrix.c");
 const MAX_SCORE_MATRIX_FILE_BYTES: usize = 1024 * 1024;
 const BUILTIN_MATRIX_NAMES: &[&str] = &[
     "PAM30", "PAM70", "PAM120", "PAM240", "BLOSUM45", "BLOSUM50", "BLOSUM62", "BLOSUM80",

@@ -5,6 +5,7 @@ pub mod hmmconvert;
 pub mod hmmemit;
 pub mod hmmfetch;
 pub mod hmmlogo;
+#[cfg(unix)]
 pub mod hmmpgmd;
 pub mod hmmpress;
 pub mod hmmscan;
