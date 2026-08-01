@@ -2,12 +2,9 @@
 //! Used by nhmmer for long-target scanning.
 
 use divsufsort::sort_in_place;
+use memmap2::Mmap;
 use std::fmt;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Read;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,16 +56,13 @@ const fn build_packed_byte_lt_counts() -> [[u8; 256]; 4] {
 }
 
 pub struct MmapBytes {
-    #[cfg(unix)]
-    ptr: *const u8,
-    #[cfg(unix)]
-    len: usize,
-    #[cfg(not(unix))]
-    bytes: Vec<u8>,
+    storage: MmapStorage,
 }
 
-unsafe impl Send for MmapBytes {}
-unsafe impl Sync for MmapBytes {}
+enum MmapStorage {
+    Mmap(Mmap),
+    Empty,
+}
 
 impl MmapBytes {
     pub fn open(path: &Path, max_len: u64) -> Result<Arc<Self>, String> {
@@ -98,79 +92,27 @@ impl MmapBytes {
         let len = usize::try_from(len)
             .map_err(|_| "FM-index target database size overflows usize".to_string())?;
 
-        #[cfg(not(unix))]
-        {
-            let mut file = file;
-            let mut bytes = Vec::with_capacity(len);
-            file.read_to_end(&mut bytes).map_err(|e| {
+        if len == 0 {
+            Ok(Arc::new(Self {
+                storage: MmapStorage::Empty,
+            }))
+        } else {
+            let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
                 format!(
-                    "failed to read FM-index target database {}: {e}",
+                    "failed to mmap FM-index target database {}: {e}",
                     path.display()
                 )
             })?;
-            if bytes.len() != len {
-                return Err(format!(
-                    "failed to read FM-index target database {}: expected {} bytes, read {} bytes",
-                    path.display(),
-                    len,
-                    bytes.len()
-                ));
-            }
-            return Ok(Arc::new(Self { bytes }));
-        }
-
-        #[cfg(unix)]
-        {
-            if len == 0 {
-                return Ok(Arc::new(Self {
-                    ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(),
-                    len,
-                }));
-            }
-            let ptr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    len,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            if ptr == libc::MAP_FAILED {
-                return Err(format!(
-                    "failed to mmap FM-index target database {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                ));
-            }
             Ok(Arc::new(Self {
-                ptr: ptr.cast::<u8>(),
-                len,
+                storage: MmapStorage::Mmap(mmap),
             }))
         }
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        #[cfg(unix)]
-        unsafe {
-            std::slice::from_raw_parts(self.ptr, self.len)
-        }
-
-        #[cfg(not(unix))]
-        {
-            &self.bytes
-        }
-    }
-}
-
-impl Drop for MmapBytes {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if self.len != 0 {
-            unsafe {
-                libc::munmap(self.ptr.cast::<libc::c_void>().cast_mut(), self.len);
-            }
+        match &self.storage {
+            MmapStorage::Mmap(mmap) => mmap,
+            MmapStorage::Empty => &[],
         }
     }
 }

@@ -3,9 +3,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
-use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
-use std::os::fd::FromRawFd;
+use std::net::{SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -13,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
+use socket2::{Domain as SocketDomain, Protocol, SockAddr, Socket, Type};
 
 use hmmer_pure_rs::alphabet::{Alphabet, AlphabetType};
 use hmmer_pure_rs::bg::Bg;
@@ -1015,87 +1014,33 @@ fn searched_counts(state: &ServerState, query: &ClientQuery) -> (u64, u64) {
     }
 }
 
-#[cfg(unix)]
 fn bind_listener(host: &str, port: u16, role: &str, backlog: usize) -> TcpListener {
     let addr = format!("{}:{}", host, port);
     let ip = host.parse::<std::net::Ipv4Addr>().unwrap_or_else(|e| {
         eprintln!("Cannot parse bind address {}: {}", host, e);
         std::process::exit(1);
     });
-    let backlog = backlog.min(i32::MAX as usize) as libc::c_int;
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            eprintln!(
-                "Cannot create socket for {}: {}",
-                addr,
-                std::io::Error::last_os_error()
-            );
+    let backlog = backlog.min(i32::MAX as usize) as i32;
+    let socket =
+        Socket::new(SocketDomain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap_or_else(|e| {
+            eprintln!("Cannot create socket for {}: {}", addr, e);
             std::process::exit(1);
-        }
-
-        let yes: libc::c_int = 1;
-        let _ = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            (&yes as *const libc::c_int).cast(),
-            std::mem::size_of_val(&yes) as libc::socklen_t,
-        );
-
-        let sockaddr = libc::sockaddr_in {
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "freebsd",
-                target_os = "dragonfly",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ))]
-            sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: port.to_be(),
-            sin_addr: libc::in_addr {
-                s_addr: u32::from(ip).to_be(),
-            },
-            sin_zero: [0; 8],
-        };
-
-        if libc::bind(
-            fd,
-            (&sockaddr as *const libc::sockaddr_in).cast(),
-            std::mem::size_of_val(&sockaddr) as libc::socklen_t,
-        ) != 0
-        {
-            let e = std::io::Error::last_os_error();
-            let _ = libc::close(fd);
-            eprintln!("Cannot bind to {}: {}", addr, e);
-            std::process::exit(1);
-        }
-
-        if libc::listen(fd, backlog) != 0 {
-            let e = std::io::Error::last_os_error();
-            let _ = libc::close(fd);
-            eprintln!("Cannot listen on {}: {}", addr, e);
-            std::process::exit(1);
-        }
-
-        let listener = TcpListener::from_raw_fd(fd);
-        eprintln!("Listening for {role} connections on {addr} (backlog {backlog})");
-        listener
+        });
+    if let Err(e) = socket.set_reuse_address(true) {
+        eprintln!("Cannot set SO_REUSEADDR on {}: {}", addr, e);
+        std::process::exit(1);
     }
-}
-
-#[cfg(not(unix))]
-fn bind_listener(host: &str, port: u16, role: &str, backlog: usize) -> TcpListener {
-    let addr = format!("{}:{}", host, port);
-    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+    let sockaddr = SockAddr::from(SocketAddrV4::new(ip, port));
+    socket.bind(&sockaddr).unwrap_or_else(|e| {
         eprintln!("Cannot bind to {}: {}", addr, e);
         std::process::exit(1);
     });
-    eprintln!(
-        "Listening for {role} connections on {addr} (requested backlog {backlog}; std::net fallback)"
-    );
+    socket.listen(backlog).unwrap_or_else(|e| {
+        eprintln!("Cannot listen on {}: {}", addr, e);
+        std::process::exit(1);
+    });
+    let listener = TcpListener::from(socket);
+    eprintln!("Listening for {role} connections on {addr} (backlog {backlog})");
     listener
 }
 

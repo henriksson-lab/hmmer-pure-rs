@@ -1,33 +1,112 @@
 //! Output formatting utilities to match C printf behavior.
 
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_double, c_int};
-
-extern "C" {
-    fn snprintf(s: *mut c_char, n: usize, format: *const c_char, ...) -> c_int;
+fn fmt_fixed_width(val: f64, width: usize, precision: usize, zero_pad: bool) -> String {
+    c_buf_string(if !val.is_finite() {
+        pad_width(fmt_nonfinite(val), width)
+    } else if zero_pad {
+        format!("{val:0width$.precision$}")
+    } else {
+        format!("{val:width$.precision$}")
+    })
 }
 
-#[cfg(unix)]
-extern "C" {
-    fn ctime_r(timep: *const libc::time_t, buf: *mut c_char) -> *mut c_char;
-}
-
-fn c_snprintf_double(fmt: &[u8], val: f64) -> String {
-    let mut buf = [0 as c_char; 64];
-    let n = unsafe {
-        snprintf(
-            buf.as_mut_ptr(),
-            buf.len(),
-            fmt.as_ptr().cast::<c_char>(),
-            val as c_double,
-        )
+fn fmt_general(val: f64, width: Option<usize>, precision: usize) -> String {
+    let mut s = if !val.is_finite() {
+        fmt_nonfinite(val)
+    } else if val == 0.0 {
+        if val.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        }
+    } else {
+        let scientific = fmt_scientific_general(val, precision);
+        let exp = scientific_exponent(&scientific);
+        if exp < -4 || exp >= precision as i32 {
+            scientific
+        } else {
+            let decimals = (precision as i32 - exp - 1).max(0) as usize;
+            let fixed = trim_decimal_zeros(format!("{val:.decimals$}"));
+            if fixed_integer_digits(&fixed) > precision {
+                scientific
+            } else {
+                fixed
+            }
+        }
     };
-    if n < 0 {
-        return String::new();
+    if let Some(width) = width {
+        s = format!("{s:>width$}");
     }
-    unsafe { CStr::from_ptr(buf.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+    c_buf_string(s)
+}
+
+fn fmt_scientific_general(val: f64, precision: usize) -> String {
+    let decimals = precision.saturating_sub(1);
+    let raw = format!("{val:.decimals$e}");
+    let (mantissa, exponent) = raw.split_once('e').unwrap_or((&raw, "0"));
+    format!(
+        "{}e{}",
+        trim_decimal_zeros(mantissa.to_string()),
+        c_exponent(exponent)
+    )
+}
+
+fn trim_decimal_zeros(mut s: String) -> String {
+    if let Some(dot) = s.find('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.len() == dot + 1 {
+            s.pop();
+        }
+    }
+    s
+}
+
+fn fixed_integer_digits(s: &str) -> usize {
+    s.trim_start_matches('-')
+        .split_once('.')
+        .map_or_else(|| s.trim_start_matches('-').len(), |(int, _)| int.len())
+}
+
+fn scientific_exponent(s: &str) -> i32 {
+    s.split_once('e')
+        .and_then(|(_, exponent)| exponent.parse::<i32>().ok())
+        .unwrap_or(0)
+}
+
+fn fmt_nonfinite(val: f64) -> String {
+    if val.is_nan() {
+        "nan".to_string()
+    } else if val.is_sign_negative() {
+        "-inf".to_string()
+    } else {
+        "inf".to_string()
+    }
+}
+
+fn pad_width(s: String, width: usize) -> String {
+    if width == 0 {
+        s
+    } else {
+        format!("{s:>width$}")
+    }
+}
+
+fn c_buf_string(mut s: String) -> String {
+    s.truncate(63);
+    s
+}
+
+fn c_exponent(exponent: &str) -> String {
+    let exp = exponent.parse::<i32>().unwrap_or(0);
+    let sign = if exp < 0 { '-' } else { '+' };
+    let abs = exp.abs();
+    if abs < 10 {
+        format!("{sign}0{abs}")
+    } else {
+        format!("{sign}{abs}")
+    }
 }
 
 /// Format an E-value the same way C's `printf("%9.2g", val)` does.
@@ -36,62 +115,62 @@ fn c_snprintf_double(fmt: &[u8], val: f64) -> String {
 /// is < -4 or >= the precision; trailing zeros and trailing `.` are trimmed.
 /// Reproduces C output byte-for-byte for the values HMMER emits.
 pub fn fmt_evalue(val: f64) -> String {
-    c_snprintf_double(b"%9.2g\0", val)
+    fmt_general(val, Some(9), 2)
 }
 
 /// Format a bit score using C's `%6.1f` (width 6, 1 decimal).
 pub fn fmt_score(val: f32) -> String {
-    c_snprintf_double(b"%6.1f\0", val as f64)
+    fmt_fixed_width(val as f64, 6, 1, false)
 }
 
 /// Format a bias-composition correction using C's `%5.1f` (width 5, 1 decimal).
 pub fn fmt_bias(val: f32) -> String {
-    c_snprintf_double(b"%5.1f\0", val as f64)
+    fmt_fixed_width(val as f64, 5, 1, false)
 }
 
 /// Format a floating-point value using C's default `%g`.
 pub fn fmt_g(val: f64) -> String {
-    c_snprintf_double(b"%g\0", val)
+    fmt_general(val, None, 6)
 }
 
 /// Format a floating-point value using C's `%.3g`.
 pub fn fmt_g3(val: f64) -> String {
-    c_snprintf_double(b"%.3g\0", val)
+    fmt_general(val, None, 3)
 }
 
 /// Format a floating-point value using C's `%.6f`.
 pub fn fmt_fixed6(val: f64) -> String {
-    c_snprintf_double(b"%.6f\0", val)
+    fmt_fixed_width(val, 0, 6, false)
 }
 
 /// Format a floating-point value using C's `%.1f`.
 pub fn fmt_fixed1(val: f64) -> String {
-    c_snprintf_double(b"%.1f\0", val)
+    fmt_fixed_width(val, 0, 1, false)
 }
 
 /// Format a floating-point value using C's `%.0f`.
 pub fn fmt_fixed0(val: f64) -> String {
-    c_snprintf_double(b"%.0f\0", val)
+    fmt_fixed_width(val, 0, 0, false)
 }
 
 /// Format a floating-point value using C's `%.2f`.
 pub fn fmt_fixed2(val: f64) -> String {
-    c_snprintf_double(b"%.2f\0", val)
+    fmt_fixed_width(val, 0, 2, false)
 }
 
 /// Format a floating-point value using C's `%.3f`.
 pub fn fmt_fixed3(val: f64) -> String {
-    c_snprintf_double(b"%.3f\0", val)
+    fmt_fixed_width(val, 0, 3, false)
 }
 
 /// Format a floating-point value using C's `%.4f`.
 pub fn fmt_fixed4(val: f64) -> String {
-    c_snprintf_double(b"%.4f\0", val)
+    fmt_fixed_width(val, 0, 4, false)
 }
 
 /// Format a floating-point value using C's `%.5f`.
 pub fn fmt_fixed5(val: f64) -> String {
-    c_snprintf_double(b"%.5f\0", val)
+    fmt_fixed_width(val, 0, 5, false)
 }
 
 /// Format a probability field using C's `%8.5f` (width 8, 5 decimals).
@@ -99,47 +178,47 @@ pub fn fmt_fixed5(val: f64) -> String {
 /// Matches `printprob` in `hmmer/src/p7_hmmfile.c` which uses `%*.5f`
 /// with `fieldwidth=8`.
 pub fn fmt_hmm_prob(val: f64) -> String {
-    c_snprintf_double(b"%8.5f\0", val)
+    fmt_fixed_width(val, 8, 5, false)
 }
 
 /// Format a floating-point value using C's `%8.2f`.
 pub fn fmt_width8_2(val: f64) -> String {
-    c_snprintf_double(b"%8.2f\0", val)
+    fmt_fixed_width(val, 8, 2, false)
 }
 
 /// Format a floating-point value using C's `%5.1f`.
 pub fn fmt_width5_1(val: f64) -> String {
-    c_snprintf_double(b"%5.1f\0", val)
+    fmt_fixed_width(val, 5, 1, false)
 }
 
 /// Format elapsed seconds using C's `%05.2f`.
 pub fn fmt_elapsed_seconds(val: f64) -> String {
-    c_snprintf_double(b"%05.2f\0", val)
+    fmt_fixed_width(val, 5, 2, true)
 }
 
 /// Format a floating-point value using C's `%4.1f`.
 pub fn fmt_width4_1(val: f64) -> String {
-    c_snprintf_double(b"%4.1f\0", val)
+    fmt_fixed_width(val, 4, 1, false)
 }
 
 /// Format a floating-point value using C's `%6.2f`.
 pub fn fmt_width6_2(val: f64) -> String {
-    c_snprintf_double(b"%6.2f\0", val)
+    fmt_fixed_width(val, 6, 2, false)
 }
 
 /// Format a floating-point value using C's `%6.3f`.
 pub fn fmt_width6_3(val: f64) -> String {
-    c_snprintf_double(b"%6.3f\0", val)
+    fmt_fixed_width(val, 6, 3, false)
 }
 
 /// Format a floating-point value using C's `%4.2f`.
 pub fn fmt_width4_2(val: f64) -> String {
-    c_snprintf_double(b"%4.2f\0", val)
+    fmt_fixed_width(val, 4, 2, false)
 }
 
 /// Format a floating-point value using C's `%11.0f`.
 pub fn fmt_width11_0(val: f64) -> String {
-    c_snprintf_double(b"%11.0f\0", val)
+    fmt_fixed_width(val, 11, 0, false)
 }
 
 /// Format a `SystemTime` as HMMER's ctime-style footer date.
@@ -150,19 +229,6 @@ pub fn format_hmmer_date(t: std::time::SystemTime) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-
-    #[cfg(unix)]
-    {
-        let time: libc::time_t = secs.try_into().unwrap_or(libc::time_t::MAX);
-        let mut buf = [0 as c_char; 32];
-        let ptr = unsafe { ctime_r(&time, buf.as_mut_ptr()) };
-        if !ptr.is_null() {
-            return unsafe { CStr::from_ptr(buf.as_ptr()) }
-                .to_string_lossy()
-                .trim_end_matches('\n')
-                .to_string();
-        }
-    }
 
     let (sec, min, hour, day, month, year) = broken_down_time(secs);
     let months = [
@@ -223,13 +289,40 @@ mod tests {
     #[test]
     fn test_fmt_evalue() {
         // Match C %9.2g behavior
+        assert_eq!(fmt_evalue(-0.0), "       -0");
         assert_eq!(fmt_evalue(4.2e-24), "  4.2e-24");
         assert_eq!(fmt_evalue(1e-23), "    1e-23");
         assert_eq!(fmt_evalue(7.3e-15), "  7.3e-15");
+        assert_eq!(fmt_evalue(9.999e-5), "   0.0001");
         assert_eq!(fmt_evalue(0.015), "    0.015");
         assert_eq!(fmt_evalue(2.9e-14), "  2.9e-14");
         assert_eq!(fmt_evalue(10.0), "       10"); // Fixed, no trailing .0
+        assert_eq!(fmt_evalue(99.95), "    1e+02");
         assert_eq!(fmt_evalue(0.5), "      0.5");
+        assert_eq!(fmt_evalue(f64::NAN), "      nan");
+    }
+
+    #[test]
+    fn general_formatting_uses_c_exponent_shape() {
+        assert_eq!(fmt_g(-0.0), "-0");
+        assert_eq!(fmt_g(1.0e-5), "1e-05");
+        assert_eq!(fmt_g(1234567.0), "1.23457e+06");
+        assert_eq!(fmt_g3(0.001234), "0.00123");
+        assert_eq!(fmt_g3(9.999e-5), "0.0001");
+        assert_eq!(fmt_g3(999.95), "1e+03");
+        assert_eq!(fmt_g3(1234.0), "1.23e+03");
+        assert_eq!(fmt_g(f64::NAN), "nan");
+    }
+
+    #[test]
+    fn fixed_width_formatting_preserves_field_shapes() {
+        assert_eq!(fmt_score(12.34), "  12.3");
+        assert_eq!(fmt_score(f32::NAN), "   nan");
+        assert_eq!(fmt_bias(0.0), "  0.0");
+        assert_eq!(fmt_hmm_prob(0.25), " 0.25000");
+        assert_eq!(fmt_hmm_prob(f64::NAN), "     nan");
+        assert_eq!(fmt_width11_0(42.0), "         42");
+        assert_eq!(fmt_width11_0(f64::NAN), "        nan");
     }
 
     #[test]
@@ -238,6 +331,7 @@ mod tests {
         assert_eq!(fmt_elapsed_seconds(1.2), "01.20");
         assert_eq!(fmt_elapsed_seconds(12.345), "12.35");
         assert_eq!(fmt_elapsed_seconds(123.456), "123.46");
+        assert_eq!(fmt_elapsed_seconds(f64::INFINITY), "  inf");
     }
 
     #[test]
