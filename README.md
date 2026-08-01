@@ -2,8 +2,9 @@
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
-Original-code snapshot used for translation/parity work: HMMER git commit `9acd8b6758a0ca5d21db6d167e0277484341929b`.
+Original-code snapshot used for translation/parity work and benchmark baselines: vendored upstream HMMER from `https://github.com/EddyRivasLab/hmmer.git`, commit `9acd8b6758a0` (`infernal-1.1.5-dirty`).
 
+* 2026-08-01: Fixed a stray use of libc log(). Added CI tests. Updated benchmarks
 * 2026-06-01: Stable state, speed on parity or better. **if you find cases where ouput deviates from original, please post an issue**
 * 2026-05-29: Further regressions fixed. Expecting more to land
 * 2026-05-28: A slur of further edits have landed. More testing to be done but audits have converged for now
@@ -134,12 +135,12 @@ local snapshot from the realistic yeast/Pfam/Rfam harness, included to make the
 current translation-performance state visible. Treat it as evidence only
 together with the generated report artifacts.
 
-Report: `reports/benchmarks/realistic-compare-c-20260601T074011Z/`
+Report: `/tmp/pres_rustification_hmmer_realistic/`
 
 Command:
 
 ```bash
-SKIP_BUILD=0 scripts/benchmark_realistic_compare_c.sh
+OUT_DIR=/tmp/pres_rustification_hmmer_realistic SKIP_BUILD=1 TMPDIR=/tmp/pres_rustification_hmmer_tmp scripts/benchmark_realistic_compare_c.sh
 ```
 
 Host/toolchain metadata are in the report `metadata.txt`. Fixtures were the
@@ -147,30 +148,32 @@ S. cerevisiae UniProt proteome, Ensembl yeast genome FASTA, `Pfam-A.first12`,
 `PF00226_DnaJ.seed.sto`, and `RF00005_tRNA.dna.seed.sto`; exact paths, sizes,
 and SHA-256 checksums are in `datasets.tsv`. The C baseline is the bundled
 HMMER tree under `hmmer/src`. Ratios below are `Rust / C`; values below 1.0 are
-faster or lower RSS for Rust.
+faster or lower RSS for Rust. Detailed project-level rows, including exact
+Rust and C commands, are staged in `benchmarks/hmmer-rs.tsv` in the presentation repo.
 
 | Case | Rust wall | C wall | Rust/C wall | Rust RSS | C RSS | Rust/C RSS | Parity check |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `hmmbuild_pfam_dnaj` | 0.05s | 0.12s | 0.42x | 5.3 MiB | 3.4 MiB | 1.55x | status only |
+| `hmmbuild_pfam_dnaj` | 0.05s | 0.16s | 0.31x | 5.3 MiB | 3.4 MiB | 1.55x | status only |
 | `hmmbuild_rfam_trna` | 0.04s | 0.07s | 0.57x | 7.2 MiB | 5.9 MiB | 1.21x | status only |
-| `hmmpress_pfam_panel` | 0.02s | 0.04s | 0.50x | 5.0 MiB | 2.8 MiB | 1.78x | status only |
+| `hmmpress_pfam_panel` | 0.02s | 0.08s | 0.25x | 5.0 MiB | 2.8 MiB | 1.78x | status only |
 | `hmmpress_rfam` | 0.00s | 0.00s | n/a | 4.1 MiB | 2.5 MiB | 1.62x | status only |
-| `hmmfetch_pfam_panel` | 0.01s | 0.00s | n/a | 4.1 MiB | 2.5 MiB | 1.62x | status only |
-| `hmmstat_pfam_panel` | 0.03s | 0.01s | 3.00x | 4.4 MiB | 2.5 MiB | 1.75x | status only |
-| `hmmconvert_pfam_dnaj` | 0.01s | 0.00s | n/a | 3.4 MiB | 2.5 MiB | 1.38x | status only |
-| `hmmlogo_pfam_dnaj` | 0.00s | 0.00s | n/a | 3.4 MiB | 2.5 MiB | 1.38x | status only |
-| `hmmemit_pfam_dnaj` | 0.00s | 0.00s | n/a | 4.1 MiB | 2.8 MiB | 1.44x | status only |
-| `hmmalign_pfam_dnaj_emitted` | 0.00s | 0.01s | 0.00x | 4.7 MiB | 3.4 MiB | 1.36x | status only |
-| `hmmsim_pfam_dnaj` | 0.05s | 0.12s | 0.42x | 4.4 MiB | 2.8 MiB | 1.56x | status only |
-| `alimask_pfam_dnaj` | 0.02s | 0.00s | n/a | 4.4 MiB | 2.5 MiB | 1.75x | status only |
-| `makehmmerdb_yeast_genome` | 3.06s | 4.95s | 0.62x | 140.8 MiB | 166.7 MiB | 0.84x | status only |
-| `hmmsearch_pfam_panel_yeast` | 1.22s | 1.61s | 0.76x | 18.8 MiB | 13.3 MiB | 1.41x | normalized full `tblout` (14 rows) |
-| `hmmscan_pfam_panel_yeast` | 1.08s | 3.43s | 0.31x | 11.7 MiB | 5.2 MiB | 2.27x | normalized full `tblout` (14 rows) |
-| `phmmer_query_yeast` | 0.91s | 2.95s | 0.31x | 139.6 MiB | 65.9 MiB | 2.12x | normalized full `tblout` (46 rows) |
-| `jackhmmer_query_yeast` | 2.89s | 7.07s | 0.41x | 191.5 MiB | 67.1 MiB | 2.85x | normalized full `tblout` (46 rows) |
-| `nhmmer_trna_yeast` | 0.49s | 0.81s | 0.60x | 21.8 MiB | 10.3 MiB | 2.11x | normalized full `tblout` (214 rows) |
-| `nhmmer_trna_yeast_fm` | 0.37s | 0.72s | 0.51x | 23.6 MiB | 21.9 MiB | 1.08x | normalized full `tblout` (219 rows) |
-| `nhmmscan_trna_yeast` | 0.53s | 1.63s | 0.33x | 9.3 MiB | 8.6 MiB | 1.07x | normalized full `tblout` (226 rows) |
+| `hmmfetch_pfam_panel` | 0.01s | 0.02s | 0.50x | 3.8 MiB | 2.2 MiB | 1.71x | status only |
+| `hmmstat_pfam_panel` | 0.02s | 0.03s | 0.67x | 4.4 MiB | 2.5 MiB | 1.75x | status only |
+| `hmmconvert_pfam_dnaj` | 0.00s | 0.04s | n/a | 3.4 MiB | 2.5 MiB | 1.38x | status only |
+| `hmmlogo_pfam_dnaj` | 0.00s | 0.04s | n/a | 3.4 MiB | 2.5 MiB | 1.38x | status only |
+| `hmmemit_pfam_dnaj` | 0.00s | 0.03s | n/a | 4.1 MiB | 2.8 MiB | 1.44x | status only |
+| `hmmalign_pfam_dnaj_emitted` | 0.01s | 0.05s | 0.20x | 4.4 MiB | 3.1 MiB | 1.40x | status only |
+| `hmmsim_pfam_dnaj` | 0.05s | 0.17s | 0.29x | 4.4 MiB | 2.8 MiB | 1.56x | status only |
+| `alimask_pfam_dnaj` | 0.02s | 0.03s | 0.67x | 4.1 MiB | 2.5 MiB | 1.62x | status only |
+| `makehmmerdb_yeast_genome` | 2.97s | 4.67s | 0.64x | 141.2 MiB | 166.7 MiB | 0.85x | status only |
+| `hmmsearch_pfam_panel_yeast` | 1.14s | 1.56s | 0.73x | 18.6 MiB | 15.0 MiB | 1.24x | normalized full `tblout` (14 rows) |
+| `hmmscan_pfam_panel_yeast` | 1.02s | 3.43s | 0.30x | 11.1 MiB | 4.9 MiB | 2.27x | normalized full `tblout` (14 rows) |
+| `phmmer_query_yeast` | 0.89s | 2.92s | 0.30x | 143.0 MiB | 65.6 MiB | 2.18x | normalized full `tblout` (46 rows) |
+| `jackhmmer_query_yeast` | 2.82s | 7.04s | 0.40x | 180.2 MiB | 67.1 MiB | 2.69x | normalized full `tblout` (46 rows) |
+| `nhmmer_trna_yeast` | 0.48s | 0.86s | 0.56x | 21.8 MiB | 10.0 MiB | 2.18x | normalized full `tblout` (214 rows) |
+| `nhmmer_trna_yeast_fm` | 0.33s | 0.71s | 0.46x | 23.6 MiB | 21.9 MiB | 1.08x | normalized full `tblout` (219 rows) |
+| `nhmmscan_trna_yeast` | 0.51s | 1.64s | 0.31x | 9.3 MiB | 8.6 MiB | 1.08x | normalized full `tblout` (226 rows) |
+
 
 The `status only` utility rows mean both commands exited successfully and were
 timed by the harness. Search/scan rows additionally compare normalized full
