@@ -1,6 +1,8 @@
 #[doc(hidden)]
 pub mod cmath;
 pub mod random;
+pub mod rootfinder;
+pub mod scorematrix;
 pub mod simd_env;
 pub mod vectorops;
 

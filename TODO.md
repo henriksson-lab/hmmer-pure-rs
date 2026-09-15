@@ -7,6 +7,172 @@ benchmark, or failed experiment changes the next useful target.
 Preserve evidence for active parity/speed claims until each item has regression
 coverage.
 
+## Single-Sequence Builder De-Hybridization - 2026-09-15 (issue #1)
+
+Issue #1 reported that nhmmer-from-FASTA E-values diverge from C/pyhmmer for
+nucleotide queries. The directive from Mahogny on that issue was to fix it by
+improving the translation of the tracked upstream commit rather than patching
+the symptom, to avoid a hybrid translation. This pass ports the single-sequence
+builder slice of `EddyRivasLab/hmmer@9acd8b6758a0` (Easel
+`EddyRivasLab/easel@07ca83b`, release 0.49) 1:1.
+
+What was hybrid, and what replaced it:
+
+- **No `p7_SingleBuilder` at all.** Its logic was inlined ad hoc at six call
+  sites. Now `builder::Builder::single_builder` (port of p7_builder.c:496), with
+  `Builder` carrying the single-sequence slice of `P7_BUILDER`.
+- **No `ESL_SCOREMATRIX`.** `esl_scorematrix_ProbifyGivenBG` was approximated by
+  an 80-step bisection over `[0, hi]` in `seqmodel.rs`, plus a **second, separate
+  copy** of the same approximation inside `nhmmer.rs`. Now `util/scorematrix.rs`
+  ports `esl_scorematrix_{Create,Set,Read,Max,Min,ProbifyGivenBG,
+  JointToConditionalOnQuery}` + `set_degenerate_probs`, using a real port of
+  `esl_root_NewtonRaphson` (`util/rootfinder.rs`, abs/rel tol 1e-15, max 100
+  iters) as C does.
+- **`nhmmer.rs` carried a private duplicate builder** (~200 lines):
+  `build_nhmmer_single_sequence_hmm`, its own `DNA1_CANONICAL_SCORES`, its own
+  lambda solver, and its own composition/consensus. It silently ignored `--mx`,
+  `--mxfile` and `--bgfile`. Deleted; both the FASTA-query path (nhmmer.c:905)
+  and the `--singlemx` MSA path (nhmmer.c:931) now go through one `Builder`
+  built by `nhmmer_builder()` (nhmmer.c:877-894).
+- **`p7_hmm_SetComposition` / `p7_hmm_SetConsensus` existed in three copies**
+  (seqmodel.rs, builder.rs, nhmmer.rs), which disagreed: the nhmmer copy skipped
+  consensus case-thresholding, and the builder.rs copy computed occupancy wholly
+  in `f32` where C promotes to `double`. Consolidated into `hmm.rs` as ports of
+  p7_hmm.c:625/:702/:1338.
+- **The bug in the issue:** `p7_SingleBuilder`'s DNA/RNA block
+  (p7_builder.c:512-516) had no counterpart, so every single-sequence model
+  carried `max_length == -1`. `builder::max_length_from_beta` already existed and
+  was simply never called from a single-sequence path.
+- `nhmmer_max_length` now mirrors nhmmer.c:938-940 exactly. The old version
+  keyed the third branch on `max_length > 0` and carried an extra
+  `w_beta == 0` branch, which diverged for a model read from a file with no
+  `MAXL` under `--w_beta 0`.
+- `--popen`/`--pextend` are now `f64` in phmmer/jackhmmer/nhmmer/hmmbuild, as
+  C's `esl_opt_GetReal` returns `double` and `p7_Seqmodel` evaluates
+  `1.0 - 2*popen` in double before narrowing to float.
+- Score-system error text now matches C's (`no matrix named %s is available as a
+  built-in`, `Failed to find or open matrix file %s`) instead of the port's own
+  invented wording.
+
+Evidence:
+
+- `esl_scorematrix` port verified **bit-identical to C** across BLOSUM62, PAM30,
+  DNA1/DNA and DNA1/RNA: lambda and all `Kp-2` conditional rows, every `double`
+  exactly equal (76 keys, 0 mismatches). Pinned as unit tests in
+  `src/util/scorematrix.rs`. To regenerate: run `examples/dump_scorematrix.rs`
+  and diff numerically against a short C driver that calls
+  `esl_scorematrix_Set` -> `esl_scorematrix_ProbifyGivenBG` ->
+  `esl_scorematrix_JointToConditionalOnQuery` with `p7_bg_Create()`
+  frequencies, printing `%.17e`:
+
+  ```sh
+  gcc -O0 -o dump dump.c -I hmmer/src -I hmmer/easel -I hmmer \
+      -L hmmer/src -L hmmer/easel -lhmmer -leasel -lm
+  cargo run --example dump_scorematrix
+  ```
+
+  Compare by parsing both outputs and testing exact float equality; do not
+  compare the text directly, since C's `%.17e` and Rust's `{:.17e}` disagree on
+  exponent zero-padding.
+- Three-way agreement on the reporter's fixture
+  (`domainator/test/data/simple_dna_queries.fna`): `MAXL 147` from C
+  `hmmbuild --singlemx --dna`, from pyhmmer 0.12.1's
+  `plan7.Builder(Alphabet.dna()).build()`, and from this port. The full model is
+  byte-identical to C; pyhmmer differs only by the `EFFN` line, which
+  `hmmbuild.c:966` adds after `p7_SingleBuilder` and the library call does not.
+- `nhmmer` with a FASTA query is row-identical to C, E-values included, on a
+  200 kb synthetic target with the query planted at three positions - the case
+  where `max_length` actually drives the long-target E-value correction.
+- `hmmbuild --singlemx` models now byte-identical to C (ignoring `DATE`/`COM`)
+  for: DNA, protein/BLOSUM62, protein/PAM30, and a DNA query containing
+  degenerate residues. Before this pass the DNA case differed by exactly one
+  line, the missing `MAXL`.
+
+Validation against real-world fixtures (2026-09-15):
+
+Downloaded the `external/new_real` set (`scripts/download_new_real_world_fixtures.sh`)
+so the E. coli proteome tests could actually run. That unblocked 43 of the 81
+`real_world_regression_tests` failures; the suite went 37p/81f -> 86p/38f (the
+extra 6 passes are this pass's new tests).
+
+Seven of the eight failing tests that exercise the single-sequence builder now
+pass against bundled C, including the two that matter most for the lambda change
+(bisection -> Newton/Raphson affects every phmmer and jackhmmer query model):
+
+- `test_phmmer_dnak_ecoli_proteome_matches_bundled_c_rows`
+- `test_jackhmmer_dnak_ecoli_proteome_matches_bundled_c_rows`
+- `test_jackhmmer_dnak_ecoli_first800_chkhmm_matches_bundled_c`
+- `test_new_real_dnak_singlemx_hmmbuild_preserves_bundled_c_query_metadata`
+- `test_new_real_dnak_phmmer_max_domtblout_gzip_matches_bundled_c_rows`
+- `test_phmmer_dnak_ecoli_first500_alignment_wraps_like_bundled_c`
+- `test_realistic_dnak_phmmer_acc_domtblout_matches_bundled_c_rows`
+
+Regression check: with the fixtures present, the failing-test *set* is
+byte-for-byte identical between `HEAD` (run in a throwaway `git worktree` with
+`hmmer/` and `external/` symlinked) and this change - 38 failures on each side,
+same names. No regressions.
+
+Operational notes for whoever runs the fixture scripts next:
+
+- **UniProt's stream endpoint fails over HTTP/2.** Both proteome downloads in
+  `scripts/download_new_real_world_fixtures.sh` and
+  `scripts/download_realistic_fixtures.sh` stall and die with
+  `curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR`. Adding
+  `--http1.1` to the `curl` in `fetch()` fixes it. The scripts do not currently
+  pass it, so the UniProt fetches fail out of the box.
+- The remaining 38 failures are still almost all fixture-blocked: ~26 need the
+  `external/realistic` (yeast + `Pfam-A.hmm.gz`, 399 MB) and
+  `external/protein_medium` (human, manual download) sets, and 9 need the lost
+  `hmmer/testsuite/gecco_*` / `minipfam.hmm` fixtures.
+
+Open follow-ups discovered in this pass (not addressed here):
+
+- **Check ordering vs C.** C's hmmbuild and nhmmer open their input files
+  *before* setting the score system, so a bad `--mx` with a missing input file
+  reports the file error first. This port validates the score system up front.
+  Message text now matches C; the ordering does not.
+- **`ctime`/`DATE` is never set on any build path**, so Rust-built models lack
+  the `DATE` line C writes. Fixing it needs a decision about determinism for
+  the golden-file workflow; it affects the MSA path equally.
+- **nhmmscan with a `MAXL`-less model**: C fails hard ("No MAXL field in
+  model(s); is this an old model format?", nhmmscan.c:360) where this port
+  recomputes from the default tail mass.
+- **`phmmer -A` wraps Stockholm output; C does not (found in this pass).**
+  `test_dnak_phmmer_alignment_pp_cons_matches_bundled_c` fails on both `HEAD`
+  and this change. The alignment *content* is identical to bundled C - same
+  sequences, same per-sequence `#=GR PP`, same `#=GC PP_cons`, same `#=GC RF` -
+  but this port emits the alignment in 200-column blocks where C writes each
+  sequence on one unwrapped line. Purely an `esl_msafile_Write` line-wrapping
+  difference, not a scoring or annotation one. Related to, but distinct from,
+  the `hmmemit -a` wrapped-Stockholm item below.
+- **Calibration failure is not propagated (HIGH, found in this pass).** When a
+  model is degenerate enough that the Forward-tau Gumbel fit fails, C's
+  `p7_Calibrate` returns non-`eslOK` and the driver reports
+  `build failed: failed to determine fwd tau` (evalues.c:107) and exits 1. This
+  port's `calibrate::calibrate_with_config` returns `()`, ignores the failed
+  fit, and the bad `evparam` then panics the search with
+  `attempt to subtract with overflow` at `src/simd/ssv_longtarget.rs:329`.
+  Reproduce (both sides):
+
+  ```sh
+  printf '>q1\nGAATTC\n'                            > q.fa
+  printf 'DNA\nA 0.7\nC 0.1\nG 0.1\nT 0.1\n'     > skewed.bg
+  hmmer/src/nhmmer --qsingle_seqs --singlemx --bgfile skewed.bg --dna \
+      q.fa hmmer/testsuite/ecori.fa      # C: clean error, exit 1
+  target/debug/hmmer nhmmer --qsingle_seqs --singlemx --bgfile skewed.bg --dna \
+      q.fa hmmer/testsuite/ecori.fa      # Rust: panics in ssv_longtarget
+  ```
+
+  This is pre-existing, not introduced here, but it only became reachable from
+  the nhmmer CLI once `--bgfile` started reaching the query model (it is C's
+  `info[i].bg`, nhmmer.c:837-840/893/905). Fixing it means threading a `Result`
+  out of `calibrate` — `evalues.c` territory, deliberately left out of the
+  single-sequence builder slice.
+- `hmmer/testsuite/minipfam.hmm` is referenced by `hmmfile::tests::
+  test_read_multiple_hmms` and `ssi::tests::test_build_index` but is **not** an
+  upstream fixture, so both fail against a clean `hmmer` checkout. The previous
+  `hmmer/` snapshot had extra fixtures dropped into `testsuite/`.
+
 ## Broad Core-Library Audit - 2026-05-27 (audit-20260527b)
 
 Read-only parallel audit of the core library + SIMD DP layer (7 areas: SIMD filters,

@@ -972,7 +972,7 @@ fn phmmer_rejects_unknown_substitution_matrix_before_io() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("unknown built-in protein score matrix NO_SUCH_MATRIX"),
+        stderr.contains("no matrix named NO_SUCH_MATRIX is available as a built-in"),
         "{stderr}"
     );
 }
@@ -993,7 +993,7 @@ fn jackhmmer_rejects_unknown_substitution_matrix_before_io() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("unknown built-in protein score matrix NO_SUCH_MATRIX"),
+        stderr.contains("no matrix named NO_SUCH_MATRIX is available as a built-in"),
         "{stderr}"
     );
 }
@@ -2253,7 +2253,7 @@ fn hmmbuild_rejects_invalid_singlemx_options_before_io() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("unknown built-in protein score matrix"),
+        stderr.contains("no matrix named UNKNOWN is available as a built-in"),
         "{stderr}"
     );
 
@@ -2271,7 +2271,7 @@ fn hmmbuild_rejects_invalid_singlemx_options_before_io() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("failed to read score matrix file missing-custom.mx"),
+        stderr.contains("Failed to find or open matrix file missing-custom.mx"),
         "{stderr}"
     );
 

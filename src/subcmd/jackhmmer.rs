@@ -8,6 +8,7 @@ use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::builder;
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
@@ -15,7 +16,6 @@ use hmmer_pure_rs::msa::Msa;
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::prior::PriorStrategy;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::seqmodel;
 use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::{Hit, TopHits};
@@ -136,11 +136,11 @@ struct Args {
 
     /// Gap open probability for the single-sequence query model
     #[arg(long = "popen", default_value = "0.02", value_parser = parse_popen)]
-    popen: f32,
+    popen: f64,
 
     /// Gap extend probability for the single-sequence query model
     #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
-    pextend: f32,
+    pextend: f64,
 
     /// Substitution score matrix choice
     #[arg(long = "mx", default_value = "BLOSUM62", conflicts_with = "mxfile")]
@@ -385,9 +385,9 @@ fn parse_textw(s: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_popen(s: &str) -> Result<f32, String> {
+fn parse_popen(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap open probability: {e}"))?;
     if (0.0..0.5).contains(&value) {
         Ok(value)
@@ -396,9 +396,9 @@ fn parse_popen(s: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_pextend(s: &str) -> Result<f32, String> {
+fn parse_pextend(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap extend probability: {e}"))?;
     if (0.0..1.0).contains(&value) {
         Ok(value)
@@ -540,15 +540,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     } else {
         PriorStrategy::Default
     };
-    let score_matrix = if let Some(mxfile) = args.mxfile.as_ref() {
-        seqmodel::ScoreMatrix::from_file(mxfile)
-    } else {
-        seqmodel::ScoreMatrix::builtin(&args.matrix)
-    }
-    .unwrap_or_else(|e| {
-        eprintln!("Error: jackhmmer {e}");
-        std::process::exit(1);
-    });
     if args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: target sequence database may not be '-' for jackhmmer");
         std::process::exit(1);
@@ -566,6 +557,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
+
+    // p7_builder_Create() + p7_builder_{Set,Load}ScoreSystem(),
+    // jackhmmer.c:938-939.
+    let mut builder = Builder::new(abc.abc_type).with_seed(args.seed);
+    let score_system = if let Some(mxfile) = args.mxfile.as_ref() {
+        builder.set_score_system(Some(mxfile), args.popen, args.pextend, &bg, &abc)
+    } else {
+        builder.load_score_system(&args.matrix, args.popen, args.pextend, &bg, &abc)
+    };
+    if let Err(e) = score_system {
+        eprintln!("\nError: Failed to set single query seq score system:\n{e}\n");
+        std::process::exit(1);
+    }
 
     let mut output_file = args.output.as_ref().map(|p| {
         crate::subcmd::hmmsearch::create_output_file_or_exit(
@@ -681,7 +685,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(
             out,
             "# subst score matrix (built-in):   {}",
-            score_matrix.name()
+            args.matrix
         )
         .unwrap();
     }
@@ -821,6 +825,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         ef_n: args.ef_n,
         eft: args.eft,
     };
+    // bld->EmL .. bld->Eft (p7_builder.c:113-119).
+    builder.calibration = calibration_config;
 
     // Read query sequences. C jackhmmer runs the full iterative search once
     // for each FASTA record and keeps the outer report/footer shared.
@@ -876,22 +882,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             // Build HMM for this iteration
             let hmm = if iteration == 1 {
                 // First iteration: single-sequence HMM (phmmer-style)
-                seqmodel::build_single_seq_hmm_with_matrix_and_calibration(
-                    &query_sq.name,
-                    &query_sq.dsq,
-                    query_sq.n,
-                    &abc,
-                    &bg,
-                    &score_matrix,
-                    args.popen,
-                    args.pextend,
-                    args.seed,
-                    calibration_config,
-                )
-                .unwrap_or_else(|e| {
-                    eprintln!("Error: jackhmmer failed to set single query seq score system: {e}");
-                    std::process::exit(1);
-                })
+                // p7_SingleBuilder(), jackhmmer.c:1020.
+                builder
+                    .single_builder(&query_sq.name, &query_sq.dsq, query_sq.n, &abc, &bg)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: jackhmmer build failed: {e}");
+                        std::process::exit(1);
+                    })
             } else {
                 // C jackhmmer.c:683 builds the round's MSA once at end of
                 // iteration; the same `msa` object is then handed to

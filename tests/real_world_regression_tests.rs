@@ -5641,3 +5641,205 @@ fn test_nhmmer_tblout_dash_line_aligns_with_header_wide_accession() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Single-sequence query builder (issue #1): p7_SingleBuilder parity.
+//
+// These exercise the path where a nucleotide FASTA query is turned into a
+// profile by p7_SingleBuilder (nhmmer.c:905) rather than read from a .hmm file.
+// ---------------------------------------------------------------------------
+
+/// A DNA query taken verbatim from the reporter's own fixtures
+/// (`domainator/test/data/simple_dna_queries.fna`), inlined so the test needs
+/// no new committed fixture.
+const SINGLE_SEQ_DNA_QUERY: &str =
+    ">dna_query_1\nTTGACCATGGTCAGTCAGGCTAGCTAGCTAGCATCGATCGATCGTAGCTAGCTAGCTAGCTA\n";
+
+fn write_temp(dir: &std::path::Path, name: &str, contents: &str) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, contents).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+fn hmm_field(hmm_text: &str, tag: &str) -> Option<String> {
+    hmm_text
+        .lines()
+        .find(|l| l.starts_with(tag))
+        .map(|l| l[tag.len()..].trim().to_string())
+}
+
+/// `hmmbuild --singlemx --dna` must emit a `MAXL` line equal to C's.
+///
+/// This is the defect issue #1 reported: `p7_SingleBuilder()` sets
+/// `hmm->max_length` for DNA/RNA (p7_builder.c:512-516) and no Rust
+/// single-sequence path did, so every nucleotide single-sequence model carried
+/// the -1 sentinel and was written without `MAXL`.
+#[test]
+fn test_single_seq_dna_model_maxl_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let query = write_temp(dir.path(), "query.fa", SINGLE_SEQ_DNA_QUERY);
+    let rust_hmm = dir.path().join("rust.hmm");
+    let c_hmm = dir.path().join("c.hmm");
+
+    let rust = Command::new(binary_path("hmmer"))
+        .args([
+            "build",
+            "--informat",
+            "afa",
+            "--singlemx",
+            "--dna",
+            rust_hmm.to_str().unwrap(),
+            &query,
+        ])
+        .output()
+        .expect("failed to run hmmer build");
+    assert!(
+        rust.status.success(),
+        "rust hmmbuild failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let c = Command::new(test_path("hmmer/src/hmmbuild"))
+        .args([
+            "--singlemx",
+            "--dna",
+            c_hmm.to_str().unwrap(),
+            &query,
+        ])
+        .output()
+        .expect("failed to run bundled C hmmbuild");
+    assert!(
+        c.status.success(),
+        "C hmmbuild failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let rust_text = std::fs::read_to_string(&rust_hmm).unwrap();
+    let c_text = std::fs::read_to_string(&c_hmm).unwrap();
+
+    let c_maxl = hmm_field(&c_text, "MAXL").expect("C model must carry MAXL");
+    let rust_maxl = hmm_field(&rust_text, "MAXL");
+    assert_eq!(
+        rust_maxl.as_deref(),
+        Some(c_maxl.as_str()),
+        "single-sequence DNA model MAXL diverged from bundled C"
+    );
+}
+
+/// The whole single-sequence model, not just `MAXL`, must match C.
+///
+/// `DATE` and `COM` are dropped: this port does not set `ctime` on any build
+/// path (see TODO.md), and `COM` echoes the command line.
+fn assert_singlemx_model_matches_c(extra_rust: &[&str], extra_c: &[&str], query_text: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let query = write_temp(dir.path(), "query.fa", query_text);
+    let rust_hmm = dir.path().join("rust.hmm");
+    let c_hmm = dir.path().join("c.hmm");
+
+    let mut rust_args: Vec<String> = vec![
+        "build".into(),
+        "--informat".into(),
+        "afa".into(),
+        "--singlemx".into(),
+    ];
+    rust_args.extend(extra_rust.iter().map(|s| s.to_string()));
+    rust_args.push(rust_hmm.to_str().unwrap().to_string());
+    rust_args.push(query.clone());
+    let rust = Command::new(binary_path("hmmer"))
+        .args(&rust_args)
+        .output()
+        .expect("failed to run hmmer build");
+    assert!(
+        rust.status.success(),
+        "rust hmmbuild failed: {}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+
+    let mut c_args: Vec<String> = vec!["--singlemx".into()];
+    c_args.extend(extra_c.iter().map(|s| s.to_string()));
+    c_args.push(c_hmm.to_str().unwrap().to_string());
+    c_args.push(query.clone());
+    let c = Command::new(test_path("hmmer/src/hmmbuild"))
+        .args(&c_args)
+        .output()
+        .expect("failed to run bundled C hmmbuild");
+    assert!(
+        c.status.success(),
+        "C hmmbuild failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    let strip = |t: String| -> Vec<String> {
+        t.lines()
+            .filter(|l| !l.starts_with("DATE") && !l.starts_with("COM "))
+            .map(|l| l.to_string())
+            .collect()
+    };
+    let rust_lines = strip(std::fs::read_to_string(&rust_hmm).unwrap());
+    let c_lines = strip(std::fs::read_to_string(&c_hmm).unwrap());
+    assert_eq!(
+        rust_lines, c_lines,
+        "single-sequence model diverged from bundled C (args: {extra_c:?})"
+    );
+}
+
+#[test]
+fn test_single_seq_dna_model_matches_bundled_c_exactly() {
+    assert_singlemx_model_matches_c(&["--dna"], &["--dna"], SINGLE_SEQ_DNA_QUERY);
+}
+
+/// A DNA query containing IUPAC degenerate codes. `p7_Seqmodel()` indexes the
+/// conditional matrix by the query's own digital code (seqmodel.c:63), so this
+/// exercises `set_degenerate_probs()`.
+#[test]
+fn test_single_seq_degenerate_dna_model_matches_bundled_c() {
+    assert_singlemx_model_matches_c(
+        &["--dna"],
+        &["--dna"],
+        ">degen\nACGTNNACGTRYKMACGTACGTWSACGTACGT\n",
+    );
+}
+
+#[test]
+fn test_single_seq_protein_model_matches_bundled_c() {
+    assert_singlemx_model_matches_c(
+        &[],
+        &[],
+        ">prot\nMKVLATSLLLLAAQPAMAAEITLVPSVKLQIGDRDNRGYYWDGGHWRDHGWWKQHYEWRGN\n",
+    );
+}
+
+/// A non-default built-in must reach the model. Before this port, `--mx` was
+/// honoured here but silently ignored on nhmmer's FASTA-query path.
+#[test]
+fn test_single_seq_protein_pam30_model_matches_bundled_c() {
+    assert_singlemx_model_matches_c(
+        &["--mx", "PAM30"],
+        &["--mx", "PAM30"],
+        ">prot\nMKVLATSLLLLAAQPAMAAEITLVPSVKLQIGDRDNRGYYWDGGHWRDHGWWKQHYEWRGN\n",
+    );
+}
+
+/// nhmmer with a FASTA query must agree with C on the hit table. This is the
+/// end-to-end path from issue #1.
+#[test]
+fn test_nhmmer_fasta_query_tblout_matches_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let query = write_temp(dir.path(), "query.fa", SINGLE_SEQ_DNA_QUERY);
+    let target = write_temp(
+        dir.path(),
+        "target.fa",
+        ">dna_target_1\nGGGTTTCCCAAAGGGTTTCCCAAATTGACCATGGTCAGTCAGGCTAGCTAGCTAGCATCGATCGATCGTAGCTAGCTAGCTAGCTAGGGCCCTTTAAAGGGCCCTTTAAAGGGCCCTTTAAAGGGCCCTTTAAA\n",
+    );
+
+    let rust_rows = parse_nhmmer_rows(&run_nhmmer_tblout(&query, &target));
+    let c_rows = parse_nhmmer_rows(&run_c_nhmmer_tblout(&query, &target));
+    assert!(
+        !c_rows.is_empty(),
+        "fixture should produce at least one C hit"
+    );
+    assert_eq!(
+        rust_rows, c_rows,
+        "nhmmer FASTA-query tblout rows diverged from bundled C output"
+    );
+}
