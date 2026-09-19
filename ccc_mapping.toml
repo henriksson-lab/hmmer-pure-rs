@@ -456,3 +456,72 @@ other = "FM_window_from_diag"
 [[entries]]
 rust  = "p7_pli_extend_and_merge_windows"
 other = "p7_pli_ExtendAndMergeWindows"
+
+# =================================================================
+# Single-sequence builder — hmmer/src/p7_builder.c, hmmer/src/seqmodel.c,
+# hmmer/src/p7_hmm.c, easel/esl_scorematrix.c, easel/esl_rootfinder.c
+#
+# Rust splits C's p7_builder.c across builder.rs (the P7_BUILDER object and
+# p7_SingleBuilder), seqmodel.rs (p7_Seqmodel alone), and util/scorematrix.rs
+# + util/rootfinder.rs (the Easel pieces the score system needs).
+# =================================================================
+
+[[entries]]
+rust  = "seqmodel"
+other = "p7_Seqmodel"
+
+[[entries]]
+rust  = "single_builder"
+other = "p7_SingleBuilder"
+
+[[entries]]
+rust  = "load_score_system"
+other = "p7_builder_LoadScoreSystem"
+
+[[entries]]
+rust  = "set_score_system"
+other = "p7_builder_SetScoreSystem"
+
+[[entries]]
+rust  = "build_hmm_from_msa"
+other = "p7_Builder"
+
+[[entries]]
+rust  = "max_length_from_beta"
+other = "p7_Builder_MaxLength"
+
+[[entries]]
+rust  = "set_max_length_from_beta"
+other = "p7_Builder_MaxLength"
+
+[[entries]]
+rust  = "set_composition"
+other = "p7_hmm_SetComposition"
+
+[[entries]]
+rust  = "set_consensus"
+other = "p7_hmm_SetConsensus"
+
+[[entries]]
+rust  = "calculate_occupancy"
+other = "p7_hmm_CalculateOccupancy"
+
+[[entries]]
+rust  = "probify_given_bg"
+other = "esl_scorematrix_ProbifyGivenBG"
+
+[[entries]]
+rust  = "joint_to_conditional_on_query"
+other = "esl_scorematrix_JointToConditionalOnQuery"
+
+[[entries]]
+rust  = "set_degenerate_probs"
+other = "set_degenerate_probs"
+
+[[entries]]
+rust  = "lambda_fdf"
+other = "lambda_fdf"
+
+[[entries]]
+rust  = "newton_raphson"
+other = "esl_root_NewtonRaphson"

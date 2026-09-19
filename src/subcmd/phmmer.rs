@@ -12,7 +12,7 @@ use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::seqmodel;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::{Hit, TopHits};
@@ -160,11 +160,11 @@ struct Args {
 
     /// Gap open probability
     #[arg(long = "popen", default_value = "0.02", value_parser = parse_popen)]
-    popen: f32,
+    popen: f64,
 
     /// Gap extend probability
     #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
-    pextend: f32,
+    pextend: f64,
 
     /// Substitution score matrix choice
     #[arg(long = "mx", default_value = "BLOSUM62", conflicts_with = "mxfile")]
@@ -331,9 +331,9 @@ fn parse_textw(s: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_popen(s: &str) -> Result<f32, String> {
+fn parse_popen(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap open probability: {e}"))?;
     if (0.0..0.5).contains(&value) {
         Ok(value)
@@ -342,9 +342,9 @@ fn parse_popen(s: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_pextend(s: &str) -> Result<f32, String> {
+fn parse_pextend(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap extend probability: {e}"))?;
     if (0.0..1.0).contains(&value) {
         Ok(value)
@@ -405,15 +405,6 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
     validate_sequence_format("phmmer --qformat", args.qformat.as_deref());
     validate_sequence_format("phmmer --tformat", args.tformat.as_deref());
-    let score_matrix = if let Some(mxfile) = args.mxfile.as_ref() {
-        seqmodel::ScoreMatrix::from_file(mxfile)
-    } else {
-        seqmodel::ScoreMatrix::builtin(&args.matrix)
-    }
-    .unwrap_or_else(|e| {
-        eprintln!("Error: phmmer {e}");
-        std::process::exit(1);
-    });
 
     logsum::p7_flogsuminit();
 
@@ -427,6 +418,19 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
     let abc = Alphabet::amino();
     let bg = Bg::new(&abc);
+
+    // p7_builder_Create() + p7_builder_{Set,Load}ScoreSystem(), phmmer.c:446-447:
+    // --mxfile takes precedence, else the --mx built-in (default BLOSUM62).
+    let mut builder = Builder::new(abc.abc_type).with_seed(args.seed);
+    let score_system = if let Some(mxfile) = args.mxfile.as_ref() {
+        builder.set_score_system(Some(mxfile), args.popen, args.pextend, &bg, &abc)
+    } else {
+        builder.load_score_system(&args.matrix, args.popen, args.pextend, &bg, &abc)
+    };
+    if let Err(e) = score_system {
+        eprintln!("\nError: Failed to set single query seq score system:\n{e}\n");
+        std::process::exit(1);
+    }
     if args.seqfile.as_path() == Path::new("-") && args.seqdb.as_path() == Path::new("-") {
         eprintln!("Error: Either <seqfile> or <seqdb> may be '-' but not both");
         std::process::exit(1);
@@ -560,7 +564,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(
             out,
             "# subst score matrix (built-in):   {}",
-            score_matrix.name()
+            args.matrix
         )
         .unwrap();
     }
@@ -648,6 +652,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         ef_n: args.ef_n,
         eft: args.eft,
     };
+    // bld->EmL .. bld->Eft (p7_builder.c:113-119).
+    builder.calibration = calibration_config;
 
     // Read query sequences
     let mut query_sqf = open_sequence_file(&args.seqfile, &abc, args.qformat.as_deref())
@@ -664,22 +670,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     }) {
         n_queries += 1;
         // Build HMM from query sequence
-        let hmm = seqmodel::build_single_seq_hmm_with_matrix_and_calibration(
-            &query_sq.name,
-            &query_sq.dsq,
-            query_sq.n,
-            &abc,
-            &bg,
-            &score_matrix,
-            args.popen,
-            args.pextend,
-            args.seed,
-            calibration_config,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("Error: phmmer failed to set single query seq score system: {e}");
-            std::process::exit(1);
-        });
+        // p7_SingleBuilder(), phmmer.c:557.
+        let hmm = builder
+            .single_builder(&query_sq.name, &query_sq.dsq, query_sq.n, &abc, &bg)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: phmmer build failed: {e}");
+                std::process::exit(1);
+            });
 
         let mut local_bg = bg.clone();
         local_bg.set_filter(hmm.m, &hmm.compo);

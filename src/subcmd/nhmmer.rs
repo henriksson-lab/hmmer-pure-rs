@@ -17,6 +17,7 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::{Alphabet, AlphabetType, DSQ_SENTINEL};
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::builder::{self, DEFAULT_WINDOW_BETA};
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::fm_index::{FmIndex, FmInterval, MmapBytes};
@@ -28,7 +29,6 @@ use hmmer_pure_rs::output::{fmt_evalue, fmt_g, fmt_g3};
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::prior::PriorStrategy;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::seqmodel;
 use hmmer_pure_rs::sequence::{self, Sequence};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::TopHits;
@@ -210,11 +210,11 @@ struct Args {
 
     /// Gap open probability for single-sequence query models
     #[arg(long = "popen", default_value = "0.03125", value_parser = parse_gap_open)]
-    popen: f32,
+    popen: f64,
 
     /// Gap extend probability for single-sequence query models
     #[arg(long = "pextend", default_value = "0.75", value_parser = parse_gap_extend)]
-    pextend: f32,
+    pextend: f64,
 
     /// Use substitution score matrix for single-sequence MSA-format inputs
     #[arg(long = "singlemx")]
@@ -463,9 +463,9 @@ fn parse_block_length(s: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_gap_open(s: &str) -> Result<f32, String> {
+fn parse_gap_open(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap open probability: {e}"))?;
     if (0.0..0.5).contains(&value) {
         Ok(value)
@@ -474,9 +474,9 @@ fn parse_gap_open(s: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_gap_extend(s: &str) -> Result<f32, String> {
+fn parse_gap_extend(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap extend probability: {e}"))?;
     if (0.0..1.0).contains(&value) {
         Ok(value)
@@ -2554,10 +2554,19 @@ fn read_query_sequence_hmms(
         );
     }
 
-    let bg = Bg::new(&abc);
+    let bg = nhmmer_query_bg(args, &abc)?;
+    let builder = nhmmer_builder(args, &abc, &bg)?;
     sequences
         .iter()
-        .map(|seq| build_nhmmer_single_sequence_hmm(seq, &abc, &bg, args.popen, args.pextend))
+        .map(|seq| {
+            // p7_SingleBuilder(), nhmmer.c:905.
+            let hmm = builder
+                .single_builder(&seq.name, &seq.dsq, seq.n, &abc, &bg)
+                .map_err(|e| format!("Error: nhmmer build failed: {e}"))?;
+            // Note: unlike hmmbuild.c:966, nhmmer never sets eff_nseq after
+            // p7_SingleBuilder, so the written model carries no EFFN line.
+            Ok(hmm)
+        })
         .collect()
 }
 
@@ -2654,206 +2663,6 @@ fn query_sequence_format(format: &str) -> Option<sequence::SequenceFormat> {
     sequence::SequenceFormat::from_name(format)
 }
 
-fn build_nhmmer_single_sequence_hmm(
-    seq: &Sequence,
-    abc: &Alphabet,
-    bg: &Bg,
-    popen: f32,
-    pextend: f32,
-) -> Result<Hmm, String> {
-    let cond = dna1_conditional_probabilities(abc, &bg.f)?;
-    let mut hmm = Hmm::new(seq.n, abc.abc_type, abc.k);
-    hmm.name = seq.name.clone();
-
-    for node in 0..=seq.n {
-        if node > 0 {
-            let residue = seq.dsq[node] as usize;
-            if residue < cond.len() {
-                hmm.mat[node][..abc.k].copy_from_slice(&cond[residue][..abc.k]);
-            } else {
-                hmm.mat[node][..abc.k].copy_from_slice(&bg.f[..abc.k]);
-            }
-        }
-
-        hmm.ins[node][..abc.k].copy_from_slice(&bg.f[..abc.k]);
-        hmm.t[node][p7hmm::MM] = 1.0 - 2.0 * popen;
-        hmm.t[node][p7hmm::MI] = popen;
-        hmm.t[node][p7hmm::MD] = popen;
-        hmm.t[node][p7hmm::IM] = 1.0 - pextend;
-        hmm.t[node][p7hmm::II] = pextend;
-        hmm.t[node][p7hmm::DM] = 1.0 - pextend;
-        hmm.t[node][p7hmm::DD] = pextend;
-    }
-
-    hmm.t[seq.n][p7hmm::MM] = 1.0 - popen;
-    hmm.t[seq.n][p7hmm::MD] = 0.0;
-    hmm.t[seq.n][p7hmm::DM] = 1.0;
-    hmm.t[seq.n][p7hmm::DD] = 0.0;
-
-    set_nhmmer_single_sequence_composition(&mut hmm);
-    set_nhmmer_single_sequence_consensus(&mut hmm, seq, abc);
-    hmmer_pure_rs::calibrate::calibrate(&mut hmm, abc, bg);
-    hmm.nseq = 1;
-    hmm.eff_nseq = 1.0;
-    Ok(hmm)
-}
-
-const DNA1_CANONICAL_SCORES: [[i32; 4]; 4] = [
-    [41, -32, -26, -26],
-    [-32, 39, -38, -17],
-    [-26, -38, 46, -31],
-    [-26, -17, -31, 39],
-];
-
-fn dna1_conditional_probabilities(abc: &Alphabet, bg_f: &[f32]) -> Result<Vec<Vec<f32>>, String> {
-    if abc.k != 4 {
-        return Err("nhmmer single-sequence query models require DNA or RNA alphabet".to_string());
-    }
-    let lambda = solve_nhmmer_dna1_lambda(bg_f)?;
-    let mut joint = vec![vec![0.0_f64; abc.kp]; abc.kp];
-    for a in 0..abc.k {
-        for b in 0..abc.k {
-            joint[a][b] = (bg_f[a] as f64)
-                * (bg_f[b] as f64)
-                * c_exp_f64(lambda * DNA1_CANONICAL_SCORES[a][b] as f64);
-        }
-    }
-
-    for row in joint.iter_mut().take(abc.k) {
-        for jp in abc.k + 1..abc.kp - 2 {
-            row[jp] = (0..abc.k)
-                .filter(|&j| abc.degen[jp][j])
-                .map(|j| row[j])
-                .sum();
-        }
-    }
-    for ip in abc.k + 1..abc.kp - 2 {
-        let canonical_cols: Vec<f64> = (0..abc.k)
-            .map(|j| {
-                (0..abc.k)
-                    .filter(|&i| abc.degen[ip][i])
-                    .map(|i| joint[i][j])
-                    .sum()
-            })
-            .collect();
-        for (j, &value) in canonical_cols.iter().enumerate() {
-            joint[ip][j] = value;
-        }
-        for jp in abc.k + 1..abc.kp - 2 {
-            joint[ip][jp] = (0..abc.k)
-                .filter(|&j| abc.degen[jp][j])
-                .map(|j| joint[ip][j])
-                .sum();
-        }
-    }
-
-    let any = abc.unknown_code() as usize;
-    let mut cond = vec![vec![0.0_f32; abc.k]; abc.kp];
-    for residue in 0..abc.kp - 2 {
-        let denom = joint[residue][any];
-        if denom > 0.0 {
-            for b in 0..abc.k {
-                cond[residue][b] = (joint[residue][b] / denom) as f32;
-            }
-        } else {
-            cond[residue][..abc.k].copy_from_slice(&bg_f[..abc.k]);
-        }
-    }
-    cond[abc.kp - 2][..abc.k].copy_from_slice(&bg_f[..abc.k]);
-    cond[abc.kp - 1][..abc.k].copy_from_slice(&bg_f[..abc.k]);
-    Ok(cond)
-}
-
-fn solve_nhmmer_dna1_lambda(bg_f: &[f32]) -> Result<f64, String> {
-    let max_score = DNA1_CANONICAL_SCORES
-        .iter()
-        .flat_map(|row| row.iter())
-        .copied()
-        .max()
-        .unwrap_or(0) as f64;
-    if max_score <= 0.0 {
-        return Err("DNA1 score matrix has no positive scores".to_string());
-    }
-
-    let mut hi = 1.0 / max_score;
-    while hi < 50.0 && nhmmer_dna1_lambda_f(bg_f, hi) <= 0.0 {
-        hi *= 2.0;
-    }
-    if nhmmer_dna1_lambda_f(bg_f, hi) <= 0.0 {
-        return Err("failed to bracket lambda root for DNA1 score matrix".to_string());
-    }
-
-    let mut lo = 0.0_f64;
-    for _ in 0..80 {
-        let mid = (lo + hi) * 0.5;
-        if nhmmer_dna1_lambda_f(bg_f, mid) > 0.0 {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    Ok((lo + hi) * 0.5)
-}
-
-fn nhmmer_dna1_lambda_f(bg_f: &[f32], lambda: f64) -> f64 {
-    let mut fx = -1.0_f64;
-    for a in 0..4 {
-        for b in 0..4 {
-            fx += (bg_f[a] as f64)
-                * (bg_f[b] as f64)
-                * c_exp_f64(lambda * DNA1_CANONICAL_SCORES[a][b] as f64);
-        }
-    }
-    fx
-}
-
-fn set_nhmmer_single_sequence_composition(hmm: &mut Hmm) {
-    let mut mocc = vec![0.0_f32; hmm.m + 1];
-    let mut iocc = vec![0.0_f32; hmm.m + 1];
-
-    if hmm.m > 0 {
-        mocc[1] = hmm.t[0][p7hmm::MI] + hmm.t[0][p7hmm::MM];
-        for k in 2..=hmm.m {
-            mocc[k] = mocc[k - 1] * (hmm.t[k - 1][p7hmm::MM] + hmm.t[k - 1][p7hmm::MI])
-                + (1.0 - mocc[k - 1]) * hmm.t[k - 1][p7hmm::DM];
-        }
-    }
-
-    iocc[0] = hmm.t[0][p7hmm::MI] / hmm.t[0][p7hmm::IM];
-    for k in 1..=hmm.m {
-        iocc[k] = mocc[k] * hmm.t[k][p7hmm::MI] / hmm.t[k][p7hmm::IM];
-    }
-
-    for x in 0..hmm.abc_k.min(p7hmm::MAXABET) {
-        hmm.compo[x] = hmm.ins[0][x] * iocc[0];
-    }
-    for k in 1..=hmm.m {
-        for x in 0..hmm.abc_k.min(p7hmm::MAXABET) {
-            hmm.compo[x] += hmm.mat[k][x] * mocc[k] + hmm.ins[k][x] * iocc[k];
-        }
-    }
-
-    let sum: f32 = hmm.compo[..hmm.abc_k.min(p7hmm::MAXABET)].iter().sum();
-    if sum > 0.0 {
-        for x in 0..hmm.abc_k.min(p7hmm::MAXABET) {
-            hmm.compo[x] /= sum;
-        }
-    }
-    hmm.flags |= p7hmm::P7H_COMPO;
-}
-
-fn set_nhmmer_single_sequence_consensus(hmm: &mut Hmm, seq: &Sequence, abc: &Alphabet) {
-    let mut cons = vec![b' '; hmm.m + 2];
-    for (node, cons_byte) in cons.iter_mut().enumerate().take(hmm.m + 1).skip(1) {
-        let residue = seq.dsq[node];
-        if abc.is_residue(residue) {
-            *cons_byte = abc.sym[residue as usize];
-        }
-    }
-    hmm.consensus = Some(cons);
-    hmm.flags |= p7hmm::P7H_CONS;
-}
-
 fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
     let mut msas = match args.qformat.as_deref() {
         Some(format) if is_text_msa_query_format(format) => {
@@ -2901,9 +2710,11 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
         );
     }
     let abc = Alphabet::new(first_abc_type);
-    let bg = Bg::new(&abc);
-    let score_matrix = if args.singlemx || args.mxfile.is_some() {
-        Some(nhmmer_score_matrix(args, &abc)?)
+    let bg = nhmmer_query_bg(args, &abc)?;
+    // nhmmer.c:887-894 sets the score system whenever a single sequence may
+    // need it: --qsingle_seqs, or an MSA of one sequence under --singlemx.
+    let single_builder = if args.singlemx || args.mxfile.is_some() {
+        Some(nhmmer_builder(args, &abc, &bg)?)
     } else {
         None
     };
@@ -2927,10 +2738,7 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
                 alignment,
                 &abc,
                 &bg,
-                score_matrix.as_ref().unwrap(),
-                args.popen,
-                args.pextend,
-                args.seed,
+                single_builder.as_ref().unwrap(),
             )?
         } else {
             builder::build_hmm_from_msa_with_prior(
@@ -2955,24 +2763,52 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
     Ok(hmms)
 }
 
-fn nhmmer_score_matrix(args: &Args, abc: &Alphabet) -> Result<seqmodel::ScoreMatrix, String> {
-    if let Some(path) = args.mxfile.as_ref() {
-        seqmodel::ScoreMatrix::from_file_for_alphabet(path, abc)
-            .map_err(|e| format!("Error: nhmmer {e}"))
-    } else {
-        seqmodel::ScoreMatrix::builtin_for_alphabet(&args.matrix, abc.abc_type)
-            .map_err(|e| format!("Error: nhmmer {e}"))
+/// The background model the query builder must use.
+///
+/// C's nhmmer reads `--bgfile` into `bg_manual` (nhmmer.c:817-821), clones it
+/// into `info[i].bg` (nhmmer.c:837-840), and hands *that* to both
+/// `p7_builder_LoadScoreSystem()` (nhmmer.c:893) and `p7_SingleBuilder()`
+/// (nhmmer.c:905). So a custom background changes the query model's match
+/// emissions and insert emissions, not just the search null model.
+fn nhmmer_query_bg(args: &Args, abc: &Alphabet) -> Result<Bg, String> {
+    let mut bg = Bg::new(abc);
+    if let Some(path) = &args.bgfile {
+        bg.read_file(abc, path).map_err(|e| format!("Error: {e}"))?;
     }
+    Ok(bg)
+}
+
+/// Port of nhmmer.c:877-894: create the builder, give it the window settings,
+/// and set its score system from `--mxfile` or the `--mx` built-in.
+///
+/// Note the builder is `p7_builder_Create(NULL, abc)` (nhmmer.c:878), i.e. `go`
+/// is NULL, so it keeps the default seed 42 and the default EmL..Eft
+/// calibration config. nhmmer's own `--seed` is *not* threaded into the query
+/// model builder in C, and must not be here either.
+fn nhmmer_builder(args: &Args, abc: &Alphabet, bg: &Bg) -> Result<Builder, String> {
+    let mut builder = Builder::new(abc.abc_type).with_window(args.w_length, args.w_beta);
+    let result = if args.mxfile.is_some() {
+        builder.set_score_system(
+            args.mxfile.as_deref(),
+            args.popen,
+            args.pextend,
+            bg,
+            abc,
+        )
+    } else {
+        builder.load_score_system(&args.matrix, args.popen, args.pextend, bg, abc)
+    };
+    result.map_err(|e| {
+        format!("\nError: Failed to set single query seq score system:\n{e}\n")
+    })?;
+    Ok(builder)
 }
 
 fn build_nhmmer_singlemx_msa_hmm(
     alignment: &msa::Msa,
     abc: &Alphabet,
     bg: &Bg,
-    matrix: &seqmodel::ScoreMatrix,
-    popen: f32,
-    pextend: f32,
-    seed: u32,
+    builder: &Builder,
 ) -> Result<Hmm, String> {
     let mut dsq = vec![DSQ_SENTINEL];
     for &sym in &alignment.aseq[0] {
@@ -2997,19 +2833,10 @@ fn build_nhmmer_singlemx_msa_hmm(
     } else {
         alignment.sqname[0].as_str()
     };
-    let mut hmm = seqmodel::build_single_seq_hmm_with_matrix_and_calibration(
-        name,
-        &dsq,
-        dsq.len() - 2,
-        abc,
-        bg,
-        matrix,
-        popen,
-        pextend,
-        seed,
-        CalibrationConfig::default(),
-    )
-    .map_err(|e| format!("Error: nhmmer --singlemx failed to build score matrix model: {e}"))?;
+    // p7_SingleBuilder(), nhmmer.c:931.
+    let mut hmm = builder
+        .single_builder(name, &dsq, dsq.len() - 2, abc, bg)
+        .map_err(|e| format!("Error: nhmmer --singlemx failed to build score matrix model: {e}"))?;
     if let Some(ref acc) = alignment.acc {
         hmm.acc = Some(acc.clone());
         hmm.flags |= p7hmm::P7H_ACC;
@@ -7107,21 +6934,30 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Port of nhmmer.c:938-940, the "Assign HMM max_length" block.
+///
+/// `w_length`/`w_beta` are `None` when the user did not pass `--w_length` /
+/// `--w_beta`; C represents that as -1, which is what the comparisons below
+/// rely on. Note the order: an explicit window length wins, then an explicit
+/// beta, and only a model that still carries the -1 sentinel is computed at the
+/// default tail mass. A model that already has a window length — from
+/// `p7_SingleBuilder()` or from a file's `MAXL` — keeps it.
 fn nhmmer_max_length(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     w_length: Option<i32>,
     w_beta: Option<f64>,
 ) -> i32 {
-    if let Some(w_length) = w_length {
-        w_length
-    } else if let Some(w_beta) = w_beta.filter(|beta| *beta > 0.0) {
-        builder::max_length_from_beta(hmm, w_beta)
-    } else if hmm.max_length > 0 {
-        hmm.max_length
-    } else if w_beta == Some(0.0) {
-        (hmm.m * 4).max(1) as i32
-    } else {
+    let window_length = w_length.unwrap_or(-1);
+    let window_beta = w_beta.unwrap_or(-1.0);
+
+    if window_length > 0 {
+        window_length
+    } else if window_beta > 0.0 {
+        builder::max_length_from_beta(hmm, window_beta)
+    } else if hmm.max_length == -1 {
         builder::max_length_from_beta(hmm, DEFAULT_WINDOW_BETA)
+    } else {
+        hmm.max_length
     }
 }
 

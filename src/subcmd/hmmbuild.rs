@@ -7,6 +7,7 @@ use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::{Alphabet, AlphabetType};
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::builder;
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::hmmfile;
@@ -164,11 +165,11 @@ struct Args {
 
     /// Gap open probability for --singlemx
     #[arg(long = "popen", default_value = "0.02", value_parser = parse_popen)]
-    popen: f32,
+    popen: f64,
 
     /// Gap extend probability for --singlemx
     #[arg(long = "pextend", default_value = "0.4", value_parser = parse_pextend)]
-    pextend: f32,
+    pextend: f64,
 
     /// Length of sequences for MSV Gumbel mu fit
     #[arg(long = "EmL", default_value = "200", value_parser = parse_positive_usize)]
@@ -309,9 +310,9 @@ fn parse_unit_f32(s: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_popen(s: &str) -> Result<f32, String> {
+fn parse_popen(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap open probability: {e}"))?;
     if (0.0..0.5).contains(&value) {
         Ok(value)
@@ -320,9 +321,9 @@ fn parse_popen(s: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_pextend(s: &str) -> Result<f32, String> {
+fn parse_pextend(s: &str) -> Result<f64, String> {
     let value = s
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|e| format!("invalid gap extend probability: {e}"))?;
     if (0.0..1.0).contains(&value) {
         Ok(value)
@@ -411,16 +412,21 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     }
     if args.singlemx {
         if let Some(path) = args.mxfile.as_ref() {
-            std::fs::File::open(path).unwrap_or_else(|e| {
+            std::fs::File::open(path).unwrap_or_else(|_| {
+                // p7_builder_SetScoreSystem (p7_builder.c:307). C's hmmbuild
+                // opens the alignment file before reaching this check, so it
+                // reports a missing alignment first; this port validates the
+                // score system up front. See TODO.md.
                 eprintln!(
-                    "Error: failed to read score matrix file {}: {e}",
+                    "\nError: Failed to set single query seq score system:\nFailed to find or open matrix file {}\n",
                     path.display()
                 );
                 std::process::exit(1);
             });
         } else if mx_was_requested && !seqmodel::is_known_builtin_score_matrix_name(&args.matrix) {
+            // p7_builder_LoadScoreSystem (p7_builder.c:213).
             eprintln!(
-                "Error: unknown built-in protein score matrix {}; supported matrices are PAM30, PAM70, PAM120, PAM240, BLOSUM45, BLOSUM50, BLOSUM62, BLOSUM80, BLOSUM90",
+                "\nError: Failed to set single query seq score system:\nno matrix named {} is available as a built-in\n",
                 args.matrix
             );
             std::process::exit(1);
@@ -483,6 +489,15 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
     } else {
         args.pextend
     };
+    // The label hmmbuild echoes for --singlemx. C prints the --mxfile path
+    // (hmmbuild.c, "# subst score matrix (file)") when one is given, otherwise
+    // the --mx value, with DNA1 substituted for nucleotide input
+    // (hmmbuild.c:592).
+    let singlemx_matrix_label: String = match args.mxfile.as_ref() {
+        Some(path) => path.display().to_string(),
+        None if nucleotide_singlemx && !mx_was_requested => "DNA1".to_string(),
+        None => args.matrix.clone(),
+    };
     let score_matrix = if args.singlemx {
         if let Some(path) = args.mxfile.as_ref() {
             seqmodel::ScoreMatrix::from_file_for_alphabet(path, &abc).unwrap_or_else(|e| {
@@ -495,7 +510,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             } else {
                 args.matrix.as_str()
             };
-            seqmodel::ScoreMatrix::builtin_for_alphabet(matrix_name, abc.abc_type).unwrap_or_else(
+            seqmodel::ScoreMatrix::builtin_for_alphabet(matrix_name, &abc).unwrap_or_else(
                 |e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
@@ -619,7 +634,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(
             summary,
             "# substitution score matrix:        {}",
-            score_matrix.name()
+            singlemx_matrix_label
         )
         .unwrap();
     }
@@ -869,6 +884,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &score_matrix,
                 singlemx_popen,
                 singlemx_pextend,
+                args.seed,
+                calibration_config,
+                args.w_length,
+                args.w_beta,
             )
         } else {
             builder::build_hmm_from_msa_with_prior_and_max_insert(
@@ -911,14 +930,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             )
         };
         if args.singlemx {
-            hmmer_pure_rs::calibrate::calibrate_with_config(
-                &mut hmm,
-                &abc,
-                &bg,
-                args.seed,
-                calibration_config,
-            );
-            apply_window_length_options(&mut hmm, abc.abc_type, args.w_length, args.w_beta);
+            // Nothing to do: p7_SingleBuilder() already calibrated with this
+            // builder's seed/config and set max_length from w_len/w_beta.
         } else if popen_was_requested || pextend_was_requested {
             apply_window_length_options(&mut hmm, abc.abc_type, args.w_length, args.w_beta);
             apply_fixed_gap_params(
@@ -1187,13 +1200,18 @@ fn is_phylips_msa_format(format: &str) -> bool {
     format.eq_ignore_ascii_case("phylips")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_single_sequence_hmm(
     msa: &msa::Msa,
     abc: &Alphabet,
     bg: &Bg,
     matrix: &seqmodel::ScoreMatrix,
-    popen: f32,
-    pextend: f32,
+    popen: f64,
+    pextend: f64,
+    seed: u32,
+    calibration: hmmer_pure_rs::calibrate::CalibrationConfig,
+    w_length: Option<usize>,
+    w_beta: Option<f64>,
 ) -> hmmer_pure_rs::Hmm {
     let mut dsq = vec![hmmer_pure_rs::alphabet::DSQ_SENTINEL];
     for &sym in &msa.aseq[0] {
@@ -1216,20 +1234,24 @@ fn build_single_sequence_hmm(
     }
     dsq.push(hmmer_pure_rs::alphabet::DSQ_SENTINEL);
     let name = msa.sqname[0].as_str();
-    let mut hmm = seqmodel::build_single_seq_hmm_with_matrix(
-        name,
-        &dsq,
-        dsq.len() - 2,
-        abc,
-        bg,
-        matrix,
-        popen,
-        pextend,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("Error: hmmbuild --singlemx failed to build score matrix model: {e}");
-        std::process::exit(1);
-    });
+    let mut builder = Builder::new(abc.abc_type)
+        .with_seed(seed)
+        .with_calibration(calibration)
+        .with_window(w_length.map(|w| w.min(i32::MAX as usize) as i32), w_beta);
+    builder
+        .set_score_system_from_matrix(matrix.clone(), popen, pextend, bg, abc)
+        .unwrap_or_else(|e| {
+            eprintln!("\nError: Failed to set single query seq score system:\n{e}\n");
+            std::process::exit(1);
+        });
+    // p7_SingleBuilder(), hmmbuild.c:963.
+    let mut hmm = builder
+        .single_builder(name, &dsq, dsq.len() - 2, abc, bg)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: hmmbuild --singlemx build failed: {e}");
+            std::process::exit(1);
+        });
+    hmm.eff_nseq = 1.0;
     if let Some(ref acc) = msa.acc {
         hmm.acc = Some(acc.clone());
         hmm.flags |= hmmer_pure_rs::hmm::P7H_ACC;
@@ -1261,25 +1283,25 @@ fn apply_window_length_options(
     }
 }
 
-fn apply_fixed_gap_params(hmm: &mut hmmer_pure_rs::Hmm, popen: Option<f32>, pextend: Option<f32>) {
+fn apply_fixed_gap_params(hmm: &mut hmmer_pure_rs::Hmm, popen: Option<f64>, pextend: Option<f64>) {
     use hmmer_pure_rs::hmm::{DD, DM, II, IM, MD, MI, MM};
 
     for node in 0..=hmm.m {
         if let Some(popen) = popen {
-            hmm.t[node][MM] = 1.0 - 2.0 * popen;
-            hmm.t[node][MI] = popen;
-            hmm.t[node][MD] = popen;
+            hmm.t[node][MM] = (1.0 - 2.0 * popen) as f32;
+            hmm.t[node][MI] = popen as f32;
+            hmm.t[node][MD] = popen as f32;
         }
         if let Some(pextend) = pextend {
-            hmm.t[node][IM] = 1.0 - pextend;
-            hmm.t[node][II] = pextend;
-            hmm.t[node][DM] = 1.0 - pextend;
-            hmm.t[node][DD] = pextend;
+            hmm.t[node][IM] = (1.0 - pextend) as f32;
+            hmm.t[node][II] = pextend as f32;
+            hmm.t[node][DM] = (1.0 - pextend) as f32;
+            hmm.t[node][DD] = pextend as f32;
         }
     }
 
     if let Some(popen) = popen {
-        hmm.t[hmm.m][MM] = 1.0 - popen;
+        hmm.t[hmm.m][MM] = (1.0 - popen) as f32;
     }
     hmm.t[hmm.m][MD] = 0.0;
     hmm.t[hmm.m][DM] = 1.0;

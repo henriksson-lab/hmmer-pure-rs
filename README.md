@@ -378,17 +378,24 @@ not yet fully C-identical, or still need broader validation:
   validation. The remaining gap is breadth, not core functionality: only the
   implemented output formats are accepted, and parity coverage is still growing
   around legacy fixture edge cases.
-- `phmmer` and `jackhmmer` now use the upstream-style single-sequence
-  score-matrix conversion path instead of the earlier renormalized shortcut.
-  Later `jackhmmer` rounds rebuild from model-guided checkpoint alignments,
-  with exact bundled-C `--chkali` and `--chkhmm` parity covered on the globins
-  fixture. Remaining work is broader iterative-search score parity across more
-  real databases and threshold combinations.
+- Single-sequence query models (`phmmer`, `jackhmmer`, `nhmmer` with a
+  sequence/alignment query, `hmmbuild --singlemx`) are built by a 1:1 port of
+  upstream's `p7_builder.c` / `seqmodel.c` score-system path, including a real
+  port of Easel's `esl_scorematrix` and its Newton/Raphson lambda solve. The
+  resulting models are byte-identical to bundled C for amino, nucleotide, and
+  degenerate-residue queries. Remaining work is broader iterative-search score
+  parity for `jackhmmer` across more databases and threshold combinations.
+- **E-values for freshly built models** (as opposed to models read from a
+  C-generated `.hmm`) can still differ from C by roughly 10-30%. Single-sequence
+  queries always calibrate fresh, so this applies to them. The cause is
+  documented in `SEED_PROBLEM.md` and is unrelated to the builder: SIMD
+  byte/word scores can differ by +/-1 at `roundf` boundaries and Gumbel fitting
+  amplifies that. Calibration failure is also not yet propagated the way C's
+  `p7_Calibrate` propagates it (see `TODO.md`).
 - `nhmmer` accepts HMM queries plus nucleotide query models built from
-  Stockholm, aligned FASTA, or single-sequence FASTA input. Remaining query
-  format aliases beyond `hmm`, `stockholm`/`sto`, `afa`, and `fasta` are
-  rejected, and FM-index target databases from `makehmmerdb` are not yet used
-  by `nhmmer` search.
+  Stockholm, aligned FASTA, or single-sequence FASTA input, honouring `--mx`,
+  `--mxfile` and `--bgfile` on all of them. FM-index target databases from
+  `makehmmerdb` are not yet used by `nhmmer` search.
 - `makehmmerdb` still writes a Rust `HMMERDB\0` container. It carries
   C-layout metadata and FM-record extensions used for convergence testing, but
   the top-level file is not yet the native C FM-index stream and block

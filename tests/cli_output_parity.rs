@@ -2723,9 +2723,14 @@ fn nhmmer_accepts_c_compat_query_matrix_block_and_hidden_options() {
     let mxfile = dir.path().join("custom-dna.mx");
     let bgfile = dir.path().join("custom-dna.bg");
     std::fs::write(&query, ">q1\nGAATTC\n>q2\nGAATTC\n").unwrap();
+    // The mismatch penalty has to dominate: with this skewed background the
+    // expected score sum_ij f_i f_j s_ij must be negative, or there is no valid
+    // lambda and `esl_scorematrix_ProbifyGivenBG` cannot converge. C fails the
+    // same way here ("failed to converge in Newton", esl_rootfinder.c:324) --
+    // sum_i f_i^2 = 0.52, so a match of +1 needs a mismatch below -1.08.
     std::fs::write(
         &mxfile,
-        "  A C G T\nA 1 -1 -1 -1\nC -1 1 -1 -1\nG -1 -1 1 -1\nT -1 -1 -1 1\n",
+        "  A C G T\nA 1 -3 -3 -3\nC -3 1 -3 -3\nG -3 -3 1 -3\nT -3 -3 -3 1\n",
     )
     .unwrap();
     std::fs::write(&bgfile, "DNA\nA 0.7\nC 0.1\nG 0.1\nT 0.1\n").unwrap();
@@ -2803,6 +2808,53 @@ fn nhmmer_accepts_c_compat_query_matrix_block_and_hidden_options() {
     assert!(stdout.contains("# FM len used for Vit window:      101\n"));
     assert!(stdout.contains("Query:       q1  [M=6]"));
     assert!(stdout.contains("Query:       q2  [M=6]"));
+
+    // The custom matrix must actually reach the built model: rerunning without
+    // --mxfile (i.e. the DNA1 default) has to produce a different model.
+    let custom_hmm = dir.path().join("custom.hmm");
+    let default_hmm = dir.path().join("default.hmm");
+    for (hmmout, mx) in [(&custom_hmm, Some(&mxfile)), (&default_hmm, None)] {
+        let mut a: Vec<String> = vec![
+            "nhmmer".into(),
+            "--qsingle_seqs".into(),
+            "--singlemx".into(),
+            "--hmmout".into(),
+            hmmout.to_str().unwrap().into(),
+        ];
+        if let Some(mx) = mx {
+            a.push("--mxfile".into());
+            a.push(mx.to_str().unwrap().into());
+        }
+        // Deliberately no --bgfile here: DNA1 against this skewed background
+        // is a degenerate model whose Forward-tau Gumbel fit fails. C reports
+        // "build failed: failed to determine fwd tau" (evalues.c:107); this
+        // port does not yet propagate that failure -- see TODO.md.
+        a.extend([
+            "--dna".into(),
+            "--noali".into(),
+            query.to_str().unwrap().into(),
+            "hmmer/testsuite/ecori.fa".into(),
+        ]);
+        let out = Command::new(hmmer()).args(&a).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let strip = |p: &std::path::Path| -> String {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("DATE") && !l.starts_with("COM "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_ne!(
+        strip(&custom_hmm),
+        strip(&default_hmm),
+        "--mxfile had no effect on the nhmmer single-sequence query model"
+    );
 }
 
 #[test]
