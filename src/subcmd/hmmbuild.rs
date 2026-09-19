@@ -7,8 +7,8 @@ use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::{Alphabet, AlphabetType};
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::builder;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::hmmfile;
 use hmmer_pure_rs::msa;
@@ -510,12 +510,10 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             } else {
                 args.matrix.as_str()
             };
-            seqmodel::ScoreMatrix::builtin_for_alphabet(matrix_name, &abc).unwrap_or_else(
-                |e| {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                },
-            )
+            seqmodel::ScoreMatrix::builtin_for_alphabet(matrix_name, &abc).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            })
         }
     } else {
         seqmodel::ScoreMatrix::blosum62()
@@ -928,6 +926,11 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 args.seed,
                 args.max_insert_len,
             )
+            // hmmbuild.c:1045: p7_Fail("build failed: %s", bld->errbuf).
+            .unwrap_or_else(|e| {
+                eprintln!("\nError: build failed: {e}");
+                std::process::exit(1);
+            })
         };
         if args.singlemx {
             // Nothing to do: p7_SingleBuilder() already calibrated with this
@@ -939,13 +942,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 popen_was_requested.then_some(args.popen),
                 pextend_was_requested.then_some(args.pextend),
             );
-            hmmer_pure_rs::calibrate::calibrate_with_config(
+            if let Err(e) = hmmer_pure_rs::calibrate::calibrate_with_config(
                 &mut hmm,
                 &abc,
                 &bg,
                 args.seed,
                 calibration_config,
-            );
+            ) {
+                eprintln!("\nError: build failed: {e}");
+                std::process::exit(1);
+            }
         } else {
             apply_window_length_options(&mut hmm, abc.abc_type, args.w_length, args.w_beta);
         }
@@ -957,12 +963,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 
         let rel_entropy = mean_match_relative_entropy(&hmm, &bg);
         let description = hmm.desc.as_deref().unwrap_or("");
+        // hmmbuild.c:1291-1311 prints msa->name here, not hmm->name. The two
+        // differ under --singlemx, where p7_SingleBuilder names the model after
+        // the sequence (seqmodel.c:88) while the table still shows the
+        // alignment's name. -n renames the MSA before the build
+        // (hmmbuild.c:1361-1363), so it shows here too.
+        let table_name: &str = args.name.as_deref().unwrap_or(&alignment.msa.name);
         if abc.abc_type == AlphabetType::Amino {
             writeln!(
                 summary,
                 "{:<5} {:<20} {:>5} {:>5} {:>5} {} {} {}",
                 idx + 1,
-                hmm.name,
+                table_name,
                 alignment.nseq,
                 alignment.alen,
                 hmm.m,
@@ -976,7 +988,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 summary,
                 "{:<5} {:<20} {:>5} {:>5} {:>5} {:>5} {} {} {}",
                 idx + 1,
-                hmm.name,
+                table_name,
                 alignment.nseq,
                 alignment.alen,
                 hmm.m,
@@ -1015,7 +1027,14 @@ fn read_build_alignments_maybe_stdin(
             .map(|msa| BuildAlignment {
                 msa,
                 cutoffs: msa::StockholmCutoffs::default(),
-                force_hand_arch: true,
+                // Easel's A2M reader sets an implied RF line (x for consensus
+                // columns, . for inserts; esl_msafile_a2m.c:522-528), but C
+                // hmmbuild only consults RF under --hand. Without it the
+                // architecture comes from --symfrac like any other format,
+                // so a lowercase (insert) A2M column can still become a match
+                // state. The RF line is carried into the model's RF annotation
+                // either way.
+                force_hand_arch: false,
                 original_stockholm: None,
             })
             .collect())
@@ -1248,7 +1267,7 @@ fn build_single_sequence_hmm(
     let mut hmm = builder
         .single_builder(name, &dsq, dsq.len() - 2, abc, bg)
         .unwrap_or_else(|e| {
-            eprintln!("Error: hmmbuild --singlemx build failed: {e}");
+            eprintln!("\nError: build failed: {e}");
             std::process::exit(1);
         });
     hmm.eff_nseq = 1.0;

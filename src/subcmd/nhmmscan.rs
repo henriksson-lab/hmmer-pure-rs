@@ -276,6 +276,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         eprintln!("Error reading pressed optimized profiles: {}", e);
         std::process::exit(1);
     };
+    // nhmmscan.c:360: C reads the first optimized profile up front and refuses
+    // the database if it carries no window length.
+    if hmms.first().is_some_and(|hmm| hmm.max_length == -1) {
+        eprintln!(
+            "\nError: No MAXL field in model(s); is this an old model format?\nnhmmer/hmmscan require HMMER 3.1 models or later."
+        );
+        std::process::exit(1);
+    }
     let bit_cutoff = selected_bit_cutoff(&args);
     if let Some(cutoff) = bit_cutoff {
         for hmm in &hmms {

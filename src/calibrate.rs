@@ -170,13 +170,24 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
 /// fit MSV Gumbel mu, Viterbi Gumbel mu, and Forward exponential-tail tau.
 /// Stores results in `hmm.evparam[]` and sets P7H_STATS.
 /// Counterpart to C's `p7_Calibrate()`.
-pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) {
-    calibrate_with_seed(hmm, abc, bg, 42);
+///
+/// Like C's `p7_Calibrate()`, this fails when one of the fits fails; the error
+/// string is C's `errbuf` text (`failed to determine msv mu` / `vit mu` /
+/// `fwd tau`, evalues.c:105-107), which the drivers wrap as `build failed: %s`.
+/// On failure `hmm.evparam` may be partially written and `P7H_STATS` is not
+/// raised, as in C.
+pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) -> Result<(), String> {
+    calibrate_with_seed(hmm, abc, bg, 42)
 }
 
 /// Calibrate E-value parameters with a caller-selected Easel fast RNG seed.
-pub fn calibrate_with_seed(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg, seed: u32) {
-    calibrate_with_config(hmm, abc, bg, seed, CalibrationConfig::default());
+pub fn calibrate_with_seed(
+    hmm: &mut Hmm,
+    abc: &Alphabet,
+    bg: &Bg,
+    seed: u32,
+) -> Result<(), String> {
+    calibrate_with_config(hmm, abc, bg, seed, CalibrationConfig::default())
 }
 
 /// Calibrate E-value parameters with caller-selected simulation lengths,
@@ -187,23 +198,25 @@ pub fn calibrate_with_config(
     bg: &Bg,
     seed: u32,
     config: CalibrationConfig,
-) {
+) -> Result<(), String> {
     crate::logsum::p7_flogsuminit();
 
     let lambda = p7_lambda(hmm, bg);
     let mut rng = MersenneTwister::new(seed);
 
-    // MSV calibration
-    let mmu = calibrate_msv(hmm, abc, bg, lambda, config.em_l, config.em_n, &mut rng);
+    // MSV calibration (evalues.c:105)
+    let mmu = calibrate_msv(hmm, abc, bg, lambda, config.em_l, config.em_n, &mut rng)
+        .map_err(|_| "failed to determine msv mu".to_string())?;
     hmm.evparam[P7_MMU] = mmu;
     hmm.evparam[P7_MLAMBDA] = lambda;
 
-    // Viterbi calibration
-    let vmu = calibrate_viterbi(hmm, abc, bg, lambda, config.ev_l, config.ev_n, &mut rng);
+    // Viterbi calibration (evalues.c:106)
+    let vmu = calibrate_viterbi(hmm, abc, bg, lambda, config.ev_l, config.ev_n, &mut rng)
+        .map_err(|_| "failed to determine vit mu".to_string())?;
     hmm.evparam[P7_VMU] = vmu;
     hmm.evparam[P7_VLAMBDA] = lambda;
 
-    // Forward calibration
+    // Forward calibration (evalues.c:107)
     let (ftau, flambda) = calibrate_forward(
         hmm,
         abc,
@@ -213,11 +226,13 @@ pub fn calibrate_with_config(
         config.ef_n,
         config.eft,
         &mut rng,
-    );
+    )
+    .map_err(|_| "failed to determine fwd tau".to_string())?;
     hmm.evparam[P7_FTAU] = ftau;
     hmm.evparam[P7_FLAMBDA] = flambda;
 
     hmm.flags |= P7H_STATS;
+    Ok(())
 }
 
 /// Estimate the MSV Gumbel location parameter mu by simulating random
@@ -231,7 +246,7 @@ fn calibrate_msv(
     l: usize,
     n: usize,
     rng: &mut MersenneTwister,
-) -> f32 {
+) -> Result<f32, String> {
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -251,14 +266,11 @@ fn calibrate_msv(
         scores.push(bits);
     }
 
-    // Filter out non-finite scores
-    scores.retain(|s| s.is_finite());
-    if scores.len() < 10 {
-        return -3.0; // not enough data
-    }
-
-    let mu = stats::gumbel::fit_complete_loc(&scores, lambda as f64).unwrap_or(-3.0);
-    mu as f32
+    // esl_gumbel_FitCompleteLoc (evalues.c:267 / :336); its failure is C's
+    // "failed to determine msv mu" / "vit mu". C feeds every score to the
+    // fit; there is no finiteness filtering or minimum-count fallback.
+    let mu = stats::gumbel::fit_complete_loc(&scores, lambda as f64).map_err(|e| e.to_string())?;
+    Ok(mu as f32)
 }
 
 /// Estimate the Viterbi Gumbel location parameter mu by simulation and ML
@@ -271,7 +283,7 @@ fn calibrate_viterbi(
     l: usize,
     n: usize,
     rng: &mut MersenneTwister,
-) -> f32 {
+) -> Result<f32, String> {
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -291,13 +303,11 @@ fn calibrate_viterbi(
         scores.push(bits);
     }
 
-    scores.retain(|s| s.is_finite());
-    if scores.len() < 10 {
-        return -3.0;
-    }
-
-    let mu = stats::gumbel::fit_complete_loc(&scores, lambda as f64).unwrap_or(-3.0);
-    mu as f32
+    // esl_gumbel_FitCompleteLoc (evalues.c:267 / :336); its failure is C's
+    // "failed to determine msv mu" / "vit mu". C feeds every score to the
+    // fit; there is no finiteness filtering or minimum-count fallback.
+    let mu = stats::gumbel::fit_complete_loc(&scores, lambda as f64).map_err(|e| e.to_string())?;
+    Ok(mu as f32)
 }
 
 /// Estimate the Forward exponential-tail location `tau` by simulation:
@@ -314,7 +324,7 @@ fn calibrate_forward(
     n: usize,
     tailp: f64,
     rng: &mut MersenneTwister,
-) -> (f32, f32) {
+) -> Result<(f32, f32), String> {
     let mut bg = bg.clone();
     bg.set_length(l);
 
@@ -328,27 +338,27 @@ fn calibrate_forward(
         // Match C p7_Tau loop order: xfIID, then ForwardParser, then NullOne.
         let dsq = random_seq(rng, l, &bg.f);
         let sc = forward_filter_score(&dsq, l, &om);
+        // p7_ForwardParser throws eslERANGE on a NaN score (fwdback.c:1191),
+        // which p7_Tau propagates (evalues.c:433).
+        if sc.is_nan() {
+            return Err("forward score is NaN".to_string());
+        }
         let null_sc = bg.null_one(l);
         let bits = simulated_bitscore(sc, null_sc);
         scores.push(bits);
     }
 
-    // Filter out non-finite scores
-    scores.retain(|s| s.is_finite());
-    if scores.len() < 10 {
-        return (-3.0, lambda);
-    }
-
-    // Fit Gumbel to Forward scores
-    let (gmu, glam) = stats::gumbel::fit_complete(&scores).unwrap_or((-3.0, lambda as f64));
+    // Fit Gumbel to Forward scores; esl_gumbel_FitComplete's eslENORESULT
+    // (evalues.c:437) is C's "failed to determine fwd tau". No finiteness
+    // filtering or minimum-count fallback, as in C.
+    let (gmu, glam) = stats::gumbel::fit_complete(&scores).map_err(|e| e.to_string())?;
 
     // C code: tau = esl_gumbel_invcdf(1.0-tailp, gmu, glam) + (log(tailp) / lambda)
     // First find x where Gumbel tail mass = tailp, then back up by log(tailp)/lambda
     // to set the origin of the exponential tail to 1.0 instead of tailp.
     let tau = stats::gumbel::invcdf(1.0 - tailp, gmu, glam) + (c_log_f64(tailp) / lambda as f64);
 
-    let tau = if tau.is_finite() { tau as f32 } else { -3.0 };
-    (tau, lambda)
+    Ok((tau as f32, lambda))
 }
 
 #[cfg(test)]
@@ -398,7 +408,7 @@ mod tests {
         let orig_mmu = hmm.evparam[P7_MMU];
 
         // Re-calibrate
-        calibrate(&mut hmm, &abc, &bg);
+        calibrate(&mut hmm, &abc, &bg).unwrap();
 
         // Params should be in reasonable range
         assert!(hmm.evparam[P7_MMU].is_finite());

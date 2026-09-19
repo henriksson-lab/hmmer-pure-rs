@@ -987,7 +987,7 @@ pub fn build_hmm_from_msa(
     weighting_strategy: RelativeWeighting,
     effn_strategy: EffectiveSeqNumber,
     seed: u32,
-) -> Hmm {
+) -> Result<Hmm, String> {
     build_hmm_from_msa_with_prior(
         msa,
         abc,
@@ -1016,7 +1016,7 @@ pub fn build_hmm_from_msa_with_prior(
     prior_strategy: PriorStrategy,
     calibration_config: CalibrationConfig,
     seed: u32,
-) -> Hmm {
+) -> Result<Hmm, String> {
     build_hmm_from_msa_with_prior_and_max_insert(
         msa,
         abc,
@@ -1047,7 +1047,7 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
     calibration_config: CalibrationConfig,
     seed: u32,
     max_insert_len: Option<usize>,
-) -> Hmm {
+) -> Result<Hmm, String> {
     let k = abc.k;
     let nseq = msa.nseq;
 
@@ -1090,7 +1090,7 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
             hmm.desc = Some(desc.clone());
             hmm.flags |= P7H_DESC;
         }
-        return hmm;
+        return Ok(hmm);
     }
 
     let mut hmm = Hmm::new(m, abc.abc_type, k);
@@ -1211,13 +1211,14 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
     set_hmm_composition(&mut hmm);
     set_hmm_consensus(&mut hmm, abc);
 
-    // E-value calibration by simulation
-    crate::calibrate::calibrate_with_config(&mut hmm, abc, bg, seed, calibration_config);
+    // E-value calibration by simulation (p7_builder.c:1010 -> p7_Calibrate).
+    // A failed fit is fatal in C ("build failed: failed to determine fwd tau").
+    crate::calibrate::calibrate_with_config(&mut hmm, abc, bg, seed, calibration_config)?;
     if abc.abc_type != AlphabetType::Amino {
         set_max_length_from_beta(&mut hmm, DEFAULT_WINDOW_BETA);
     }
 
-    hmm
+    Ok(hmm)
 }
 
 pub fn copy_stockholm_cutoffs_to_hmm(cutoffs: msa::StockholmCutoffs, hmm: &mut Hmm) {
@@ -1974,27 +1975,14 @@ impl Builder {
             .as_ref()
             .ok_or_else(|| "score system not initialized".to_string())?;
 
-        let mut hmm = crate::seqmodel::seqmodel(
-            abc,
-            dsq,
-            n,
-            name,
-            q,
-            &bg.f,
-            self.popen,
-            self.pextend,
-        );
+        let mut hmm =
+            crate::seqmodel::seqmodel(abc, dsq, n, name, q, &bg.f, self.popen, self.pextend);
         crate::hmm::set_composition(&mut hmm);
         crate::hmm::set_consensus(&mut hmm, abc, Some(dsq));
 
-        // calibrate() (p7_builder.c:1010) -> p7_Calibrate().
-        crate::calibrate::calibrate_with_config(
-            &mut hmm,
-            abc,
-            bg,
-            self.seed,
-            self.calibration,
-        );
+        // calibrate() (p7_builder.c:1010) -> p7_Calibrate(). Its errbuf text
+        // is what the drivers print after "build failed: ".
+        crate::calibrate::calibrate_with_config(&mut hmm, abc, bg, self.seed, self.calibration)?;
 
         // p7_builder.c:512-516: nucleotide models carry a window length.
         if matches!(self.abc_type, AlphabetType::Dna | AlphabetType::Rna) {

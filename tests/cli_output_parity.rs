@@ -2826,9 +2826,9 @@ fn nhmmer_accepts_c_compat_query_matrix_block_and_hidden_options() {
             a.push(mx.to_str().unwrap().into());
         }
         // Deliberately no --bgfile here: DNA1 against this skewed background
-        // is a degenerate model whose Forward-tau Gumbel fit fails. C reports
-        // "build failed: failed to determine fwd tau" (evalues.c:107); this
-        // port does not yet propagate that failure -- see TODO.md.
+        // is a degenerate model whose Forward-tau Gumbel fit fails, and both
+        // C and this port then exit with "build failed: failed to determine
+        // fwd tau" (see nhmmer_reports_calibration_failure_like_bundled_c).
         a.extend([
             "--dna".into(),
             "--noali".into(),
@@ -3804,6 +3804,292 @@ fn nhmmer_reports_used_search_options_in_header() {
             "{expected:?} missing from:\n{stdout}"
         );
     }
+}
+
+/// nhmmer `-A` must match bundled C on an alignment wider than one Stockholm
+/// block: C writes 200-column blocks when textw > 0 and one unwrapped Pfam
+/// block under --notextw (nhmmer.c:1181-1182). The fixture plants a 320 bp
+/// query three times (one on the minus strand, so a "name/40318-40002"-style
+/// row) in a 100 kb pseudo-random target; C builds the MSA with p7_DEFAULT, so
+/// consensus columns no hit covers are dropped rather than left all-gap.
+#[test]
+fn nhmmer_alignment_output_wraps_like_bundled_c() {
+    // Small deterministic LCG so the fixture needs no committed file.
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as u32
+    };
+    let bases = [b'A', b'C', b'G', b'T'];
+    let query: Vec<u8> = (0..320).map(|_| bases[(next() % 4) as usize]).collect();
+    let mut target: Vec<u8> = (0..100_000).map(|_| bases[(next() % 4) as usize]).collect();
+    let revcomp = |s: &[u8]| -> Vec<u8> {
+        s.iter()
+            .rev()
+            .map(|&c| match c {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                _ => b'A',
+            })
+            .collect()
+    };
+    // (position, per-base mutation rate in 1/100, reverse strand)
+    for (pos, rate, rev) in [
+        (10_000usize, 5u32, false),
+        (40_000, 15, true),
+        (70_000, 25, false),
+    ] {
+        let mut copy: Vec<u8> = Vec::with_capacity(query.len() + 8);
+        for &c in &query {
+            let r = next() % 100;
+            if r < rate {
+                copy.push(bases[(next() % 4) as usize]);
+            } else if r < rate + 1 {
+                // deletion
+            } else if r < rate + 2 {
+                copy.push(c);
+                copy.push(bases[(next() % 4) as usize]);
+            } else {
+                copy.push(c);
+            }
+        }
+        let copy = if rev { revcomp(&copy) } else { copy };
+        target[pos..pos + copy.len()].copy_from_slice(&copy);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let query_fa = dir.path().join("query.fa");
+    let target_fa = dir.path().join("target.fa");
+    std::fs::write(
+        &query_fa,
+        format!(">longq\n{}\n", std::str::from_utf8(&query).unwrap()),
+    )
+    .unwrap();
+    let mut target_text = String::from(">lt1\n");
+    for line in target.chunks(60) {
+        target_text.push_str(std::str::from_utf8(line).unwrap());
+        target_text.push('\n');
+    }
+    std::fs::write(&target_fa, target_text).unwrap();
+
+    for extra in [&[][..], &["--notextw"][..]] {
+        let rust_sto = dir.path().join("rust.sto");
+        let c_sto = dir.path().join("c.sto");
+        let mut rust_args: Vec<&str> = vec!["nhmmer", "--dna", "--cpu", "1"];
+        rust_args.extend_from_slice(extra);
+        rust_args.extend_from_slice(&[
+            "-A",
+            rust_sto.to_str().unwrap(),
+            "-o",
+            "/dev/null",
+            query_fa.to_str().unwrap(),
+            target_fa.to_str().unwrap(),
+        ]);
+        let rust = Command::new(hmmer()).args(&rust_args).output().unwrap();
+        assert!(
+            rust.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rust.stderr)
+        );
+
+        let mut c_args: Vec<&str> = vec!["--dna", "--cpu", "1"];
+        c_args.extend_from_slice(extra);
+        c_args.extend_from_slice(&[
+            "-A",
+            c_sto.to_str().unwrap(),
+            "-o",
+            "/dev/null",
+            query_fa.to_str().unwrap(),
+            target_fa.to_str().unwrap(),
+        ]);
+        let c = Command::new(format!("{}/hmmer/src/nhmmer", project_root()))
+            .args(&c_args)
+            .output()
+            .unwrap();
+        assert!(
+            c.status.success(),
+            "bundled C nhmmer failed: {}",
+            String::from_utf8_lossy(&c.stderr)
+        );
+
+        let c_text = std::fs::read_to_string(&c_sto).unwrap();
+        let rust_text = std::fs::read_to_string(&rust_sto).unwrap();
+        // The fixture must actually exercise what it claims to.
+        assert!(c_text.contains("lt1/"), "{c_text}");
+        assert!(
+            c_text
+                .lines()
+                .any(|l| l.starts_with("#=GS lt1/4") && l.contains("-400")),
+            "expected a minus-strand hit named from/to in hit orientation:\n{c_text}"
+        );
+        let block_lines = c_text.lines().filter(|l| l.starts_with("lt1/")).count();
+        if extra.is_empty() {
+            assert!(block_lines >= 6, "expected wrapped blocks:\n{c_text}");
+        } else {
+            assert_eq!(block_lines, 3, "expected one unwrapped block:\n{c_text}");
+        }
+        assert_eq!(
+            rust_text, c_text,
+            "nhmmer -A ({extra:?}) diverged from bundled C"
+        );
+    }
+}
+
+/// A single-sequence query whose emissions are so skewed against a matching
+/// skewed background that the Forward-tau Gumbel fit fails. C's p7_Calibrate
+/// returns non-OK with errbuf "failed to determine fwd tau" (evalues.c:107)
+/// and nhmmer exits 1 via p7_Fail("build failed: %s") (nhmmer.c:905). This
+/// port used to swallow the failed fit and search with fallback STATS.
+#[test]
+fn nhmmer_reports_calibration_failure_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let query = dir.path().join("qa.fa");
+    let bgfile = dir.path().join("skewed.bg");
+    std::fs::write(&query, ">qa\nAAAAAAAA\n").unwrap();
+    std::fs::write(&bgfile, "DNA\nA 0.7\nC 0.1\nG 0.1\nT 0.1\n").unwrap();
+    let common = [
+        "--qsingle_seqs",
+        "--singlemx",
+        "--bgfile",
+        bgfile.to_str().unwrap(),
+        "--dna",
+        "-o",
+        "/dev/null",
+        query.to_str().unwrap(),
+        "hmmer/testsuite/ecori.fa",
+    ];
+
+    let c = Command::new(format!("{}/hmmer/src/nhmmer", project_root()))
+        .args(common)
+        .output()
+        .unwrap();
+    let c_stderr = String::from_utf8_lossy(&c.stderr);
+    assert_eq!(c.status.code(), Some(1), "bundled C nhmmer: {c_stderr}");
+    assert!(
+        c_stderr.contains("Error: build failed: failed to determine fwd tau"),
+        "bundled C nhmmer: {c_stderr}"
+    );
+
+    let mut rust_args = vec!["nhmmer"];
+    rust_args.extend_from_slice(&common);
+    let rust = Command::new(hmmer()).args(rust_args).output().unwrap();
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    assert_eq!(rust.status.code(), Some(1), "{rust_stderr}");
+    assert!(
+        rust_stderr.contains("Error: build failed: failed to determine fwd tau"),
+        "{rust_stderr}"
+    );
+}
+
+/// hmmsearch -A on a UniProt-format target: the aligned subsequences carry the
+/// entry's accession, which Easel's Stockholm writer emits as a `#=GS ... AC`
+/// block ahead of the `DE` block (esl_msafile_stockholm.c:1183-1199).
+#[test]
+fn hmmsearch_alignment_output_carries_accessions_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let rust_sto = dir.path().join("rust.sto");
+    let c_sto = dir.path().join("c.sto");
+    let rust = Command::new(hmmer())
+        .args([
+            "hmmsearch",
+            "-A",
+            rust_sto.to_str().unwrap(),
+            "-o",
+            "/dev/null",
+            "hmmer/tutorial/fn3.hmm",
+            "hmmer/tutorial/7LESS_DROME",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rust.stderr)
+    );
+    let c = Command::new(format!("{}/hmmer/src/hmmsearch", project_root()))
+        .args([
+            "-A",
+            c_sto.to_str().unwrap(),
+            "-o",
+            "/dev/null",
+            "hmmer/tutorial/fn3.hmm",
+            "hmmer/tutorial/7LESS_DROME",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        c.status.success(),
+        "bundled C hmmsearch failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+    let c_text = std::fs::read_to_string(&c_sto).unwrap();
+    assert!(
+        c_text.contains("#=GS 7LESS_DROME/439-520   AC P13368\n"),
+        "fixture no longer exercises AC lines:\n{c_text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rust_sto).unwrap(),
+        c_text,
+        "hmmsearch -A diverged from bundled C"
+    );
+}
+
+/// nhmmscan refuses a pressed database whose first model has no MAXL line
+/// (nhmmscan.c:360), rather than silently recomputing a window length.
+#[test]
+fn nhmmscan_rejects_models_without_maxl_like_bundled_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let hmmdb = dir.path().join("MADE1_nomaxl.hmm");
+    let stripped: String = std::fs::read_to_string("hmmer/tutorial/MADE1.hmm")
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with("MAXL"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&hmmdb, stripped).unwrap();
+    let press = Command::new(hmmer())
+        .args(["press", "-f", hmmdb.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        press.status.success(),
+        "{}",
+        String::from_utf8_lossy(&press.stderr)
+    );
+
+    let expected = "Error: No MAXL field in model(s); is this an old model format?\nnhmmer/hmmscan require HMMER 3.1 models or later.";
+    let c = Command::new(format!("{}/hmmer/src/nhmmscan", project_root()))
+        .args([
+            "-o",
+            "/dev/null",
+            hmmdb.to_str().unwrap(),
+            "hmmer/tutorial/dna_target.fa",
+        ])
+        .output()
+        .unwrap();
+    let c_stderr = String::from_utf8_lossy(&c.stderr);
+    assert_eq!(c.status.code(), Some(1), "bundled C nhmmscan: {c_stderr}");
+    assert!(
+        c_stderr.contains(expected),
+        "bundled C nhmmscan: {c_stderr}"
+    );
+
+    let rust = Command::new(hmmer())
+        .args([
+            "nhmmscan",
+            "-o",
+            "/dev/null",
+            hmmdb.to_str().unwrap(),
+            "hmmer/tutorial/dna_target.fa",
+        ])
+        .output()
+        .unwrap();
+    let rust_stderr = String::from_utf8_lossy(&rust.stderr);
+    assert_eq!(rust.status.code(), Some(1), "{rust_stderr}");
+    assert!(rust_stderr.contains(expected), "{rust_stderr}");
 }
 
 #[test]
@@ -4853,14 +5139,17 @@ fn nhmmer_builds_query_hmm_from_a2m_msa_alias() {
         stdout.contains("# query format asserted:           a2m\n"),
         "{stdout}"
     );
-    assert!(stdout.contains("Query:       query  [M=6]"), "{stdout}");
+    // nhmmer has no --hand, so the A2M-implied RF line does not fix the
+    // architecture: with --symfrac 0.5 the lowercase column is a match state
+    // and bundled C nhmmer reports M=7 here.
+    assert!(stdout.contains("Query:       query  [M=7]"), "{stdout}");
 
     let saved = std::fs::read_to_string(hmmout).unwrap();
     assert!(saved.starts_with("HMMER3/f "), "{saved}");
     assert!(saved.contains("NAME  query\n"), "{saved}");
     assert!(saved.contains("ALPH  DNA\n"), "{saved}");
     assert!(saved.contains("NSEQ  2\n"), "{saved}");
-    assert!(saved.contains("LENG  6\n"), "{saved}");
+    assert!(saved.contains("LENG  7\n"), "{saved}");
     assert!(saved.contains("RF    yes\n"), "{saved}");
 }
 
@@ -7337,7 +7626,15 @@ fn hmmalign_supports_a2m_and_output_file() {
         String::from_utf8_lossy(&a2m.stderr)
     );
     let stdout = String::from_utf8(a2m.stdout).unwrap();
-    assert!(stdout.starts_with(">7LESS_DROME\n"));
+    // esl_msafile_a2m_Write (esl_msafile_a2m.c:418-420) writes ">name acc desc";
+    // 7LESS_DROME is a UniProt entry, so its accession P13368 is present. This
+    // is the exact first line bundled C hmmalign emits.
+    assert!(
+        stdout.starts_with(
+            ">7LESS_DROME P13368 RecName: Full=Protein sevenless;          EC=2.7.10.1;\n"
+        ),
+        "{stdout}"
+    );
     assert!(!stdout.contains("# STOCKHOLM"));
 
     let dir = tempfile::tempdir().unwrap();
@@ -7419,12 +7716,20 @@ fn hmmbuild_builds_from_aligned_fasta_informat() {
     assert!(saved.contains("NSEQ  2\n"), "{saved}");
 }
 
+/// A2M input implies an RF line (uppercase/'-' = consensus, lowercase = insert;
+/// esl_msafile_a2m.c:522-528), but hmmbuild only honours RF under --hand. With
+/// the default --symfrac 0.5 the lowercase column here (1 residue of 2) still
+/// becomes a match state, so C builds a 7-node model, and its -O output is the
+/// trace-aligned MSA with all seven columns marked consensus. The implied RF
+/// line survives only as the model's RF annotation.
 #[test]
 fn hmmbuild_builds_from_a2m_informat_with_consensus_insert_semantics() {
     let dir = tempfile::tempdir().unwrap();
     let a2m = dir.path().join("toy.a2m");
     let hmm_out = dir.path().join("toy.hmm");
     let processed_msa = dir.path().join("toy.sto");
+    let c_hmm_out = dir.path().join("c_toy.hmm");
+    let c_processed_msa = dir.path().join("c_toy.sto");
     std::fs::write(&a2m, ">toy1\nGAATTC\n>toy2\nGAaATTC\n").unwrap();
 
     let output = Command::new(hmmer())
@@ -7440,22 +7745,59 @@ fn hmmbuild_builds_from_a2m_informat_with_consensus_insert_semantics() {
         ])
         .output()
         .unwrap();
-
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    let c = Command::new(c_hmmbuild())
+        .args([
+            "--dna",
+            "--informat",
+            "a2m",
+            "-O",
+            c_processed_msa.to_str().unwrap(),
+            c_hmm_out.to_str().unwrap(),
+            a2m.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        c.status.success(),
+        "bundled C hmmbuild failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
     let saved = std::fs::read_to_string(hmm_out).unwrap();
     assert!(saved.contains("NAME  toy\n"), "{saved}");
-    assert!(saved.contains("LENG  6\n"), "{saved}");
+    assert!(saved.contains("LENG  7\n"), "{saved}");
     assert!(saved.contains("RF    yes\n"), "{saved}");
+    // The A2M-implied RF ('.' on the lowercase column) is carried as the
+    // model's RF annotation on node 3, exactly as C writes it.
+    assert!(saved.contains("      3 a . - -\n"), "{saved}");
+
+    let strip = |t: String| -> String {
+        t.lines()
+            .filter(|l| !l.starts_with("DATE") && !l.starts_with("COM "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        strip(saved),
+        strip(std::fs::read_to_string(c_hmm_out).unwrap()),
+        "hmmbuild --informat a2m model diverged from bundled C"
+    );
+
     let processed = std::fs::read_to_string(processed_msa).unwrap();
-    // Insert-column gaps are '.' (A2M convention); C `esl-reformat stockholm`
-    // on this A2M emits "GA.ATTC" / "#=GC RF xx.xxxx".
-    assert!(processed.contains("toy1 GA.ATTC\n"), "{processed}");
-    assert!(processed.contains("toy2 GAaATTC\n"), "{processed}");
-    assert!(processed.contains("#=GC RF xx.xxxx\n"), "{processed}");
+    assert!(processed.contains("toy1    GA-ATTC\n"), "{processed}");
+    assert!(processed.contains("toy2    GAAATTC\n"), "{processed}");
+    assert!(processed.contains("#=GC RF xxxxxxx\n"), "{processed}");
+    assert_eq!(
+        processed,
+        std::fs::read_to_string(c_processed_msa).unwrap(),
+        "hmmbuild -O output diverged from bundled C"
+    );
 }
 
 #[test]
@@ -8259,9 +8601,16 @@ fn hmmbuild_singlemx_builds_one_sequence_model_with_gap_options() {
     assert!(summary.contains("# substitution score matrix:        BLOSUM62\n"));
     assert!(summary.contains("# gap open probability:             0.030000\n"));
     assert!(summary.contains("# gap extend probability:           0.200000\n"));
+    // The summary table shows msa->name (hmmbuild.c:1294) ...
+    assert!(
+        summary.contains("1     single_query             1    22    20     1.00"),
+        "{summary}"
+    );
 
     let hmm = std::fs::read_to_string(hmm_out).unwrap();
-    assert!(hmm.contains("NAME  single_query\n"));
+    // ... while p7_SingleBuilder names the model after the sequence
+    // (seqmodel.c:88), so NAME is q1, not single_query, as in bundled C.
+    assert!(hmm.contains("NAME  q1\n"), "{hmm}");
     assert!(hmm.contains("LENG  20\n"));
     assert!(hmm.contains("NSEQ  1\n"));
     assert!(hmm.contains("EFFN  1.000000\n"));

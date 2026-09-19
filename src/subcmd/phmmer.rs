@@ -8,11 +8,11 @@ use clap::Parser;
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::pipeline::Pipeline;
 use hmmer_pure_rs::profile::{self, Profile, P7_LOCAL};
-use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::simd::oprofile::OProfile;
 use hmmer_pure_rs::tophits::{Hit, TopHits};
@@ -561,12 +561,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "# prefer accessions over names:    yes").unwrap();
     }
     if matrix_was_requested {
-        writeln!(
-            out,
-            "# subst score matrix (built-in):   {}",
-            args.matrix
-        )
-        .unwrap();
+        writeln!(out, "# subst score matrix (built-in):   {}", args.matrix).unwrap();
     }
     if mxfile_was_requested {
         writeln!(
@@ -674,7 +669,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         let hmm = builder
             .single_builder(&query_sq.name, &query_sq.dsq, query_sq.n, &abc, &bg)
             .unwrap_or_else(|e| {
-                eprintln!("Error: phmmer build failed: {e}");
+                eprintln!("\nError: build failed: {e}");
                 std::process::exit(1);
             });
 

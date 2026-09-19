@@ -15,7 +15,13 @@ fn run(abc_type: AlphabetType, mxname: &str) {
 
     println!(
         "MATRIX {} K={} Kp={} max={} min={} nc={} outorder={}",
-        mxname, abc.k, abc.kp, s.max(), s.min(), s.nc, s.outorder
+        mxname,
+        abc.k,
+        abc.kp,
+        s.max(),
+        s.min(),
+        s.nc,
+        s.outorder
     );
     println!("LAMBDA {mxname} {lambda:.17e}");
     for a in 0..(abc.kp - 2) {

@@ -670,12 +670,17 @@ fn normalized_domain_span(dom: Option<&Domain>) -> (i64, i64, i32) {
 /// Port of `p7_tophits_Alignment()` (hmmer/src/p7_tophits.c:1478) with the
 /// supporting machinery from Easel's `esl_msa_*` helpers. `extra` lets callers
 /// (e.g. `jackhmmer`) prepend the query sequence/trace into the alignment.
+/// `all_consensus_cols` is C's `p7_ALL_CONSENSUS_COLS` option flag: when set,
+/// every match state gets an alignment column even if no included hit uses it
+/// (hmmsearch, phmmer, jackhmmer); when clear (`p7_DEFAULT`, as nhmmer.c:1174
+/// passes), match columns with no residues are dropped (tracealign.c:212-213).
 /// Returns `None` if no included domains and no `extra` were supplied.
 pub fn included_alignment(
     th: &TopHits,
     abc: &Alphabet,
     model_len: usize,
     extra: Option<(&Sequence, &Trace)>,
+    all_consensus_cols: bool,
     msa_name: &str,
 ) -> Option<Msa> {
     let ndom = th
@@ -696,7 +701,7 @@ pub fn included_alignment(
         if sequences.is_empty() {
             return None;
         }
-        let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
+        let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces, all_consensus_cols);
         let mut aseq = Vec::with_capacity(sequences.len());
         let mut pp = Vec::with_capacity(sequences.len());
         let mut sqname = Vec::with_capacity(sequences.len());
@@ -756,7 +761,7 @@ pub fn included_alignment(
                 continue;
             }
             let ad = dom.ad.as_ref()?;
-            let (sq, tr) = alidisplay_backconvert(hit, dom, ad, abc);
+            let (sq, tr) = alidisplay_backconvert(hit, ad, abc);
             sequences.push(sq);
             traces.push(tr);
         }
@@ -766,7 +771,7 @@ pub fn included_alignment(
         return None;
     }
 
-    let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces);
+    let (inscount, matuse, matmap, alen) = map_new_msa(model_len, &traces, all_consensus_cols);
     let mut aseq = Vec::with_capacity(sequences.len());
     let mut pp = Vec::with_capacity(sequences.len());
     let mut sqname = Vec::with_capacity(sequences.len());
@@ -820,18 +825,13 @@ pub fn included_alignment(
 /// Walks the alignment columns, dropping gap columns and emitting M/I/D states
 /// with sequence indices. Port of `p7_alidisplay_Backconvert()`
 /// (hmmer/src/p7_alidisplay.c:1233).
-fn alidisplay_backconvert(
-    hit: &Hit,
-    dom: &Domain,
-    ad: &AliDisplay,
-    abc: &Alphabet,
-) -> (Sequence, Trace) {
+fn alidisplay_backconvert(hit: &Hit, ad: &AliDisplay, abc: &Alphabet) -> (Sequence, Trace) {
     let sub_l = ad.aseq.bytes().filter(|&c| c != b'.' && c != b'-').count();
-    let sqfrom = dom.iali.min(dom.jali);
-    let sqto = dom.iali.max(dom.jali);
 
     let mut sq = Sequence::new();
-    sq.name = format!("{}/{}-{}", hit.name, sqfrom, sqto);
+    // p7_alidisplay.c:1319: "%s/%d-%d" with ad->sqfrom/ad->sqto in alignment
+    // orientation, so a minus-strand nhmmer hit reads e.g. "chr/40318-40002".
+    sq.name = format!("{}/{}-{}", hit.name, ad.sqfrom, ad.sqto);
     sq.desc = format!(
         "[subseq from] {}",
         if hit.desc.is_empty() {
@@ -942,10 +942,16 @@ fn pp_consensus(pp_totals: &[f64], pp_counts: &[usize]) -> Option<Vec<u8>> {
 /// Returns `(inscount[k], matuse[k], matmap[k], alen)`: per-column max insert
 /// length, which match columns are used by at least one trace, the mapping
 /// from model node 1..M to its alignment column (1-based), and the total
-/// alignment width. Mirrors C `map_new_msa()` in `p7_tophits.c`.
-fn map_new_msa(m: usize, traces: &[Trace]) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
+/// alignment width. Mirrors C `map_new_msa()` in `tracealign.c`. With
+/// `all_consensus_cols` every match column is used up front
+/// (`p7_ALL_CONSENSUS_COLS`); otherwise only match states some trace visits.
+fn map_new_msa(
+    m: usize,
+    traces: &[Trace],
+    all_consensus_cols: bool,
+) -> (Vec<usize>, Vec<bool>, Vec<usize>, usize) {
     let mut inscount = vec![0usize; m + 1];
-    let mut matuse = vec![true; m + 1];
+    let mut matuse = vec![all_consensus_cols; m + 1];
     matuse[0] = false;
     let mut insnum = vec![0usize; m + 1];
 

@@ -33,7 +33,7 @@ download_file() {
   fi
 
   echo "downloading $url"
-  curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"
+  curl -fL --http1.1 --retry 3 --retry-delay 2 -o "$tmp" "$url"
   mv "$tmp" "$output"
 }
 

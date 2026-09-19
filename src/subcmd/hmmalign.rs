@@ -442,11 +442,17 @@ fn write_stockholm_blocked(out: &mut dyn Write, msa: &TextMsa, cpl: usize) {
 /// for amino alphabets.
 fn write_a2m(out: &mut dyn Write, msa: &TextMsa, is_amino: bool) {
     for row in &msa.rows {
-        if let Some(desc) = row.desc.as_deref().filter(|desc| !desc.is_empty()) {
-            writeln!(out, ">{} {}", row.name, desc).unwrap();
-        } else {
-            writeln!(out, ">{}", row.name).unwrap();
+        // esl_msafile_a2m_Write (esl_msafile_a2m.c:418-420): ">name", then
+        // " acc" if the sequence has an accession, then " desc" if it has a
+        // description.
+        write!(out, ">{}", row.name).unwrap();
+        if let Some(acc) = row.acc.as_deref().filter(|acc| !acc.is_empty()) {
+            write!(out, " {acc}").unwrap();
         }
+        if let Some(desc) = row.desc.as_deref().filter(|desc| !desc.is_empty()) {
+            write!(out, " {desc}").unwrap();
+        }
+        writeln!(out).unwrap();
         let mut seq = String::with_capacity(row.aseq.len());
         for (ch, rf) in row.aseq.chars().zip(msa.rfline.chars()) {
             let is_consensus = rf.is_ascii_alphanumeric();

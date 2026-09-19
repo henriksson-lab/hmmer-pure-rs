@@ -1,4 +1,4 @@
-# hmmer-pure-rs 0.7.2
+# hmmer-pure-rs 0.8.0
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
@@ -371,7 +371,8 @@ Benchmark/test policy:
 ## Remaining Gaps
 
 The command surface is broadly present, but a few areas are still incomplete,
-not yet fully C-identical, or still need broader validation:
+not yet fully C-identical, or still need broader validation. Deviations from
+upstream that are kept on purpose are listed separately in `BUGS.md`.
 
 - `hmmalign` now reconstructs model-guided alignments and supports Stockholm,
   A2M, `--trim`, `-o`, and strict upstream-style `--mapali` checksum

@@ -937,99 +937,6 @@ fn residue_code_for_alignment_score(abc: &Alphabet, residue: u8) -> u8 {
     }
 }
 
-fn write_stockholm_msa<W: std::io::Write>(out: &mut W, msa: &hmmer_pure_rs::msa::Msa) {
-    let name_width = msa
-        .sqname
-        .iter()
-        .map(|name| name.len())
-        .max()
-        .unwrap_or(0)
-        .max("#=GC RF".len())
-        .max("#=GC PP_cons".len())
-        .max(12);
-    let gs_name_width = "#=GS ".len() + name_width;
-    let gr_name_width = "#=GR ".len() + name_width + " PP".len();
-
-    writeln!(out, "# STOCKHOLM 1.0").unwrap();
-    if !msa.name.is_empty() {
-        writeln!(out, "#=GF ID {}", msa.name).unwrap();
-    }
-    if let Some(acc) = &msa.acc {
-        if !acc.is_empty() {
-            writeln!(out, "#=GF AC {}", acc).unwrap();
-        }
-    }
-    if let Some(desc) = &msa.desc {
-        if !desc.is_empty() {
-            writeln!(out, "#=GF DE {}", desc).unwrap();
-        }
-    }
-    if let Some(author) = &msa.author {
-        if !author.is_empty() {
-            writeln!(out, "#=GF AU {}", author).unwrap();
-        }
-    }
-    writeln!(out).unwrap();
-
-    for (name, desc) in msa.sqname.iter().zip(msa.sqdesc.iter()) {
-        if !desc.is_empty() {
-            writeln!(
-                out,
-                "{:<width$} DE {}",
-                format!("#=GS {}", name),
-                desc,
-                width = gs_name_width
-            )
-            .unwrap();
-        }
-    }
-    if !msa.sqdesc.iter().all(|desc| desc.is_empty()) {
-        writeln!(out).unwrap();
-    }
-
-    for ((name, row), pp) in msa.sqname.iter().zip(msa.aseq.iter()).zip(msa.pp.iter()) {
-        writeln!(
-            out,
-            "{:<width$} {}",
-            name,
-            String::from_utf8_lossy(row),
-            width = name_width
-        )
-        .unwrap();
-        if let Some(pp) = pp {
-            writeln!(
-                out,
-                "{:<width$} {}",
-                format!("#=GR {} PP", name),
-                String::from_utf8_lossy(pp),
-                width = gr_name_width
-            )
-            .unwrap();
-        }
-    }
-    if let Some(pp_cons) = &msa.pp_cons {
-        writeln!(
-            out,
-            "{:<width$} {}",
-            "#=GC PP_cons",
-            String::from_utf8_lossy(pp_cons),
-            width = name_width
-        )
-        .unwrap();
-    }
-    if let Some(rf) = &msa.rf {
-        writeln!(
-            out,
-            "{:<width$} {}",
-            "#=GC RF",
-            String::from_utf8_lossy(rf),
-            width = name_width
-        )
-        .unwrap();
-    }
-    writeln!(out, "//").unwrap();
-}
-
 /// Entry point for `nhmmer`: search nucleotide HMM(s) against a DNA/RNA
 /// sequence database using the long-target SSV pipeline.
 ///
@@ -2294,12 +2201,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         }
         if let Some(ref mut f) = ali_file {
             if let Some(mut msa) =
-                hmmer_pure_rs::tophits::included_alignment(&th, &abc, hmm.m, None, &hmm.name)
+                // p7_DEFAULT (nhmmer.c:1174): unused consensus columns are dropped.
+                hmmer_pure_rs::tophits::included_alignment(
+                    &th, &abc, hmm.m, None, false, &hmm.name,
+                )
             {
                 msa.acc = hmm.acc.clone();
                 msa.desc = hmm.desc.clone();
                 msa.author = Some("nhmmer (HMMER 3.4)".to_string());
-                write_stockholm_msa(f, &msa);
+                // nhmmer.c:1181-1182: Stockholm (200-column blocks) when
+                // textw > 0, Pfam (one unwrapped block) under --notextw.
+                let textw = if args.notextw { 0 } else { args.textw };
+                crate::subcmd::jackhmmer::write_tophits_alignment_msa_stockholm(f, &msa, textw);
                 writeln!(
                     out,
                     "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
@@ -2562,7 +2475,7 @@ fn read_query_sequence_hmms(
             // p7_SingleBuilder(), nhmmer.c:905.
             let hmm = builder
                 .single_builder(&seq.name, &seq.dsq, seq.n, &abc, &bg)
-                .map_err(|e| format!("Error: nhmmer build failed: {e}"))?;
+                .map_err(|e| format!("Error: build failed: {e}"))?;
             // Note: unlike hmmbuild.c:966, nhmmer never sets eff_nseq after
             // p7_SingleBuilder, so the written model carries no EFFN line.
             Ok(hmm)
@@ -2734,12 +2647,7 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
             ));
         }
         let hmm = if args.singlemx && alignment.nseq == 1 {
-            build_nhmmer_singlemx_msa_hmm(
-                alignment,
-                &abc,
-                &bg,
-                single_builder.as_ref().unwrap(),
-            )?
+            build_nhmmer_singlemx_msa_hmm(alignment, &abc, &bg, single_builder.as_ref().unwrap())?
         } else {
             builder::build_hmm_from_msa_with_prior(
                 alignment,
@@ -2747,7 +2655,10 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
                 &bg,
                 0.5,
                 0.5,
-                args.qformat.as_deref().is_some_and(is_a2m_query_format),
+                // nhmmer has no --hand: p7_Builder always uses the fast
+                // (--symfrac) architecture, even for A2M queries whose reader
+                // supplies an implied RF line.
+                false,
                 builder::RelativeWeighting::PositionBased,
                 builder::EffectiveSeqNumber::Entropy {
                     target_re: None,
@@ -2757,6 +2668,8 @@ fn read_query_msa_hmms(args: &Args) -> Result<Vec<hmmer_pure_rs::Hmm>, String> {
                 CalibrationConfig::default(),
                 args.seed,
             )
+            // nhmmer.c:933: p7_Fail("build failed: %s", builder->errbuf).
+            .map_err(|e| format!("Error: build failed: {e}"))?
         };
         hmms.push(hmm);
     }
@@ -2788,19 +2701,11 @@ fn nhmmer_query_bg(args: &Args, abc: &Alphabet) -> Result<Bg, String> {
 fn nhmmer_builder(args: &Args, abc: &Alphabet, bg: &Bg) -> Result<Builder, String> {
     let mut builder = Builder::new(abc.abc_type).with_window(args.w_length, args.w_beta);
     let result = if args.mxfile.is_some() {
-        builder.set_score_system(
-            args.mxfile.as_deref(),
-            args.popen,
-            args.pextend,
-            bg,
-            abc,
-        )
+        builder.set_score_system(args.mxfile.as_deref(), args.popen, args.pextend, bg, abc)
     } else {
         builder.load_score_system(&args.matrix, args.popen, args.pextend, bg, abc)
     };
-    result.map_err(|e| {
-        format!("\nError: Failed to set single query seq score system:\n{e}\n")
-    })?;
+    result.map_err(|e| format!("\nError: Failed to set single query seq score system:\n{e}\n"))?;
     Ok(builder)
 }
 
@@ -2836,7 +2741,7 @@ fn build_nhmmer_singlemx_msa_hmm(
     // p7_SingleBuilder(), nhmmer.c:931.
     let mut hmm = builder
         .single_builder(name, &dsq, dsq.len() - 2, abc, bg)
-        .map_err(|e| format!("Error: nhmmer --singlemx failed to build score matrix model: {e}"))?;
+        .map_err(|e| format!("Error: build failed: {e}"))?;
     if let Some(ref acc) = alignment.acc {
         hmm.acc = Some(acc.clone());
         hmm.flags |= p7hmm::P7H_ACC;

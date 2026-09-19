@@ -5700,12 +5700,7 @@ fn test_single_seq_dna_model_maxl_matches_bundled_c() {
     );
 
     let c = Command::new(test_path("hmmer/src/hmmbuild"))
-        .args([
-            "--singlemx",
-            "--dna",
-            c_hmm.to_str().unwrap(),
-            &query,
-        ])
+        .args(["--singlemx", "--dna", c_hmm.to_str().unwrap(), &query])
         .output()
         .expect("failed to run bundled C hmmbuild");
     assert!(

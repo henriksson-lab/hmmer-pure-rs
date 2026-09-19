@@ -145,6 +145,32 @@ exact text-output parity is expected. `hmmsim` and `makehmmerdb` are
 intentionally timing/status checks only until their known output/container
 format gaps are closed.
 
+## Test-Suite HMM Fixtures Under `hmmer/testsuite/`
+
+`hmmer/` is a gitignored snapshot of upstream HMMER, and the test suite
+references a few files there that upstream does not ship: `minipfam.hmm`,
+`gecco_pfam5.hmm` and `gecco_missed*_hmms.hmm` (about 110 test references in
+`src/`, `tests/rust_hmmsearch_tests.rs`, `tests/real_world_regression_tests.rs`
+and `tests/gecco_pyhmmer_regression_tests.rs`). Regenerate them with:
+
+```sh
+scripts/download_testsuite_fixtures.sh
+```
+
+Each file is an `hmmfetch -f` of Pfam families from a pinned release
+(`gecco_*` from Pfam 35.0, `minipfam.hmm` from the first ten families of
+Pfam 34.0), verified byte-for-byte against the originals; the script pins the
+archive and output checksums. The ~290 MB `Pfam-A.hmm.gz` archives are cached
+under `external/pfam_releases/` (override with `FIXTURE_ROOT`). `minipfam.hmm`
+was originally written by HMMER 3.3.2, so its regenerated copy differs only in
+the ten `HMMER3/f [version]` lines.
+
+**No source:** `gecco_proteins.faa` and `gecco_missed*_proteins.faa` are GECCO
+gene predictions on GenBank CP157504.1 (`CP157504.1_<orf>` names) and cannot
+be downloaded; the script reports them as missing when they are absent. Tests
+that need them are skipped or fail on a clean checkout until they are copied
+in by hand.
+
 ## New Real-Data All-Tools Smoke Fixtures
 
 To exercise every Rust CLI subcommand on real data separate from the existing

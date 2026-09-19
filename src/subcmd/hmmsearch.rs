@@ -2339,11 +2339,8 @@ fn normalize_hmmsearch_table_cmdline(cmdline: &str) -> String {
 /// and `author` is e.g. `"hmmsearch (HMMER 3.4)"` / `"phmmer (HMMER 3.4)"`.
 ///
 /// Reuses the same `tophits::included_alignment` + Stockholm writer that
-/// `jackhmmer` uses; jackhmmer's writer emits a single, unwrapped block
-/// (equivalent to C's Pfam `cpl == alen`). C wraps default Stockholm at 200
-/// aligned residues per block, so for alignments wider than 200 columns the
-/// Stockholm (`textw > 0`) blocking would differ; for the tool fixtures here
-/// (alen <= ~175) it is byte-identical to C.
+/// `jackhmmer` uses. As in C, `textw > 0` writes Stockholm in 200-column
+/// blocks and `--notextw` (`textw == 0`) writes one unwrapped Pfam block.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_ali_output<W: Write>(
     f: &mut W,
@@ -2354,14 +2351,15 @@ pub(crate) fn write_ali_output<W: Write>(
     desc: Option<&str>,
     author: &str,
     th: &TopHits,
-    _textw: usize,
+    textw: usize,
 ) -> Option<usize> {
-    let mut msa = hmmer_pure_rs::tophits::included_alignment(th, abc, model_len, None, name)?;
+    // p7_ALL_CONSENSUS_COLS (hmmsearch.c:559, phmmer.c:623).
+    let mut msa = hmmer_pure_rs::tophits::included_alignment(th, abc, model_len, None, true, name)?;
     msa.acc = acc.filter(|s| !s.is_empty()).map(|s| s.to_string());
     msa.desc = desc.filter(|s| !s.is_empty()).map(|s| s.to_string());
     msa.author = Some(author.to_string());
     let nseq = msa.nseq;
-    crate::subcmd::jackhmmer::write_tophits_alignment_msa_stockholm(f, &msa);
+    crate::subcmd::jackhmmer::write_tophits_alignment_msa_stockholm(f, &msa, textw);
     Some(nseq)
 }
 

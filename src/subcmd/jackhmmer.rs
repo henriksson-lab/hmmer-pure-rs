@@ -8,8 +8,8 @@ use clap::{ArgAction, Parser};
 
 use hmmer_pure_rs::alphabet::Alphabet;
 use hmmer_pure_rs::bg::Bg;
-use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::builder;
+use hmmer_pure_rs::builder::Builder;
 use hmmer_pure_rs::calibrate::CalibrationConfig;
 use hmmer_pure_rs::logsum;
 use hmmer_pure_rs::msa::Msa;
@@ -682,12 +682,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         writeln!(out, "# show alignments in output:       no").unwrap();
     }
     if matrix_was_requested {
-        writeln!(
-            out,
-            "# subst score matrix (built-in):   {}",
-            args.matrix
-        )
-        .unwrap();
+        writeln!(out, "# subst score matrix (built-in):   {}", args.matrix).unwrap();
     }
     if mxfile_was_requested {
         writeln!(
@@ -886,7 +881,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 builder
                     .single_builder(&query_sq.name, &query_sq.dsq, query_sq.n, &abc, &bg)
                     .unwrap_or_else(|e| {
-                        eprintln!("Error: jackhmmer build failed: {e}");
+                        eprintln!("\nError: build failed: {e}");
                         std::process::exit(1);
                     })
             } else {
@@ -929,7 +924,14 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     // the same config as round 1, not Easel defaults.
                     calibration_config,
                     args.seed,
-                );
+                )
+                // jackhmmer.c:683 does not check p7_Builder's status, but
+                // p7_Calibrate's failure is fatal in every driver that does;
+                // report it the same way rather than search with bad STATS.
+                .unwrap_or_else(|e| {
+                    eprintln!("\nError: build failed: {e}");
+                    std::process::exit(1);
+                });
                 // Stash counts needed for the header banner, then drop the
                 // MSA — C does the equivalent at jackhmmer.c:620 right after
                 // the builder consumes it.
@@ -1149,6 +1151,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 &abc,
                 hmm.m,
                 Some((&query_sq, &query_tr)),
+                true, // p7_ALL_CONSENSUS_COLS (jackhmmer.c:683)
                 &format!("{}-i{}", query_sq.name, iteration),
             )
             .map(|mut msa| {
@@ -1238,7 +1241,8 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             // `msa`). When no rounds ran or no hits were found, `final_msa`
             // is None and no `-A` block is emitted.
             if let Some(ref msa) = final_msa {
-                write_stockholm_msa(f, msa);
+                // jackhmmer.c:723-724: Stockholm if textw > 0, else Pfam.
+                write_stockholm_msa_for_textw(f, msa, textw);
                 writeln!(
                     out,
                     "# Alignment of {} hits satisfying inclusion thresholds saved to: {}",
@@ -1655,12 +1659,32 @@ pub(crate) fn write_stockholm_msa(out: &mut dyn Write, msa: &Msa) {
     write_stockholm_msa_inner(out, msa, true, msa.alen.max(1))
 }
 
+/// C's `esl_msafile_stockholm_Write()` block width: 200 aligned columns per
+/// block for `eslMSAFILE_STOCKHOLM`, one unwrapped block (`cpl == alen`) for
+/// `eslMSAFILE_PFAM` (esl_msafile_stockholm.c:355-360). The search programs
+/// pick the format from `textw`: Stockholm when `textw > 0`, Pfam under
+/// `--notextw` (hmmsearch.c:566-567, phmmer.c:630-631, jackhmmer.c:723-724).
+pub(crate) fn stockholm_cpl_for_textw(textw: usize, alen: usize) -> usize {
+    if textw > 0 {
+        200
+    } else {
+        alen.max(1)
+    }
+}
+
+/// As [`write_stockholm_msa`], with the block width chosen from `textw` the
+/// way C's `-A` output does.
+pub(crate) fn write_stockholm_msa_for_textw(out: &mut dyn Write, msa: &Msa, textw: usize) {
+    write_stockholm_msa_inner(out, msa, true, stockholm_cpl_for_textw(textw, msa.alen))
+}
+
 /// Same Stockholm writer, but emitting the raw `p7_tophits_Alignment` text
 /// (insert columns kept as '.'/lowercase). Used by phmmer and hmmsearch `-A`,
 /// which build the MSA without the query (`inc_n == 0`) and so match C's
-/// `esl_msafile_Write` byte-for-byte without any insert folding.
-pub(crate) fn write_tophits_alignment_msa_stockholm(out: &mut dyn Write, msa: &Msa) {
-    write_stockholm_msa_inner(out, msa, false, 200)
+/// `esl_msafile_Write` byte-for-byte without any insert folding. `textw`
+/// selects Stockholm (200-column blocks) or Pfam (unwrapped) as in C.
+pub(crate) fn write_tophits_alignment_msa_stockholm(out: &mut dyn Write, msa: &Msa, textw: usize) {
+    write_stockholm_msa_inner(out, msa, false, stockholm_cpl_for_textw(textw, msa.alen))
 }
 
 fn write_stockholm_msa_inner(
@@ -1716,6 +1740,18 @@ fn write_stockholm_msa_inner(
     }
     writeln!(out).unwrap();
 
+    // GS section, in Easel's order: AC block, then DE block, each followed by
+    // a blank line (esl_msafile_stockholm.c:1183-1199). C emits the AC block
+    // whenever the msa has an sqacc array, which esl_msa_SetSeqAccession
+    // allocates on the first sequence that carries an accession.
+    if !msa.sqacc.iter().all(|acc| acc.is_empty()) {
+        for (name, acc) in msa.sqname.iter().zip(msa.sqacc.iter()) {
+            if !acc.is_empty() {
+                writeln!(out, "#=GS {:<maxname$} AC {}", name, acc).unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
     if !msa.sqdesc.iter().all(|desc| desc.is_empty()) {
         for (name, desc) in msa.sqname.iter().zip(msa.sqdesc.iter()) {
             if !desc.is_empty() {
