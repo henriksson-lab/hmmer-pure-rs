@@ -621,7 +621,7 @@ fn test_golden_gecco_pfam5_hit_set() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_pfam5_vs_gecco.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -650,7 +650,7 @@ fn test_golden_gecco_missed_hit_set() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_missed_vs_missed.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+        &test_path("test_data/gecco_missed_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -677,7 +677,7 @@ fn test_golden_gecco_missed2_hit_set() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_missed2.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed2_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed2_proteins.faa"),
+        &test_path("test_data/gecco_missed2_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -704,7 +704,7 @@ fn test_golden_gecco_missed3_hit_set() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_missed3.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed3_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed3_proteins.faa"),
+        &test_path("test_data/gecco_missed3_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -731,7 +731,7 @@ fn test_golden_gecco_missed4_hit_set() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_missed4.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed4_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed4_proteins.faa"),
+        &test_path("test_data/gecco_missed4_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -790,7 +790,7 @@ fn test_score_accuracy_gecco_pfam5() {
     let golden = parse_golden_tblout(&test_path("tests/golden/gecco_pfam5_vs_gecco.tblout"));
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
         &[],
     );
     let rust_hits = parse_tblout(&tbl);
@@ -1108,7 +1108,7 @@ fn test_multi_query_gecco_pfam5() {
     // gecco_pfam5.hmm contains 5 HMMs; each should produce results for its own queries
     let (stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
         &[],
     );
 
@@ -1149,7 +1149,7 @@ fn test_multi_query_gecco_pfam5() {
 fn test_multi_query_gecco_missed_hmms() {
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+        &test_path("test_data/gecco_missed_proteins.faa"),
         &[],
     );
 
@@ -1277,7 +1277,7 @@ fn test_large_multi_hmm_search() {
     // gecco_missed4 has 30 HMMs and should find ~60 hits
     let (_stdout, tbl) = run_hmmsearch(
         &test_path("hmmer/testsuite/gecco_missed4_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed4_proteins.faa"),
+        &test_path("test_data/gecco_missed4_proteins.faa"),
         &[],
     );
     let hits = parse_tblout(&tbl);

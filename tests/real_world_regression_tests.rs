@@ -4666,7 +4666,7 @@ fn test_gecco_pfam5_real_world_query_hit_counts_match_golden() {
         std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4691,7 +4691,7 @@ fn test_gecco_missed_real_world_query_hit_counts_match_golden() {
         std::fs::read_to_string(test_path("tests/golden/gecco_missed_vs_missed.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+        &test_path("test_data/gecco_missed_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4713,7 +4713,7 @@ fn test_gecco_missed2_real_world_query_hit_counts_match_golden() {
     let golden = std::fs::read_to_string(test_path("tests/golden/gecco_missed2.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_missed2_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed2_proteins.faa"),
+        &test_path("test_data/gecco_missed2_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4736,7 +4736,7 @@ fn test_gecco_missed3_real_world_query_hit_counts_match_golden() {
     let golden = std::fs::read_to_string(test_path("tests/golden/gecco_missed3.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_missed3_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed3_proteins.faa"),
+        &test_path("test_data/gecco_missed3_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4759,7 +4759,7 @@ fn test_gecco_missed4_real_world_query_hit_counts_match_golden() {
     let golden = std::fs::read_to_string(test_path("tests/golden/gecco_missed4.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_missed4_hmms.hmm"),
-        &test_path("hmmer/testsuite/gecco_missed4_proteins.faa"),
+        &test_path("test_data/gecco_missed4_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4797,31 +4797,31 @@ fn test_gecco_real_world_score_bias_rows_match_golden_exactly() {
             "gecco_pfam5",
             test_path("tests/golden/gecco_pfam5_vs_gecco.tblout"),
             test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-            test_path("hmmer/testsuite/gecco_proteins.faa"),
+            test_path("test_data/gecco_proteins.faa"),
         ),
         (
             "gecco_missed",
             test_path("tests/golden/gecco_missed_vs_missed.tblout"),
             test_path("hmmer/testsuite/gecco_missed_hmms.hmm"),
-            test_path("hmmer/testsuite/gecco_missed_proteins.faa"),
+            test_path("test_data/gecco_missed_proteins.faa"),
         ),
         (
             "gecco_missed2",
             test_path("tests/golden/gecco_missed2.tblout"),
             test_path("hmmer/testsuite/gecco_missed2_hmms.hmm"),
-            test_path("hmmer/testsuite/gecco_missed2_proteins.faa"),
+            test_path("test_data/gecco_missed2_proteins.faa"),
         ),
         (
             "gecco_missed3",
             test_path("tests/golden/gecco_missed3.tblout"),
             test_path("hmmer/testsuite/gecco_missed3_hmms.hmm"),
-            test_path("hmmer/testsuite/gecco_missed3_proteins.faa"),
+            test_path("test_data/gecco_missed3_proteins.faa"),
         ),
         (
             "gecco_missed4",
             test_path("tests/golden/gecco_missed4.tblout"),
             test_path("hmmer/testsuite/gecco_missed4_hmms.hmm"),
-            test_path("hmmer/testsuite/gecco_missed4_proteins.faa"),
+            test_path("test_data/gecco_missed4_proteins.faa"),
         ),
     ];
 
@@ -4844,7 +4844,7 @@ fn test_gecco_pfam5_top_hits_match_golden_rows() {
         std::fs::read_to_string(test_path("tests/golden/gecco_pfam5_vs_gecco.tblout")).unwrap();
     let rust = run_hmmsearch_tblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
     );
 
     let golden_rows = parse_hmmsearch_rows(&golden);
@@ -4905,11 +4905,11 @@ fn test_representative_pfam_real_world_top_hits_match_golden() {
 fn test_gecco_pfam5_pfamtblout_matches_bundled_c_exactly() {
     let rust = run_hmmsearch_pfamtblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
     );
     let c = run_c_hmmsearch_pfamtblout(
         &test_path("hmmer/testsuite/gecco_pfam5.hmm"),
-        &test_path("hmmer/testsuite/gecco_proteins.faa"),
+        &test_path("test_data/gecco_proteins.faa"),
     );
 
     assert_eq!(
@@ -4938,7 +4938,7 @@ fn test_fn3_domtblout_rows_match_golden_core_columns() {
 #[test]
 fn test_gecco_pfam5_domtblout_query_counts_are_stable() {
     let hmm = test_path("hmmer/testsuite/gecco_pfam5.hmm");
-    let seqdb = test_path("hmmer/testsuite/gecco_proteins.faa");
+    let seqdb = test_path("test_data/gecco_proteins.faa");
     let rust_rows = parse_domtbl_rows(&run_hmmsearch_domtblout(&hmm, &seqdb));
     let c_rows = parse_domtbl_rows(&run_c_hmmsearch_domtblout(&hmm, &seqdb));
     assert_eq!(rust_rows, c_rows);

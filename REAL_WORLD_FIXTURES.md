@@ -165,11 +165,10 @@ under `external/pfam_releases/` (override with `FIXTURE_ROOT`). `minipfam.hmm`
 was originally written by HMMER 3.3.2, so its regenerated copy differs only in
 the ten `HMMER3/f [version]` lines.
 
-**No source:** `gecco_proteins.faa` and `gecco_missed*_proteins.faa` are GECCO
-gene predictions on GenBank CP157504.1 (`CP157504.1_<orf>` names) and cannot
-be downloaded; the script reports them as missing when they are absent. Tests
-that need them are skipped or fail on a clean checkout until they are copied
-in by hand.
+The matching protein fixtures (`test_data/gecco_proteins.faa`,
+`test_data/gecco_missed*_proteins.faa`) are GECCO gene predictions on GenBank
+CP157504.1 (`CP157504.1_<orf>` names) with no downloadable source. They total
+about 23 KB and are committed in `test_data/`.
 
 ## New Real-Data All-Tools Smoke Fixtures
 

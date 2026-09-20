@@ -13,9 +13,9 @@
 # minipfam.hmm was originally written by HMMER 3.3.2, so the regenerated copy
 # differs from the original only in the ten "HMMER3/f [version]" lines.
 #
-# NOT covered: gecco_*_proteins.faa / gecco_proteins.faa. Those are gene
-# predictions on GenBank CP157504.1 produced by GECCO's pipeline and have no
-# downloadable source, so they cannot be regenerated here.
+# The matching gecco_*_proteins.faa files are GECCO gene predictions on
+# GenBank CP157504.1 with no downloadable source; they are small (2-8 KB) and
+# are committed under test_data/ instead.
 #
 # Usage:
 #   scripts/download_testsuite_fixtures.sh
@@ -162,18 +162,5 @@ done
 for name in gecco_pfam5.hmm gecco_missed_hmms.hmm gecco_missed2_hmms.hmm gecco_missed3_hmms.hmm gecco_missed4_hmms.hmm minipfam.hmm; do
   fetch_fixture "$name"
 done
-
-missing=()
-for faa in gecco_proteins.faa gecco_missed_proteins.faa gecco_missed2_proteins.faa gecco_missed3_proteins.faa gecco_missed4_proteins.faa; do
-  [[ -s "$testsuite_dir/$faa" ]] || missing+=("$faa")
-done
-if (( ${#missing[@]} )); then
-  echo
-  echo "NOTE: the following protein fixtures have no downloadable source and are still missing:"
-  for faa in "${missing[@]}"; do
-    echo "  $testsuite_dir/$faa"
-  done
-  echo "They are GECCO gene predictions on GenBank CP157504.1; see REAL_WORLD_FIXTURES.md."
-fi
 
 echo "testsuite HMM fixtures ready in $testsuite_dir"
