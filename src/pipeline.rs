@@ -4,10 +4,10 @@ use crate::bg::Bg;
 use crate::dp::gmx::Gmx;
 use crate::profile::*;
 use crate::sequence::Sequence;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::simd::msv_filter::MsvResult;
 use crate::simd::oprofile::OProfile;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::simd::vit_filter::{p7_viterbi_filter, VitResult};
 use crate::stats;
 use crate::tophits::*;
@@ -249,11 +249,14 @@ pub struct Pipeline {
     // E-value parameters (from HMM)
     pub evparam: [f32; 6],
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "tracehash")))]
-    msv_dp: Vec<std::arch::x86_64::__m128i>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tracehash")
+    ))]
+    msv_dp: Vec<crate::simd::sse::__m128i>,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fwd_pmx: crate::simd::probmx::ProbMx,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     domain_scratch: crate::domaindef::DomainSimdScratch,
 }
 
@@ -297,11 +300,14 @@ impl Pipeline {
             z_setby: ZSetBy::Ntargets,
             domz_setby: ZSetBy::Ntargets,
             evparam: [0.0; 6],
-            #[cfg(all(target_arch = "x86_64", not(feature = "tracehash")))]
+            #[cfg(all(
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+                not(feature = "tracehash")
+            ))]
             msv_dp: Vec::new(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             fwd_pmx: crate::simd::probmx::ProbMx::new(0),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             domain_scratch: crate::domaindef::DomainSimdScratch::new(),
         }
     }
@@ -467,9 +473,9 @@ impl Pipeline {
 
             // Stage 1: MSV filter
             let usc: f32;
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
-                if is_x86_feature_detected!("sse2") {
+                if crate::simd::sse::available() {
                     #[cfg(feature = "tracehash")]
                     let msv_result =
                         unsafe { crate::simd::msv_filter::p7_msv_filter(&sq.dsq, l, om) };
@@ -491,7 +497,7 @@ impl Pipeline {
                     usc = crate::dp::generic_msv::g_msv(&sq.dsq, l, gm, &mut gx, 2.0);
                 }
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 let mut gx = Gmx::new(gm.m, l);
                 usc = crate::dp::generic_msv::g_msv(&sq.dsq, l, gm, &mut gx, 2.0);
@@ -577,9 +583,9 @@ impl Pipeline {
                     vit_ran = true;
                 }
                 let vit_sc: f32;
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 {
-                    if is_x86_feature_detected!("sse2") {
+                    if crate::simd::sse::available() {
                         let vit_result = unsafe { p7_viterbi_filter(&sq.dsq, l, om) };
                         vit_sc = match vit_result {
                             VitResult::Ok(sc) => sc,
@@ -590,7 +596,7 @@ impl Pipeline {
                         vit_sc = crate::dp::generic_viterbi::g_viterbi(&sq.dsq, l, gm, &mut gx);
                     }
                 }
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                 {
                     let mut gx = Gmx::new(gm.m, l);
                     vit_sc = crate::dp::generic_viterbi::g_viterbi(&sq.dsq, l, gm, &mut gx);
@@ -663,11 +669,11 @@ impl Pipeline {
 
         // Stage 3: full Forward parser.
         let fwd_sc;
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let mut fwd_pmx_for_domains = None;
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            if is_x86_feature_detected!("sse2") {
+            if crate::simd::sse::available() {
                 self.fwd_pmx.resize_parser(l);
                 fwd_sc = unsafe {
                     crate::simd::fwd_filter::forward_parser_pmx(&sq.dsq, l, om, &mut self.fwd_pmx)
@@ -678,7 +684,7 @@ impl Pipeline {
                 fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let mut gx = Gmx::new(gm.m, l);
             fwd_sc = crate::dp::generic_fwdback::g_forward(&sq.dsq, l, gm, &mut gx);
@@ -697,16 +703,16 @@ impl Pipeline {
                 l,
                 gm,
                 Some(om),
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 fwd_pmx_for_domains,
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                 None,
                 Some(fwd_sc),
                 hmm,
                 bg,
                 null_sc,
                 self.seed,
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 &mut self.domain_scratch,
                 self.do_alignment,
                 self.do_alignment_display,

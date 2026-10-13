@@ -2,8 +2,8 @@
 //! Direct port of impl_sse/fwdback.c forward_engine() in parser mode.
 #![allow(clippy::let_and_return, clippy::needless_borrow)]
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::sse::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
@@ -11,7 +11,10 @@ use crate::util::cmath::c_log_f64;
 
 /// Tracehash helper: emits quantized per-state sums (M/D) of the striped DP row
 /// for rows 18/19/20. Mirrors `trace_forward_engine_row_sums_q1e5` in fwdback.c.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_row_sums_q1e5(
     row: usize,
     dsq: &[Dsq],
@@ -62,7 +65,10 @@ unsafe fn trace_forward_engine_row_sums_q1e5(
 
 /// Tracehash helper: quantized M/D/I sums for the row that triggers the 10th
 /// sparse-rescaling event (debug probe used to localize divergences).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_row_q1e5(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -102,7 +108,10 @@ unsafe fn trace_forward_engine_scale10_row_q1e5(
 
 /// Tracehash helper: emits quantized M/D/I sums for selected rows around the
 /// scale-10 window, tagged with the row index.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_window_row_q1e5(
     row: usize,
     dsq: &[Dsq],
@@ -139,7 +148,10 @@ unsafe fn trace_forward_engine_scale10_window_row_q1e5(
 
 /// Tracehash helper: emits exact-bit FNV-1a hashes of M/D/I cells for
 /// scale-10 window rows (bit-level divergence probe).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_window_row_bits(
     row: usize,
     dsq: &[Dsq],
@@ -185,7 +197,10 @@ unsafe fn trace_forward_engine_scale10_window_row_bits(
 
 /// Tracehash helper: bit-exact M/D/I hashes captured immediately after each
 /// sparse-rescale event, tagged by event index and row.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale_event_row_bits(
     event: usize,
     row: usize,
@@ -228,7 +243,10 @@ unsafe fn trace_forward_engine_scale_event_row_bits(
 
 /// Tracehash helper: quantized M/D/I sums for the "main" vs. "dd" phase of the
 /// scale-10 row, including per-state main-phase sums.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_phase_q1e5(
     name: &'static str,
     row: usize,
@@ -292,7 +310,10 @@ unsafe fn trace_forward_engine_scale10_phase_q1e5(
 
 /// Tracehash helper: bucketed M-state sums (5 q-index buckets) for the
 /// scale-10 main phase, isolating which stripes drive divergence.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
     row: usize,
     dsq: &[Dsq],
@@ -338,7 +359,10 @@ unsafe fn trace_forward_engine_scale10_phase_main_m_buckets_q1e5(
 
 /// Tracehash helper: per-lane bit-exact hash of the xEv vector at the
 /// scale-10 trigger row.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_scale10_xev_bits(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -359,7 +383,10 @@ unsafe fn trace_forward_engine_scale10_xev_bits(
 }
 
 /// Tracehash helper: bit-exact value of the scalar xE at the scale-10 row.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_scale10_xe_bits(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -378,7 +405,10 @@ fn trace_forward_engine_scale10_xe_bits(
 /// Tracehash helper: per-row "special step" probe — emits xEv lanes (pre
 /// horizontal-sum), xE, and the row scale to pinpoint per-row divergences.
 /// Mirrors the C helper used inside forward_engine.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_step_bits(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -406,7 +436,10 @@ unsafe fn trace_forward_engine_step_bits(
 
 /// Tracehash helper: bit-exact dump of (xN, xJ, xB, xC) at the start of the
 /// scale-10 trigger row, plus individual per-special probes.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_scale10_row_start_bits(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -448,7 +481,10 @@ fn trace_forward_engine_scale10_row_start_bits(
 
 /// Tracehash helper: per-lane bit-exact hash of xEv at row 19 (canonical
 /// divergence-localization row).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_forward_engine_row19_xev_bits(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -469,7 +505,10 @@ unsafe fn trace_forward_engine_row19_xev_bits(
 }
 
 /// Tracehash helper: bit-exact value of the scalar xE at row 19.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_row19_xe_bits(dsq: &[Dsq], dsq_offset: usize, l: usize, m: usize, xe: f32) {
     let mut th = tracehash::th_call!("simd_forward_engine_row19_xe_bits");
     th.input_usize(l);
@@ -482,7 +521,10 @@ fn trace_forward_engine_row19_xe_bits(dsq: &[Dsq], dsq_offset: usize, l: usize, 
 /// Tracehash helper: emits row, pre-scale xE bits, and quantized specials
 /// (xN/xJ/xB/xC) for the very first sparse-rescaling event. Mirrors the
 /// same-named C helper in fwdback.c.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_first_scale_q1e5(
     do_full: bool,
     dsq: &[Dsq],
@@ -539,7 +581,10 @@ fn trace_forward_engine_first_scale_q1e5(
 
 /// Tracehash helper: detailed per-event probe — emits the event index, row,
 /// bit-exact pre-scale xE, and quantized post-scale specials.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_scale_event_detail_q1e5(
     event: usize,
     do_full: bool,
@@ -589,7 +634,10 @@ fn trace_forward_engine_scale_event_detail_q1e5(
 
 /// Tracehash helper: per-event trace dispatch — calls `first_scale` for event
 /// 1 and emits per-event row/xE/specials probes for events 2..=5+.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_forward_engine_scale_event_q1e5(
     event: usize,
     do_full: bool,
@@ -679,8 +727,8 @@ fn trace_forward_engine_scale_event_q1e5(
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
     forward_parser_offset(dsq, 0, l, om)
 }
@@ -695,8 +743,8 @@ pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_offset(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -899,8 +947,8 @@ pub unsafe fn forward_parser_offset(
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx(
     dsq: &[Dsq],
     l: usize,
@@ -918,8 +966,8 @@ pub unsafe fn forward_parser_pmx(
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx_offset(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -945,8 +993,8 @@ pub unsafe fn forward_parser_pmx_offset(
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx_offset_with_scratch(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -1284,8 +1332,8 @@ pub unsafe fn forward_parser_pmx_offset_with_scratch(
 /// # Safety
 /// Requires SSE2; caller guarantees `pmx.has_dp` and that `dsq[1..=l]`
 /// contains no degenerate residues.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub(crate) unsafe fn forward_parser_pmx_offset_direct(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -1580,8 +1628,8 @@ fn canonical_run(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_kp: usize) -> boo
 
 /// Right-shift a __m128 by one float element, zero-filling from the left.
 /// [a, b, c, d] -> [0, a, b, c]
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 unsafe fn rightshift_float(v: __m128) -> __m128 {
     // Cast to integer, shift left by 4 bytes, cast back
     let vi = _mm_castps_si128(v);
@@ -1601,7 +1649,7 @@ mod tests {
     /// Forward parser on a short residue mix, asserting a finite score.
     #[test]
     fn test_forward_parser_basic() {
-        if !is_x86_feature_detected!("sse2") {
+        if !crate::simd::sse::available() {
             return;
         }
         let hmm = crate::hmmfile::read_hmm_file(Path::new(concat!(

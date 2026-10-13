@@ -7,8 +7,8 @@
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::{nqb, OProfile};
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::sse::*;
 
 /// Result of the SSV filter.
 pub enum SsvResult {
@@ -25,7 +25,7 @@ pub enum SsvResult {
 /// Single-cell SSV step: load 16 emission bytes for one stripe lane, subtract
 /// from `sv` with unsigned saturation, fold into the running max `xev`, then
 /// advance the score pointer (mirrors C's `STEP_SINGLE` macro).
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 macro_rules! step_lane {
     ($sv:ident, $rsc:ident, $xev:ident) => {{
         let r = _mm_loadu_si128($rsc as *const __m128i);
@@ -38,7 +38,7 @@ macro_rules! step_lane {
 /// Stripe boundary handling: shift one lane left by one byte and OR in the
 /// `beginv` (-128) initial value so the score doesn't leak across stripes.
 /// Mirrors C's `CONVERT_STEP` macro.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 macro_rules! convert_lane {
     ($sv:ident, $beginv:ident) => {{
         $sv = _mm_slli_si128::<1>($sv);
@@ -61,8 +61,8 @@ macro_rules! convert_lane {
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn ssv_filter_q17(dsq: &[Dsq], l: usize, om: &OProfile) -> SsvResult {
     let q = nqb(om.m);
     if q != 17 || om.sbv.is_empty() || l == 0 {
@@ -110,8 +110,8 @@ pub unsafe fn ssv_filter_q17(dsq: &[Dsq], l: usize, om: &OProfile) -> SsvResult 
 /// unrolled to keep the eight `sv` registers live in SSE2 XMMs; the three
 /// loop phases (prologue, steady-state stripe rotation, epilogue) walk the
 /// stripe layout so that stripe boundaries trigger a single `convert_lane!`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 #[allow(unused_assignments, unused_comparisons)]
 unsafe fn calc_band_8(
     dsq: &[Dsq],
@@ -532,8 +532,8 @@ unsafe fn calc_band_8(
 /// of C's `calc_band_9` (ssvfilter.c:765). Same unrolled structure as
 /// `calc_band_8` with one additional lane; used together with `calc_band_8`
 /// to cover Q=17 striped DP (8 + 9 = 17).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 #[allow(unused_assignments, unused_comparisons)]
 unsafe fn calc_band_9(
     dsq: &[Dsq],
@@ -1025,8 +1025,8 @@ unsafe fn calc_band_9(
 
 /// Horizontal max of 16 unsigned bytes in an SSE2 vector (4-step reduction).
 /// Easel `esl_sse_hmax_epu8` equivalent.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 unsafe fn hmax_epu8(mut v: __m128i) -> u8 {
     let t = _mm_shuffle_epi32::<{ super::shuffle_mask(2, 3, 0, 1) }>(v);
     v = _mm_max_epu8(v, t);

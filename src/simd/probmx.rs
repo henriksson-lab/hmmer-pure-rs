@@ -296,15 +296,15 @@ impl ProbMx {
     /// # Safety
     /// `dp_simd` must hold exactly `q * 3` aligned vectors, and row `i` must
     /// be allocated.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub unsafe fn write_simd_row(
         &mut self,
-        dp_simd: &[std::arch::x86_64::__m128],
+        dp_simd: &[crate::simd::sse::__m128],
         q: usize,
         _m: usize,
         i: usize,
     ) {
-        use std::arch::x86_64::*;
+        use crate::simd::sse::*;
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
         let dst = self.striped_dp.as_mut_ptr().add(row_base);
         let src = dp_simd.as_ptr();
@@ -318,7 +318,7 @@ impl ProbMx {
     }
 
     /// Zero out the entire striped DP row `i`.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[inline]
     pub fn zero_simd_row(&mut self, i: usize) {
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
@@ -330,7 +330,7 @@ impl ProbMx {
     ///
     /// # Safety
     /// Row `i` must be allocated.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[inline]
     pub unsafe fn striped_row_ptr(&mut self, i: usize) -> *mut f32 {
         self.striped_dp
@@ -339,7 +339,7 @@ impl ProbMx {
     }
 
     /// Number of `f32` cells per striped DP row (== `q * 3 * 4`).
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[inline]
     pub fn striped_row_width(&self) -> usize {
         self.striped_row_width
@@ -347,7 +347,7 @@ impl ProbMx {
 
     /// Number of striped SIMD stripes, including HMMER's minimum two-stripe
     /// allocation for short models.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[inline]
     pub fn q_count(&self) -> usize {
         self.q
@@ -355,7 +355,10 @@ impl ProbMx {
 
     /// Sum the lanes of `state` at row `i` over only the `k <= M` cells.
     /// Tracehash-only helper used to diff striped rows against the C output.
-    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "tracehash",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub fn striped_row_state_sum(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
@@ -373,7 +376,10 @@ impl ProbMx {
 
     /// Sum every lane (including padding past `M`) of `state` at row `i`.
     /// Tracehash-only.
-    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "tracehash",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub fn striped_row_state_sum_all_lanes(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
@@ -388,7 +394,10 @@ impl ProbMx {
 
     /// Return the 4-lane stripe `(qi, state)` at row `i` as a plain array.
     /// Tracehash-only.
-    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "tracehash",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub fn striped_row_state_vector(&self, i: usize, state: usize, qi: usize) -> [f32; 4] {
         let off = self.striped_dp_offset
             + i * self.striped_row_width
@@ -404,7 +413,10 @@ impl ProbMx {
 
     /// Sum `state` lanes over a stripe range `[q_start, q_end)` at row `i`,
     /// keeping only `k <= M` cells. Tracehash-only.
-    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "tracehash",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub fn striped_row_state_q_range_sum(
         &self,
         i: usize,
@@ -901,7 +913,7 @@ pub fn p_null2_odds_from_pmx_reuse(
 /// matrix to accumulate `exp_m`/`exp_i` over rows 1..L (special handling for
 /// row 1 to mirror the C memcpy seeding), normalizes by `1/L`, and forms
 /// `null2[x] = sum_q (exp_m[qi] * rfv[x][qi] + exp_i[qi]) + xfactor`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn p_null2_odds_from_posteriors_reuse(
     pp: &ProbMx,
     k: usize,
@@ -921,7 +933,7 @@ pub fn p_null2_odds_from_posteriors_reuse(
     exp_i.resize(exp_len, 0.0);
 
     unsafe {
-        use core::arch::x86_64::{
+        use crate::simd::sse::{
             _mm_add_ps, _mm_load_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_setzero_ps,
             _mm_shuffle_ps, _mm_store_ss, _mm_storeu_ps,
         };
@@ -989,8 +1001,8 @@ pub fn p_null2_odds_from_posteriors_reuse(
                 sv = _mm_add_ps(sv, _mm_mul_ps(m, odds));
                 sv = _mm_add_ps(sv, ins);
             }
-            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b00_11_10_01));
-            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b01_00_11_10));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps::<0b00_11_10_01>(sv, sv));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps::<0b01_00_11_10>(sv, sv));
             let mut sum = 0.0_f32;
             _mm_store_ss(&mut sum, sv);
             null2[x] = sum + xfactor;
@@ -1046,9 +1058,9 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
         }
     };
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     unsafe {
-        use core::arch::x86_64::{
+        use crate::simd::sse::{
             _mm_add_ps, _mm_load_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_setzero_ps,
             _mm_shuffle_ps, _mm_store_ss, _mm_storeu_ps,
         };
@@ -1120,15 +1132,15 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
                 sv = _mm_add_ps(sv, _mm_mul_ps(m, odds));
                 sv = _mm_add_ps(sv, ins);
             }
-            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b00_11_10_01));
-            sv = _mm_add_ps(sv, _mm_shuffle_ps(sv, sv, 0b01_00_11_10));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps::<0b00_11_10_01>(sv, sv));
+            sv = _mm_add_ps(sv, _mm_shuffle_ps::<0b01_00_11_10>(sv, sv));
             let mut sum = 0.0_f32;
             _mm_store_ss(&mut sum, sv);
             null2[x] = sum + xfactor;
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     unsafe {
         for i in 1..=ld {
             let dp_scale = scaleproduct * *fwd.row_scale.as_ptr().add(i);

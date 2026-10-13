@@ -1,6 +1,10 @@
 pub mod oprofile;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod optacc;
+/// SSE2 intrinsics on x86_64, and the same intrinsics over NEON on aarch64; the
+/// striped kernels below are written once against this.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub mod sse;
 
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_fwd;
@@ -8,18 +12,18 @@ pub mod avx2_fwd;
 pub mod avx2_msv;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_vit;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod bck_filter;
 pub mod fm_ssv;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod fwd_filter;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod msv_filter;
 pub mod probmx;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod ssv_filter;
 pub mod ssv_longtarget;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod vit_filter;
 
 pub mod neon_fwd;

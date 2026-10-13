@@ -2,7 +2,7 @@
 //! Direct port of HMMER impl_sse/optacc.c p7_OptimalAccuracy() for the
 //! coordinate-only domain path.
 
-use std::arch::x86_64::*;
+use crate::simd::sse::*;
 
 use crate::simd::oprofile::*;
 use crate::simd::probmx::{ProbMx, PXB, PXC, PXE, PXJ, PXN};
@@ -61,7 +61,7 @@ unsafe fn hmax_ps(v: __m128) -> f32 {
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `fwd`, `bck`, and `pp`.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn posterior_decoding_pmx(fwd: &ProbMx, bck: &ProbMx, om: &OProfile, pp: &mut ProbMx) {
     let l = fwd.l;
     let m = om.m;
@@ -159,7 +159,7 @@ pub unsafe fn posterior_decoding_pmx(fwd: &ProbMx, bck: &ProbMx, om: &OProfile, 
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn optimal_accuracy_pmx(om: &OProfile, pp: &ProbMx, ox: &mut ProbMx) -> f32 {
     let m = om.m;
     let l = pp.l;
@@ -319,7 +319,7 @@ pub unsafe fn optimal_accuracy_pmx(om: &OProfile, pp: &ProbMx, ox: &mut ProbMx) 
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn oa_trace_coords_pmx(
     om: &OProfile,
     pp: &ProbMx,
@@ -419,7 +419,7 @@ pub unsafe fn oa_trace_coords_pmx(
 ///
 /// # Safety
 /// Requires SSE2 support and full striped matrices in `pp` and `ox`.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn oa_trace_pmx(om: &OProfile, pp: &ProbMx, ox: &ProbMx) -> Trace {
     let mut tr = Trace::new();
     let mut i = ox.l;

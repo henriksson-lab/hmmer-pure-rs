@@ -10,7 +10,7 @@ use crate::alphabet::AlphabetType;
 use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::Hmm;
 use crate::hmmfile_binary;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::simd::oprofile::AlignedF32x4;
 use crate::simd::oprofile::{nqb, nqf, nqw, OProfile};
 
@@ -1278,12 +1278,12 @@ pub fn oprofile_from_pressed_records(
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let rfv_a: Vec<Vec<AlignedF32x4>> = rfv
         .iter()
         .map(|rows| rows.iter().copied().map(AlignedF32x4::from_array).collect())
         .collect();
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let tfv_a: Vec<AlignedF32x4> = tfv.iter().copied().map(AlignedF32x4::from_array).collect();
 
     Ok(OProfile {
@@ -1304,9 +1304,9 @@ pub fn oprofile_from_pressed_records(
         ncj_roundoff: profile.ncj_roundoff,
         rfv,
         tfv,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         rfv_a,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         tfv_a,
         xf: profile.xf,
         m: msv.m,
@@ -1524,7 +1524,7 @@ mod tests {
         assert_eq!(actual.compo, expected.compo);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn msv_score(result: crate::simd::msv_filter::MsvResult) -> Option<u32> {
         match result {
             crate::simd::msv_filter::MsvResult::Ok(sc) => Some(sc.to_bits()),
@@ -1532,7 +1532,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn vit_score(result: crate::simd::vit_filter::VitResult) -> Option<u32> {
         match result {
             crate::simd::vit_filter::VitResult::Ok(sc) => Some(sc.to_bits()),
@@ -2259,10 +2259,10 @@ mod tests {
         );
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn reconstructed_oprofile_scores_like_converted_profile() {
-        if !std::is_x86_feature_detected!("sse2") {
+        if !crate::simd::sse::available() {
             return;
         }
 

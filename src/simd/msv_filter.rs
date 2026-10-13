@@ -5,8 +5,8 @@
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::{nqb, OProfile};
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::sse::*;
 
 /// Result of the MSV filter: either a finite score or a saturating overflow.
 pub enum MsvResult {
@@ -28,7 +28,7 @@ pub enum MsvResult {
 ///
 /// # Safety
 /// Requires SSE2 support. Caller must verify CPU support.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
     let q_count = nqb(om.m);
 
@@ -130,7 +130,7 @@ pub unsafe fn p7_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
 /// Identical math to [`p7_msv_filter`] but skips the per-call allocation by reusing the
 /// caller's `dp` vector. Keep tracehash builds on `p7_msv_filter()` unless a trace proves
 /// this allocation change is harmless for exact instrumentation-sensitive comparisons.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter_with_scratch_rust_helper(
     dsq: &[Dsq],
     l: usize,
@@ -168,7 +168,7 @@ pub unsafe fn p7_msv_filter_with_scratch_rust_helper(
 ///
 /// # Safety
 /// Requires SSE2 support.
-#[target_feature(enable = "sse2")]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter_dp_only_rust_helper(
     dsq: &[Dsq],
     l: usize,
@@ -276,7 +276,7 @@ mod tests {
     /// Smoke test: MSV filter returns a finite score (or overflow) on a tiny model.
     #[test]
     fn test_msv_filter_basic() {
-        if !is_x86_feature_detected!("sse2") {
+        if !crate::simd::sse::available() {
             return;
         }
 
