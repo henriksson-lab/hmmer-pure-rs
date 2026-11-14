@@ -6,17 +6,17 @@
 //! where the SSV score exceeds a P-value threshold. Used by nhmmer and
 //! Infernal for scanning genomes.
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::sse::*;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::alphabet::Dsq;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::bg::Bg;
 use crate::simd::oprofile::OProfile;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::stats;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::util::cmath::ESL_CONST_LOG2;
 
 /// A window hit from the SSV long-target filter.
@@ -118,8 +118,8 @@ pub fn get_ssv_score_array(om: &OProfile) -> Vec<u8> {
 ///
 /// # Safety
 /// Requires SSE2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_ssv_filter_longtarget(
     dsq: &[Dsq],
     l: usize,
@@ -211,7 +211,7 @@ pub unsafe fn p7_ssv_filter_longtarget(
         let mut xe_v = _mm_setzero_si128();
 
         // Shift previous row right by 1 byte (diagonal propagation)
-        let mut mpv = _mm_slli_si128(dp[q_count - 1], 1);
+        let mut mpv = _mm_slli_si128::<1>(dp[q_count - 1]);
 
         for q in 0..q_count {
             // Load emission score for this residue at this vector position
@@ -425,7 +425,7 @@ fn compute_prefix_suffix_lengths_hmm(hmm: &crate::hmm::Hmm) -> (Vec<f32>, Vec<f3
 /// probability). Reading from raw HMM transitions gives slightly different
 /// floating-point results that propagate through p7_pli_extend_and_merge_windows,
 /// changing SSV window lengths by a few residues.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn compute_prefix_suffix_lengths_from_om(
     om: &crate::simd::oprofile::OProfile,
 ) -> (Vec<f32>, Vec<f32>) {

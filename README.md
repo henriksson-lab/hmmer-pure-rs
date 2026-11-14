@@ -185,7 +185,8 @@ unexamined.
 ## Features
 
 - Pure Rust implementation of the HMMER search pipeline
-- SSE2-accelerated MSV, Viterbi, and Forward filters
+- SSE2-accelerated MSV, Viterbi, and Forward filters, on x86_64 and (via a NEON
+  implementation of the same intrinsics) on aarch64 / Apple Silicon
 - Full domain definition with posterior decoding (btot/etot/mocc region detection)
 - Stochastic traceback clustering for multi-domain sequences
 - Null2 bias correction with omega weighting
@@ -357,6 +358,7 @@ Benchmark/test policy:
 - `hmm` / `hmmfile` - HMM data structures and file I/O
 - `bg` - Null/background model with composition bias filter
 - `profile` - Scoring profiles and model configuration
+- `simd/sse` - The SSE2 intrinsics the kernels use: `std::arch` on x86_64, NEON on aarch64
 - `simd/oprofile` - SSE2-optimized profile (byte, word, and float precision layouts)
 - `simd/msv_filter` - SSE2 MSV filter (byte precision, first pipeline stage)
 - `simd/vit_filter` - SSE2 Viterbi filter (int16 precision, second stage)

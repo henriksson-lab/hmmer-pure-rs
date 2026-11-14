@@ -10,9 +10,9 @@ use crate::trace::{State, Trace};
 use crate::util::cmath::c_expf_to_f32;
 use crate::util::random::MersenneTwister;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::simd::oprofile::*;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::simd::probmx::{ProbMx, PXB, PXC, PXE, PXJ, PXN};
 
 /// Sample a stochastic traceback directly from a SIMD probability-space Forward matrix.
@@ -20,7 +20,7 @@ use crate::simd::probmx::{ProbMx, PXB, PXC, PXE, PXJ, PXN};
 /// Convenience wrapper that allocates a `Trace` and forwards to
 /// `stochastic_trace_pmx_into`. Works on the striped `ProbMx` produced by the
 /// SIMD Forward parser.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn stochastic_trace_pmx(
     rng: &mut MersenneTwister,
     l: usize,
@@ -37,7 +37,7 @@ pub fn stochastic_trace_pmx(
 /// Samples one path from the posterior alignment distribution and appends it
 /// to `tr` (which is cleared first). Reverses the appended states so the
 /// trace reads `S..T` on return.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn stochastic_trace_pmx_into(
     rng: &mut MersenneTwister,
     l: usize,
@@ -97,7 +97,7 @@ pub fn stochastic_trace_pmx_into(
 
 /// Striped lookup of a forward-style transition probability at model node `k`,
 /// transition kind `t`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn tfv(om: &OProfile, k: usize, t: usize) -> f32 {
     let q = (k - 1) % nqf(om.m);
     let lane = (k - 1) / nqf(om.m);
@@ -105,7 +105,7 @@ fn tfv(om: &OProfile, k: usize, t: usize) -> f32 {
 }
 
 /// Striped lookup of the D->D transition probability at model node `k`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn tfv_dd(om: &OProfile, k: usize) -> f32 {
     let q = (k - 1) % nqf(om.m);
     let lane = (k - 1) / nqf(om.m);
@@ -113,7 +113,7 @@ fn tfv_dd(om: &OProfile, k: usize) -> f32 {
 }
 
 /// Sample predecessor of `M_k(i)` from {B, M, I, D} weighted by transition probs.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_m_pmx(
     rng: &mut MersenneTwister,
     om: &OProfile,
@@ -147,7 +147,7 @@ fn select_m_pmx(
 }
 
 /// Sample predecessor of `D_k(i)` from {M, D}.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_d_pmx(
     rng: &mut MersenneTwister,
     om: &OProfile,
@@ -166,7 +166,7 @@ fn select_d_pmx(
 }
 
 /// Sample predecessor of `I_k(i)` from {M, I}.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_i_pmx(
     rng: &mut MersenneTwister,
     om: &OProfile,
@@ -184,7 +184,7 @@ fn select_i_pmx(
 }
 
 /// Sample C-state predecessor (C loop vs E move) from probability-space matrix.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_c_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
     let c = ox.xmx(i - 1, PXC) * om.xf[P7O_C][P7O_LOOP];
     let e = ox.xmx(i, PXE) * om.xf[P7O_E][P7O_MOVE] * ox.row_scale[i];
@@ -196,7 +196,7 @@ fn select_c_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize)
 }
 
 /// Sample J-state predecessor (J loop vs E loop) from probability-space matrix.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_j_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
     let j = ox.xmx(i - 1, PXJ) * om.xf[P7O_J][P7O_LOOP];
     let e = ox.xmx(i, PXE) * om.xf[P7O_E][P7O_LOOP] * ox.row_scale[i];
@@ -208,7 +208,7 @@ fn select_j_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize)
 }
 
 /// Sample B-state predecessor (N move vs J move) from probability-space matrix.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_b_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize) -> State {
     let n = ox.xmx(i, PXN) * om.xf[P7O_N][P7O_MOVE];
     let j = ox.xmx(i, PXJ) * om.xf[P7O_J][P7O_MOVE];
@@ -222,7 +222,7 @@ fn select_b_pmx(rng: &mut MersenneTwister, om: &OProfile, ox: &ProbMx, i: usize)
 /// Sample E-state predecessor: pick a model node `k` and state `M`/`D` whose
 /// striped probability mass is proportional to the cell value. Writes chosen
 /// `k` into `ret_k`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn select_e_pmx(
     rng: &mut MersenneTwister,
     om: &OProfile,
@@ -258,7 +258,7 @@ fn select_e_pmx(
 
 /// Sample an index from a (non-normalized) probability vector. Probabilities
 /// are first normalized in-place (Kahan-summed); ties yield the first index.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn choose_probs(rng: &mut MersenneTwister, probs: &[f32]) -> usize {
     let mut normed = probs.to_vec();
     f_norm(&mut normed);
@@ -276,7 +276,7 @@ fn choose_probs(rng: &mut MersenneTwister, probs: &[f32]) -> usize {
 
 /// Normalize a slice to sum to 1.0 using Kahan summation; if the sum is zero,
 /// assigns a uniform distribution. Counterpart of Easel's `esl_vec_FNorm`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn f_norm(vec: &mut [f32]) {
     let mut sum = 0.0_f32;
     let mut c = 0.0_f32;

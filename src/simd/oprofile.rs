@@ -8,7 +8,7 @@
 )]
 
 use crate::profile::*;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::util::cmath::c_log_to_f32;
 use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32, ESL_CONST_LOG2};
 
@@ -103,12 +103,12 @@ fn trace_oprofile_tfv_source(m: usize, idx: usize, lanes: &[f32; 4]) {
 }
 
 /// 16-byte aligned wrapper around `[f32; 4]` for use with SSE `_mm_load_ps`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[repr(align(16))]
 #[derive(Debug, Clone, Copy)]
 pub struct AlignedF32x4(pub [f32; 4]);
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 impl AlignedF32x4 {
     /// Wrap a `[f32; 4]` into an aligned lane container.
     #[inline]
@@ -156,9 +156,9 @@ pub struct OProfile {
     pub rfv: Vec<Vec<[f32; 4]>>,
     /// Float-precision transition scores: tfv[j][4 floats]
     pub tfv: Vec<[f32; 4]>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub rfv_a: Vec<Vec<AlignedF32x4>>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub tfv_a: Vec<AlignedF32x4>,
     /// Special state float scores: `xf[state][transition]`
     pub xf: [[f32; P7O_NXTRANS]; P7O_NXSTATES],
@@ -228,10 +228,10 @@ fn unbiased_byteify(scale_b: f32, sc: f32) -> u8 {
 ///
 /// # Safety
 /// Requires SSE2 to be available at runtime.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
-    use std::arch::x86_64::*;
+    use crate::simd::sse::*;
 
     const CEPHES_P0: f32 = 1.987_569_150_0e-4;
     const CEPHES_P1: f32 = 1.398_199_950_7e-3;
@@ -295,14 +295,14 @@ unsafe fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
 }
 
 /// Scalar fallback for `esl_sse_expf4` on non-x86 builds.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn esl_sse_expf4(x: [f32; 4]) -> [f32; 4] {
     x.map(esl_sse_expf_lane)
 }
 
 /// Scalar fallback for one lane of Easel's `esl_sse_expf()`. Uses the same
 /// Cephes minimax polynomial as the SSE version for bitwise parity.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
 fn esl_sse_expf_lane(mut x: f32) -> f32 {
     const CEPHES_P0: f32 = 1.9875691500e-4;
@@ -569,11 +569,11 @@ fn fb_conversion(gm: &Profile) -> FbConversion {
                     f32::NEG_INFINITY
                 };
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
                 rfv[x][q] = unsafe { esl_sse_expf4(tmp) };
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 rfv[x][q] = esl_sse_expf4(tmp);
             }
@@ -605,11 +605,11 @@ fn fb_conversion(gm: &Profile) -> FbConversion {
             }
             #[cfg(feature = "tracehash")]
             trace_oprofile_tfv_source(m, j, &tmp);
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
                 tfv[j] = unsafe { esl_sse_expf4(tmp) };
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 tfv[j] = esl_sse_expf4(tmp);
             }
@@ -629,11 +629,11 @@ fn fb_conversion(gm: &Profile) -> FbConversion {
         }
         #[cfg(feature = "tracehash")]
         trace_oprofile_tfv_source(m, j, &tmp);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             tfv[j] = unsafe { esl_sse_expf4(tmp) };
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             tfv[j] = esl_sse_expf4(tmp);
         }
@@ -669,13 +669,13 @@ impl OProfile {
         let vf = vf_conversion(gm);
         let fb = fb_conversion(gm);
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let rfv_a: Vec<Vec<AlignedF32x4>> = fb
             .rfv
             .iter()
             .map(|rows| rows.iter().copied().map(AlignedF32x4::from_array).collect())
             .collect();
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let tfv_a: Vec<AlignedF32x4> = fb
             .tfv
             .iter()
@@ -701,9 +701,9 @@ impl OProfile {
             ncj_roundoff: 0.0,
             rfv: fb.rfv,
             tfv: fb.tfv,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             rfv_a,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             tfv_a,
             xf: fb.xf,
             m,
@@ -885,7 +885,7 @@ impl OProfile {
     /// Forward emissions from `get_fwd_emissions`. Reorders the loops over
     /// `(q, x, z)` to minimize working scratch. Used by nhmmer long_target
     /// per-envelope reparameterization.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn update_fwd_emission_scores(
         &mut self,
         bg: &crate::bg::Bg,

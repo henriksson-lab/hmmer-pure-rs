@@ -7,7 +7,10 @@
 //! makehmmerdb FM-index containers are loaded by reconstructing targets for the
 //! long-target path, with container FM records used to seed candidate windows
 //! when exact consensus seeds can be mapped back to sequence coordinates.
-#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_variables))]
+#![cfg_attr(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    allow(dead_code, unused_variables)
+)]
 
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1561,7 +1564,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     )?);
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                     let strand_msv_count = if target_db.fm_index_records.is_empty()
                         && !do_max
                         && sq.n > effective_block_length
@@ -1659,7 +1662,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                     )?;
                     let strand_msv_count =
                         strand_msv_counter.load(std::sync::atomic::Ordering::Relaxed);
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                     let strand_msv_count = if target_db.fm_index_records.is_empty()
                         && !do_max
                         && rc_sq.n > effective_block_length
@@ -9530,7 +9533,7 @@ mod tests {
     fn nhmmer_longtarget_dispatch_fails_loudly_without_sse2_acceleration() {
         let err = ensure_nhmmer_longtarget_accel_available_with(false).unwrap_err();
 
-        assert!(err.contains("x86_64/SSE2"));
+        assert!(err.contains("x86_64 (SSE2) or aarch64 (NEON)"));
     }
 }
 
@@ -9568,7 +9571,7 @@ pub(crate) fn search_sequence(
     // Always use longtarget path: C HMMER's nhmmer calls p7_Pipeline_LongTarget
     // for every sequence regardless of length.
     ensure_nhmmer_longtarget_accel_available()?;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         return Ok(p7_pipeline_longtarget(
             sq,
@@ -9599,7 +9602,7 @@ pub(crate) fn search_sequence(
     Err(nhmmer_longtarget_unsupported_message())
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn c_style_blocked_msv_residue_count(
     sq: &Sequence,
     hmm: &hmmer_pure_rs::hmm::Hmm,
@@ -9645,7 +9648,7 @@ fn c_style_blocked_msv_residue_count(
     total
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn msv_residue_count_for_longtarget_window(
     sq: &Sequence,
     hmm: &hmmer_pure_rs::hmm::Hmm,
@@ -9713,18 +9716,18 @@ fn msv_residue_count_for_longtarget_window(
 }
 
 fn nhmmer_longtarget_accel_available() -> bool {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        is_x86_feature_detected!("sse2")
+        crate::simd::sse::available()
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         false
     }
 }
 
 fn nhmmer_longtarget_unsupported_message() -> String {
-    "nhmmer/nhmmscan long-target heuristic filters require x86_64/SSE2; use an x86_64/SSE2 build"
+    "nhmmer/nhmmscan long-target heuristic filters require x86_64 (SSE2) or aarch64 (NEON); use such a build"
         .to_string()
 }
 
@@ -9805,7 +9808,7 @@ impl NhmmerThresholdConfig {
 /// domain. Maintains the residue counters (msv/bias/vit/fwd) and the
 /// inter-window `fwd_overlap` carry exactly like C. Returned coordinates are
 /// in the strand-local (input `sq`) frame; the caller flips them for crick.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[allow(clippy::too_many_arguments)]
 fn p7_pipeline_longtarget(
     sq: &Sequence,
@@ -9890,9 +9893,9 @@ fn p7_pipeline_longtarget(
     } else {
         hmm.m * 4
     };
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths_from_om(om);
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let (prefix_lens, suffix_lens) = ssv_longtarget::compute_prefix_suffix_lengths(hmm);
     {
         ssv_longtarget::p7_pli_extend_and_merge_windows(

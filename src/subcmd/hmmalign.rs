@@ -15,14 +15,14 @@ use hmmer_pure_rs::msa;
 use hmmer_pure_rs::profile::{self, Profile, P7_UNILOCAL};
 use hmmer_pure_rs::sequence::{self, Sequence, SequenceFormat};
 use hmmer_pure_rs::trace::State;
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 use hmmer_pure_rs::{
     dp::generic_backward::g_backward,
     dp::generic_decoding::g_decoding,
     dp::generic_fwdback::g_forward,
     dp::generic_optacc::{g_oa_trace, g_optimal_accuracy},
 };
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hmmer_pure_rs::{
     simd::oprofile::{OProfile, P7O_C, P7O_J, P7O_LOOP, P7O_N},
     simd::probmx::{p_decoding_to_gmx, ProbMx},
@@ -523,17 +523,17 @@ fn align_traces(
     bg: &Bg,
     sequences: &[Sequence],
 ) -> Vec<AlignedTrace> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         return align_traces_optimized(hmm, abc, bg, sequences);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         return align_traces_generic(hmm, abc, bg, sequences);
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn align_traces_optimized(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,
@@ -581,7 +581,7 @@ fn align_traces_optimized(
     out
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn align_traces_generic(
     hmm: &hmmer_pure_rs::hmm::Hmm,
     abc: &Alphabet,

@@ -3,8 +3,8 @@
 //! backward_engine() in impl_sse/fwdback.c.
 #![allow(clippy::needless_borrow, clippy::too_many_arguments)]
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::sse::*;
 
 use crate::alphabet::Dsq;
 use crate::simd::oprofile::*;
@@ -15,7 +15,10 @@ use crate::util::cmath::c_log_f64;
 /// Iterates lanes [`q_start`, `q_end`) of the striped row, accumulating the per-lane
 /// values for the chosen state, then dispatches to the correct tracehash label.
 /// Used only under `feature = "tracehash"` to compare against the C reference.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_engine_sum_q1e5(
     name: &'static str,
     dsq: &[Dsq],
@@ -114,7 +117,10 @@ fn trace_engine_sum_q1e5(
 ///
 /// Unpacks the SSE row into scalar lanes, then calls [`trace_engine_sum_q1e5`] three
 /// times (once per state) with row-specific tracehash labels (`rowl`, `rowlmN`, `rowN`).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_engine_row_final_q1e5(
     row_label: &'static str,
     dsq: &[Dsq],
@@ -216,7 +222,10 @@ unsafe fn trace_engine_row_final_q1e5(
 ///
 /// Emits the standard M/D/I sums plus stripe-window sums (`q0_8`, `q8_16`, `q16_32`,
 /// `q32_end`) so tracehash regressions can localize divergences along the profile.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_engine_row1_q1e5(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -244,7 +253,10 @@ unsafe fn trace_engine_row1_q1e5(
 ///
 /// Phases `phase1`/`phase3`/`phase4`/`phase5` correspond to the M/I-init, E->M+DD,
 /// post-DD, and M->D stages inside the Backward inner loop.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn trace_engine_row1_checkpoint_q1e5(
     label: &'static str,
     dsq: &[Dsq],
@@ -300,8 +312,8 @@ unsafe fn trace_engine_row1_checkpoint_q1e5(
 ///
 /// # Safety
 /// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn backward_parser_pmx(
     dsq: &[Dsq],
     l: usize,
@@ -321,8 +333,8 @@ pub unsafe fn backward_parser_pmx(
 ///
 /// # Safety
 /// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn backward_parser_pmx_offset(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -362,8 +374,8 @@ pub unsafe fn backward_parser_pmx_offset(
 ///
 /// # Safety
 /// Requires SSE2 support.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn backward_parser_pmx_offset_with_scratch(
     dsq: &[Dsq],
     dsq_offset: usize,
@@ -781,8 +793,8 @@ pub unsafe fn backward_parser_pmx_offset_with_scratch(
 /// # Safety
 /// Requires SSE2 support; `pmx` must have its striped DP storage allocated and
 /// `dsq_offset+l` must be in bounds.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub(crate) unsafe fn backward_parser_pmx_offset_direct(
     dsq: &[Dsq],
     dsq_offset: usize,

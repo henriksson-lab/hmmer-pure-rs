@@ -1,7 +1,7 @@
 //! Domain definition using posterior probabilities.
 //! Port of p7_domaindef.c p7_domaindef_ByPosteriorHeuristics().
 #![cfg_attr(
-    not(target_arch = "x86_64"),
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
     allow(dead_code, unused_imports, unused_mut, unused_variables)
 )]
 
@@ -30,7 +30,7 @@ const NSAMPLES: usize = 200; // stochastic tracebacks for clustering
 
 /// True if every residue in `dsq[dsq_offset+1 ..= dsq_offset+l]` is a canonical
 /// alphabet code (`< abc_k`), enabling the fast no-degeneracy SIMD paths.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline(always)]
 fn is_canonical_window(dsq: &[Dsq], dsq_offset: usize, l: usize, abc_k: usize) -> bool {
     let Some(end) = dsq_offset.checked_add(l) else {
@@ -84,11 +84,11 @@ pub struct DomainDefinitionStats {
     pub nenvelopes: usize,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) struct DomainSimdScratch {
-    fwd_dp: Vec<std::arch::x86_64::__m128>,
-    bck_prev: Vec<std::arch::x86_64::__m128>,
-    bck_cur: Vec<std::arch::x86_64::__m128>,
+    fwd_dp: Vec<crate::simd::sse::__m128>,
+    bck_prev: Vec<crate::simd::sse::__m128>,
+    bck_cur: Vec<crate::simd::sse::__m128>,
     fwd_pmx: crate::simd::probmx::ProbMx,
     bck_pmx: crate::simd::probmx::ProbMx,
     pp_pmx: crate::simd::probmx::ProbMx,
@@ -105,7 +105,7 @@ pub(crate) struct DomainSimdScratch {
     mocc: Vec<f32>,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 impl DomainSimdScratch {
     /// Allocate an empty SIMD scratch bundle (matrices/buffers grow on first use).
     /// Reused across sequences to amortize allocations.
@@ -132,7 +132,7 @@ impl DomainSimdScratch {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub(crate) struct DomainSimdScratch {
     fwd_gmx: Gmx,
     bck_gmx: Gmx,
@@ -142,7 +142,7 @@ pub(crate) struct DomainSimdScratch {
     oa_gmx: Gmx,
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl DomainSimdScratch {
     /// Allocate a minimal scratch bundle for the non-x86 (generic) path.
     pub(crate) fn new() -> Self {
@@ -285,7 +285,7 @@ fn trace_domain_envelope_candidate(
 /// length-`om.abc_k` odds vector f'(x)/f(x) used to bias-correct the domain
 /// envelope. The model configuration is irrelevant; only emission odds are
 /// used. Returns an all-ones vector if the segment emits no residues.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn null2_by_trace_optimized(
     om: &crate::simd::oprofile::OProfile,
     tr: &Trace,
@@ -406,7 +406,10 @@ fn trace_domain_decoding_summary(
 }
 
 /// tracehash: emit a row-sampled summary of the multihit Forward matrix for one region.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_region_forward_summary(
     dsq: &[Dsq],
     seq_len: usize,
@@ -460,7 +463,10 @@ fn trace_region_forward_summary(
 }
 
 /// tracehash: dump per-row specials (E/N/J/B/C) and row scales from a Forward ProbMx.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_specials_summary(
     dsq: &[Dsq],
     l: usize,
@@ -483,7 +489,10 @@ fn trace_pmx_forward_specials_summary(
 }
 
 /// tracehash: dump unscaled per-row specials from a Forward ProbMx (no row scales).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_states_summary(
     dsq: &[Dsq],
     l: usize,
@@ -506,7 +515,10 @@ fn trace_pmx_forward_states_summary(
 
 /// tracehash: dump the per-row scale factors from a Forward ProbMx, with extra
 /// bit-level detail at known divergence-prone lengths.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_scales_summary(
     dsq: &[Dsq],
     l: usize,
@@ -536,7 +548,10 @@ fn trace_pmx_forward_scales_summary(
 }
 
 /// tracehash: per-row forward specials quantized to 1e-5 for fuzzy parity checks.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_states_q1e5_summary(
     dsq: &[Dsq],
     l: usize,
@@ -558,7 +573,10 @@ fn trace_pmx_forward_states_q1e5_summary(
 }
 
 /// tracehash: emit quantized forward specials at one anchor row, tagged by name.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_anchor_q1e5(
     name: &'static str,
     dsq: &[Dsq],
@@ -601,7 +619,10 @@ fn trace_pmx_forward_anchor_q1e5(
 /// tracehash: emit quantized forward specials at one anchor row during
 /// per-envelope rescoring (carries envelope context to disambiguate from
 /// the whole-sequence forward dumps).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_score_domain_forward_anchor_q1e5(
     name: &'static str,
     seq_len: usize,
@@ -653,7 +674,10 @@ fn trace_score_domain_forward_anchor_q1e5(
 /// traces. Covers fixed anchor rows (0,1,2,4,8..64), per-row part dumps
 /// (E/N/J/B/C/scale at rows 14..17), per-lane row-17 lane sums, and a
 /// detailed recurrence trace at (row=15, k=15) for divergence triangulation.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_score_domain_forward_anchors_q1e5(
     seq_len: usize,
     model_len: usize,
@@ -914,9 +938,9 @@ fn trace_score_domain_forward_anchors_q1e5(
         th.finish();
 
         if row == 17 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let (xev, h1, h2) = unsafe {
-                use std::arch::x86_64::*;
+                use crate::simd::sse::*;
 
                 let mut xev_v = _mm_setzero_ps();
                 for q in 0..pmx.q_count() {
@@ -1295,7 +1319,10 @@ fn trace_score_domain_forward_anchors_q1e5(
 
 /// tracehash: emit each forward special (E/N/J/B/C) and scale separately for
 /// rows 17 and 19, producing one keyed record per component for finer diffs.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_row_parts_q1e5(
     row: usize,
     dsq: &[Dsq],
@@ -1360,14 +1387,20 @@ fn trace_pmx_forward_row_parts_q1e5(
 
 /// tracehash helper: index of the first row whose scale factor exceeds 1.0
 /// (i.e. the first row that was renormalized during forward).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn first_forward_scale_row(l: usize, pmx: &crate::simd::probmx::ProbMx) -> Option<usize> {
     (0..=l).find(|&pos| pmx.row_scale[pos] > 1.0)
 }
 
 /// tracehash: summary statistics over the forward scaling events
 /// (count, first row, last row, summed log-scale).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_forward_scale_events_summary(
     dsq: &[Dsq],
     l: usize,
@@ -1400,7 +1433,10 @@ fn trace_pmx_forward_scale_events_summary(
 }
 
 /// tracehash: dump per-row specials and row scales from a Backward ProbMx.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_specials_summary(
     dsq: &[Dsq],
     l: usize,
@@ -1423,7 +1459,10 @@ fn trace_pmx_backward_specials_summary(
 }
 
 /// tracehash: dump unscaled per-row backward specials (no row scales).
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_states_summary(
     dsq: &[Dsq],
     l: usize,
@@ -1445,7 +1484,10 @@ fn trace_pmx_backward_states_summary(
 }
 
 /// tracehash: dump the per-row scale factors from a Backward ProbMx.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_scales_summary(
     dsq: &[Dsq],
     l: usize,
@@ -1463,7 +1505,10 @@ fn trace_pmx_backward_scales_summary(
 }
 
 /// tracehash: per-row backward specials quantized to 1e-5 for fuzzy parity checks.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_states_q1e5_summary(
     dsq: &[Dsq],
     l: usize,
@@ -1485,7 +1530,10 @@ fn trace_pmx_backward_states_q1e5_summary(
 }
 
 /// tracehash: emit quantized backward specials at one anchor row, tagged by name.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_anchor_q1e5(
     name: &'static str,
     dsq: &[Dsq],
@@ -1521,7 +1569,10 @@ fn trace_pmx_backward_anchor_q1e5(
 
 /// tracehash: emit each backward special (E/N/J/B/C) and scale separately
 /// for rows 0 and 1, producing one keyed record per component.
-#[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "tracehash",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn trace_pmx_backward_row_parts_q1e5(
     row: usize,
     dsq: &[Dsq],
@@ -1769,22 +1820,22 @@ fn score_domain_envelope(
     let mut simd_null2_scratch: Option<&[f32]> = None;
     let mut env_pp_storage: Option<Gmx>;
     let mut env_pp_ptr: *mut Gmx = std::ptr::null_mut();
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut simd_oa_coords: Option<(usize, usize, usize, usize)> = None;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut simd_oa_trace: Option<crate::trace::Trace> = None;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut simd_oasc: Option<f32> = None;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut pre_trim_local_bg_f: Option<Vec<f32>> = None;
     if make_alignment {
         simd_scratch.pp_gmx.grow_to_zeroed(gm.m, env_len);
         env_pp_ptr = &mut simd_scratch.pp_gmx;
     }
 
-    #[cfg(target_arch = "x86_64")]
-    let use_simd = is_x86_feature_detected!("sse2");
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let use_simd = crate::simd::sse::available();
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let use_simd = false;
     let dsq_offset = ienv - 1;
     let mut sub_dsq = Vec::new();
@@ -1795,7 +1846,7 @@ fn score_domain_envelope(
     }
 
     if use_simd {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             use crate::simd::oprofile::OProfile;
             let env_om_storage;
@@ -1860,7 +1911,10 @@ fn score_domain_envelope(
                             )
                         }
                     };
-                    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+                    #[cfg(all(
+                        feature = "tracehash",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
                     trace_score_domain_forward_anchors_q1e5(
                         seq_len,
                         gm.m,
@@ -1985,7 +2039,10 @@ fn score_domain_envelope(
                             &mut scratch.fwd_dp,
                         )
                     };
-                    #[cfg(all(feature = "tracehash", target_arch = "x86_64"))]
+                    #[cfg(all(
+                        feature = "tracehash",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
                     trace_score_domain_forward_anchors_q1e5(
                         seq_len,
                         gm.m,
@@ -2000,15 +2057,15 @@ fn score_domain_envelope(
                 }
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         unreachable!();
     } else {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let mut gx = Gmx::new(gm.m, env_len);
             env_fwd_sc = g_forward(&sub_dsq, env_len, env_gm, &mut gx);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             simd_scratch.env_fwd_gmx.grow_to(gm.m, env_len);
             env_fwd_sc = g_forward(&sub_dsq, env_len, env_gm, &mut simd_scratch.env_fwd_gmx);
@@ -2025,7 +2082,7 @@ fn score_domain_envelope(
         || make_alignment_display
         || simd_null2_scratch.is_none() && !null2_is_done;
     if !env_pp_ptr.is_null() && unsafe { (*env_pp_ptr).l == 0 } && needs_generic_pp {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let mut gx_fwd = Gmx::new(gm.m, env_len);
             g_forward(&sub_dsq, env_len, env_gm, &mut gx_fwd);
@@ -2033,7 +2090,7 @@ fn score_domain_envelope(
             g_backward(&sub_dsq, env_len, env_gm, &mut gx_bck);
             g_decoding(env_gm, &gx_fwd, &gx_bck, unsafe { &mut *env_pp_ptr });
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             simd_scratch.env_fwd_gmx.grow_to(gm.m, env_len);
             g_forward(&sub_dsq, env_len, env_gm, &mut simd_scratch.env_fwd_gmx);
@@ -2079,7 +2136,7 @@ fn score_domain_envelope(
         let env_emission_odds =
             |k: usize, x: usize| env_om.and_then(|om| om.fwd_emission_odds(k, x));
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             if let Some(tr) = simd_oa_trace.take() {
                 // When make_alignment_display=true: use SIMD trace with env_pp for
@@ -2219,7 +2276,7 @@ fn score_domain_envelope(
     // Then run Forward with the DEFAULT (non-reparameterized) profile to get
     // domcorrection, used for bias. Final envsc = min(reparam, default);
     // domcorrection (nats) = default - envsc.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let (env_fwd_sc, dom_correction, env_len, ienv, jenv, dsq_offset, trim_rebuilt_ad) =
         if do_longtarget_length {
             if let Some(base_om) = env_om {
@@ -2474,7 +2531,7 @@ fn score_domain_envelope(
             )
         };
     // If trim rebuilt the ad, replace ad/iali/jali/oasc with post-trim values.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let (ad, iali, jali, oasc) = if let Some((new_ad, new_oasc)) = trim_rebuilt_ad {
         // new_ad.sqfrom/sqto are 1-based in the trim sub_dsq. Convert to
         // absolute coords via the (post-trim) dsq_offset.
@@ -2497,7 +2554,7 @@ fn score_domain_envelope(
     } else {
         (ad, iali, jali, oasc)
     };
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let (env_fwd_sc, dom_correction) = (env_fwd_sc, dom_correction);
 
     // Omega-weighted null2 bias.
@@ -2682,27 +2739,28 @@ pub(crate) fn define_domains(
     bg: &Bg,
     null_sc: f32,
     seed: u32,
-    #[cfg(target_arch = "x86_64")] simd_scratch: &mut DomainSimdScratch,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    simd_scratch: &mut DomainSimdScratch,
     make_alignment: bool,
     make_alignment_display: bool,
     long_target: bool,
     do_null2: bool,
 ) -> (Vec<Domain>, f32, f32, f32, DomainDefinitionStats) {
     crate::logsum::p7_flogsuminit();
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let mut simd_scratch_storage = DomainSimdScratch::new();
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let simd_scratch = &mut simd_scratch_storage;
 
     // Phase 1: Domain decoding (btot/etot/mocc) — SIMD when available
     let (mut btot, mut etot, mut mocc);
 
-    #[cfg(target_arch = "x86_64")]
-    let use_simd = is_x86_feature_detected!("sse2");
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let use_simd = crate::simd::sse::available();
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let use_simd = false;
     if use_simd {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             use crate::simd::oprofile::*;
             use crate::simd::probmx::p_domain_decoding_reuse;
@@ -2859,10 +2917,10 @@ pub(crate) fn define_domains(
                 &mut mocc,
             );
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         unreachable!();
     } else {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let mut gx_fwd = Gmx::new(gm.m, l);
             g_forward(dsq, l, gm, &mut gx_fwd);
@@ -2873,7 +2931,7 @@ pub(crate) fn define_domains(
             etot = r.1;
             mocc = r.2;
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             simd_scratch.fwd_gmx.grow_to(gm.m, l);
             g_forward(dsq, l, gm, &mut simd_scratch.fwd_gmx);
@@ -2897,7 +2955,7 @@ pub(crate) fn define_domains(
         .iter()
         .map(|&(ri, rj)| is_multidomain_region(&btot, &etot, ri, rj))
         .collect();
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     if use_simd {
         simd_scratch.btot = btot;
         simd_scratch.etot = etot;
@@ -2912,11 +2970,11 @@ pub(crate) fn define_domains(
     let mut env_gm = gm.clone();
     reconfig_unihit(&mut env_gm, l as i32);
     let optacc_deltas = OptAccTDelta::from_profile(&env_gm);
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let simd_match_odds: Option<Vec<f32>> = None;
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let simd_match_odds: Option<Vec<f32>> = None;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let env_om = if use_simd {
         if let Some(om) = om {
             let mut env_om = om.clone();
@@ -2928,7 +2986,7 @@ pub(crate) fn define_domains(
     } else {
         None
     };
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let env_om: Option<crate::simd::oprofile::OProfile> = None;
 
     if regions.is_empty() {
@@ -2958,7 +3016,7 @@ pub(crate) fn define_domains(
             let mut sub_dsq_storage: Option<Vec<Dsq>> = None;
             let mut region_fwd_storage: Option<Gmx> = None;
 
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let region_trace_pmx = if use_simd {
                 if let Some(om) = om {
                     let mut region_om = om.clone();
@@ -2986,16 +3044,16 @@ pub(crate) fn define_domains(
 
             let mut rng = MersenneTwister::new(seed);
             let mut segments = Vec::new();
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let mut trace_pmx_scratch = Trace::new();
             for value in n2sc.iter_mut().take(rj + 1).skip(ri) {
                 *value = 0.0;
             }
 
             for trace_idx in 0..NSAMPLES {
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 let tr_storage;
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 let tr = if let Some((ref region_om, ref region_pmx)) = region_trace_pmx {
                     crate::dp::generic_stotrace::stochastic_trace_pmx_into(
                         &mut rng,
@@ -3028,9 +3086,9 @@ pub(crate) fn define_domains(
                     );
                     &tr_storage
                 };
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                 let tr_storage;
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                 let tr = {
                     if sub_dsq_storage.is_none() {
                         let mut sub_dsq = Vec::with_capacity(region_len + 2);
@@ -3105,13 +3163,13 @@ pub(crate) fn define_domains(
                     );
                     #[cfg(not(feature = "tracehash"))]
                     let _ = domain_idx;
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                     let null2 = if let Some((ref region_om, _)) = region_trace_pmx {
                         null2_by_trace_optimized(region_om, tr, tfrom, tto)
                     } else {
                         generic_null2::null2_by_trace(&region_gm, tr, tfrom, tto)
                     };
-                    #[cfg(not(target_arch = "x86_64"))]
+                    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                     let null2 = generic_null2::null2_by_trace(&region_gm, tr, tfrom, tto);
                     while pos <= sqfrom && pos <= region_len {
                         n2sc[ri + pos - 1] += 1.0;

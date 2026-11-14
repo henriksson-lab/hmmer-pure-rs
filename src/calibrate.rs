@@ -61,23 +61,16 @@ fn viterbi_overflow_maxsc(base_w: i16, scale_w: f32) -> f32 {
 }
 
 /// Score a simulated sequence with the optimized (quantized) MSV filter, mirroring
-/// C's `p7_MSVMu`, which always calls `p7_MSVFilter`. Dispatches to the SSE2 filter
-/// on x86_64 and the NEON filter on aarch64 (both baseline-available); `maxsc` is the
+/// C's `p7_MSVMu`, which always calls `p7_MSVFilter`. Uses the SSE2 filter, which
+/// runs over NEON on aarch64 (`simd::sse`); `maxsc` is the
 /// quantized overflow cap `(255 - base_b)/scale_b`. There is intentionally no generic
 /// DP fallback, so the byte-quantized scores match C on every supported target.
 fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         match unsafe { crate::simd::msv_filter::p7_msv_filter(dsq, l, om) } {
             crate::simd::msv_filter::MsvResult::Ok(s) => s,
             crate::simd::msv_filter::MsvResult::Overflow => maxsc,
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        match unsafe { crate::simd::neon_msv::neon_msv_filter(dsq, l, om) } {
-            crate::simd::neon_msv::NeonMsvResult::Ok(s) => s,
-            crate::simd::neon_msv::NeonMsvResult::Overflow => maxsc,
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -93,18 +86,11 @@ fn msv_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
 /// C's `p7_ViterbiMu`, which always calls `p7_ViterbiFilter`. `maxsc` is the quantized
 /// overflow cap `(32767 - base_w)/scale_w`.
 fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         match unsafe { crate::simd::vit_filter::p7_viterbi_filter(dsq, l, om) } {
             crate::simd::vit_filter::VitResult::Ok(s) => s,
             crate::simd::vit_filter::VitResult::Overflow => maxsc,
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        match unsafe { crate::simd::neon_vit::neon_viterbi_filter(dsq, l, om) } {
-            crate::simd::neon_vit::NeonVitResult::Ok(s) => s,
-            crate::simd::neon_vit::NeonVitResult::Overflow => maxsc,
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -119,13 +105,9 @@ fn viterbi_filter_score(dsq: &[Dsq], l: usize, om: &OProfile, maxsc: f32) -> f32
 /// Score a simulated sequence with the optimized Forward parser, mirroring C's
 /// `p7_Tau`, which always calls `p7_ForwardParser`.
 fn forward_filter_score(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         unsafe { crate::simd::fwd_filter::forward_parser(dsq, l, om) }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe { crate::simd::neon_fwd::neon_forward_parser(dsq, l, om) }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
