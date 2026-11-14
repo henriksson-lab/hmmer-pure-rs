@@ -1,9 +1,10 @@
-# hmmer-pure-rs 0.8.0
+# hmmer-pure-rs 0.8.1
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
 Original-code snapshot used for translation/parity work and benchmark baselines: vendored upstream HMMER from `https://github.com/EddyRivasLab/hmmer.git`, commit `9acd8b6758a0` (`infernal-1.1.5-dirty`).
 
+* 2026-11-14: Apple SIMD optimizations (thanks Sean!)
 * 2026-08-01: Fixed a stray use of libc log(). inclusion error. Added CI tests. Updated benchmarks
 * 2026-06-01: Stable state, speed on parity or better. **if you find cases where ouput deviates from original, please post an issue**
 * 2026-05-29: Further regressions fixed. Expecting more to land
