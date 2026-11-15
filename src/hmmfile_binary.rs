@@ -22,6 +22,10 @@ const MAX_BINARY_HMM_STRING_LEN: usize = 1 << 20;
 
 /// Return true if `magic` is one of the supported native-endian HMMER3 binary
 /// HMM magic numbers.
+///
+/// `magic` is the integer decoded from the first four bytes using
+/// `u32::from_ne_bytes`. This checks a signature only, not record validity,
+/// and does not recognize opposite-endian files.
 pub fn is_binary_hmm_magic(magic: u32) -> bool {
     matches!(
         magic,
@@ -30,6 +34,10 @@ pub fn is_binary_hmm_magic(magic: u32) -> bool {
 }
 
 /// Return true if a path starts with a supported HMMER3 binary HMM magic.
+///
+/// Reads only the first four bytes. Short files and unrecognized signatures
+/// return `Ok(false)`; opening/reading errors propagate. A positive result
+/// does not validate the remaining record. Compressed files are not decoded.
 pub fn looks_like_binary_hmm_file(path: &Path) -> HmmerResult<bool> {
     let mut file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut magic_buf = [0u8; 4];
@@ -111,6 +119,12 @@ fn read_string_optional<R: Read>(r: &mut R) -> HmmerResult<Option<String>> {
 /// maxlen (3/c+), ctime, map (if `P7H_MAP`), checksum, E-value parameters
 /// (full array in 3/b+, the legacy three scalars in 3/a), Pfam cutoffs, and
 /// optional COMPO composition vector. Returns `Ok(None)` on clean EOF.
+///
+/// Consumes exactly one native-endian binary record, so repeated calls may
+/// read a concatenated database. The caller is responsible for alphabet
+/// consistency across calls. Unsupported magic, malformed fields, truncated
+/// records, and I/O failures return errors. This reads core HMM records,
+/// not the `.h3f` or `.h3p` optimized-profile companion formats.
 pub fn read_binary_hmm<R: Read>(r: &mut R) -> HmmerResult<Option<Hmm>> {
     // Read magic number
     let mut magic_buf = [0u8; 4];
@@ -288,6 +302,11 @@ fn read_annotation<R: Read>(r: &mut R, m: usize) -> HmmerResult<Vec<u8>> {
 }
 
 /// Open a `.h3m` binary HMM database and read every contained HMM.
+///
+/// Accepts native-endian HMMER3 binary formats 3/a through 3/f, independent
+/// of the filename extension. Returns records in file order and an empty
+/// vector for empty input. Mixed alphabets, malformed records, and I/O
+/// failures return errors. Does not decompress gzip input.
 pub fn read_binary_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -325,11 +344,23 @@ pub fn read_binary_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
 /// arrays, comlog, nseq/eff_nseq, max_length, ctime, optional map, checksum,
 /// E-value parameter array, Pfam cutoffs, and optional COMPO. Output is
 /// byte-compatible with C `hmmpress`/`hmmconvert -b`.
+///
+/// Writes core HMM data in the host's native byte order; opposite-endian
+/// reading is not supported. `hmm` must have probability tables and optional
+/// annotations consistent with its dimensions and flags. I/O failures and
+/// unrepresentable dimensions return errors and can leave partial output.
+/// The writer is not flushed. Older formats omit fields they cannot represent.
 pub fn write_binary_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     write_binary_hmm_with_format(w, hmm, HmmAsciiFormat::Hmmer3f)
 }
 
 /// Write a single HMM in the selected HMMER3 binary format (3/a..3/f).
+///
+/// Writes core HMM data in the host's native byte order; opposite-endian
+/// reading is not supported. `hmm` must have probability tables and optional
+/// annotations consistent with its dimensions and flags. I/O failures and
+/// unrepresentable dimensions return errors and can leave partial output.
+/// The writer is not flushed. Older formats omit fields they cannot represent.
 pub fn write_binary_hmm_with_format<W: std::io::Write>(
     w: &mut W,
     hmm: &Hmm,

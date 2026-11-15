@@ -33,6 +33,11 @@ pub struct OProfileAvx2Vit {
 impl OProfileAvx2Vit {
     /// Build an AVX2 Viterbi profile by restriping the SSE2 `OProfile` word-score and
     /// transition tables into 16-way striped vectors.
+    ///
+    /// `om` must be a fully converted optimized profile. Length-dependent
+    /// transition values are copied at conversion time; rebuild this AVX2
+    /// representation if the source profile configuration changes. This
+    /// conversion itself does not require AVX2 CPU support.
     pub fn from_oprofile(om: &OProfile) -> Self {
         let m = om.m;
         let nq = nqw_avx2(m);
@@ -132,6 +137,15 @@ pub enum Avx2VitResult {
 /// reduced-precision signed-word arithmetic).
 ///
 /// Striped SIMD Viterbi after Farrar (2007), in 16-bit signed-word precision.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn avx2_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2Vit) -> Avx2VitResult {

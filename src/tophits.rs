@@ -14,6 +14,11 @@ use crate::util::cmath::c_exp_f64;
 /// alignment into blocks of `aliwidth = linewidth - namewidth - 2*coordwidth -
 /// 5` (bounded below by `min_aliwidth=40`). When `linewidth==0` the whole
 /// alignment is printed in one block.
+/// `out` receives text, `hmm_name` and `seq_name` label the two rows,
+/// `cs_line` optionally supplies structure annotation, and `linewidth`
+/// is the desired total character width (the minimum alignment block may
+/// make output wider). Display rows and optional annotations must align.
+/// Panics if writing to `out` fails.
 pub fn print_alidisplay_blocks(
     out: &mut dyn std::io::Write,
     hmm_name: &str,
@@ -33,6 +38,8 @@ pub fn print_alidisplay_blocks(
 /// p7_alidisplay.c:1162,1176-1180): when `show_accessions` is set and the
 /// corresponding accession is non-empty, the accession is shown in place of
 /// the name and `namewidth` is derived from the chosen strings.
+/// All other arguments follow [`print_alidisplay_blocks`]. Empty accession
+/// strings fall back to the corresponding names. Panics on output errors.
 #[allow(clippy::too_many_arguments)]
 pub fn print_alidisplay_blocks_acc(
     out: &mut dyn std::io::Write,
@@ -475,6 +482,13 @@ impl TopHits {
 
     /// Apply reporting and inclusion thresholds.
     /// Uses E-value thresholds: inc_e for inclusion, report_e for reporting.
+    /// `pli` supplies target/domain reporting and inclusion criteria, in bits
+    /// or E-values according to its flags. `z` is the target search-space
+    /// multiplier and `domz` is the domain search-space multiplier used to
+    /// convert stored P-values to E-values; both are counts, not log values.
+    /// Updates per-hit and per-domain flags and reported/included counts in
+    /// place. Model-specific cutoff mode preserves flags assigned by the
+    /// pipeline and recounts them.
     pub fn threshold(&mut self, pli: &super::pipeline::Pipeline, z: f64, domz: f64) {
         self.nreported = 0;
         self.nincluded = 0;
@@ -675,6 +689,11 @@ fn normalized_domain_span(dom: Option<&Domain>) -> (i64, i64, i32) {
 /// (hmmsearch, phmmer, jackhmmer); when clear (`p7_DEFAULT`, as nhmmer.c:1174
 /// passes), match columns with no residues are dropped (tracealign.c:212-213).
 /// Returns `None` if no included domains and no `extra` were supplied.
+/// `model_len` is the number of match states, not the desired text width.
+/// `abc` must match every included sequence, and an `extra` trace must use
+/// that same model's 1-based node coordinates. `msa_name` names the returned
+/// alignment. Apply inclusion thresholds before calling this function;
+/// only included hits with included domains contribute rows.
 pub fn included_alignment(
     th: &TopHits,
     abc: &Alphabet,

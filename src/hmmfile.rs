@@ -68,6 +68,10 @@ impl<B: BufRead> CappedLineReader<B> {
 ///
 /// Wrapper over [`read_hmms`] that opens `path` first. Returns all HMMs
 /// in the file as a `Vec`; errors propagate I/O and format failures.
+///
+/// Reads HMMER3 ASCII input; use [`read_hmm_file_auto`] for binary detection.
+/// Paths ending in `.gz` are decompressed. Returns an empty vector for empty
+/// input. Records must share an alphabet and ASCII format version.
 pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
     let reader = BufReader::new(open_hmm_reader(path)?);
     read_hmms(reader)
@@ -75,6 +79,11 @@ pub fn read_hmm_file(path: &Path) -> HmmerResult<Vec<Hmm>> {
 
 /// Open an HMM save file and read every HMM, auto-dispatching ASCII vs binary
 /// from the leading magic bytes instead of relying on the filename.
+///
+/// Accepts HMMER3 ASCII and native-endian binary formats 3/a through 3/f.
+/// A `.gz` suffix selects compressed ASCII input. Returns all records in
+/// file order and propagates I/O, malformed-record, and alphabet-mismatch
+/// errors; ASCII records must also share a format version.
 pub fn read_hmm_file_auto(path: &Path) -> HmmerResult<Vec<Hmm>> {
     if path.extension().is_some_and(|ext| ext == "gz") {
         return read_hmm_file(path);
@@ -89,6 +98,10 @@ pub fn read_hmm_file_auto(path: &Path) -> HmmerResult<Vec<Hmm>> {
 /// Open an HMM save file and read records without enforcing a single ASCII
 /// HMMER3 format tag across the whole file. This is only for legacy utility
 /// paths that operate record-by-record rather than validating a database.
+///
+/// Allows different ASCII versions 3/a through 3/f in one file, but still
+/// rejects mixed alphabets. Detects uncompressed binary input and supports
+/// `.gz` ASCII input. Returns records in order; I/O and parse errors propagate.
 pub fn read_hmm_file_auto_allow_mixed_formats(path: &Path) -> HmmerResult<Vec<Hmm>> {
     if path.extension().is_some_and(|ext| ext == "gz") {
         return read_hmms_allow_mixed_formats(BufReader::new(open_hmm_reader(path)?));
@@ -101,6 +114,11 @@ pub fn read_hmm_file_auto_allow_mixed_formats(path: &Path) -> HmmerResult<Vec<Hm
 }
 
 /// Open an HMM save file and read only the first HMM record.
+///
+/// Accepts uncompressed ASCII/binary files and `.gz` ASCII input. Empty
+/// input returns a format error. ASCII parsing stops after the first record;
+/// the binary path currently reads and validates the whole database before
+/// returning its first record, so later binary-record errors also propagate.
 pub fn read_first_hmm_file_auto(path: &Path) -> HmmerResult<Hmm> {
     if path.extension().is_some_and(|ext| ext == "gz") {
         return read_first_hmm(BufReader::new(open_hmm_reader(path)?));
@@ -115,6 +133,11 @@ pub fn read_first_hmm_file_auto(path: &Path) -> HmmerResult<Hmm> {
 }
 
 /// Seek to a record offset from an SSI index and read exactly one HMM record.
+///
+/// `offset` is a zero-based byte offset to the record's header/magic in an
+/// uncompressed ASCII or native-endian binary file. It is not a record
+/// number. Invalid offsets, incomplete records, and read/seek failures
+/// return errors; gzip input is not supported by this seeking operation.
 pub fn read_hmm_file_record_at(path: &Path, offset: u64) -> HmmerResult<Hmm> {
     let mut file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     file.seek(SeekFrom::Start(offset)).map_err(HmmerError::Io)?;
@@ -164,6 +187,11 @@ pub fn read_hmm_file_record_at(path: &Path, offset: u64) -> HmmerResult<Hmm> {
 /// parsed `Hmm` into a vector. The C entry point reads one HMM at a time via
 /// a parser dispatch (`read_asc30hmm` / `read_bin30hmm`); here we expose the
 /// "read everything" idiom and a single ASCII parser.
+///
+/// Accepts ASCII HMMER3 formats 3/a through 3/f. All records must use the
+/// same alphabet and format version. Returns records in order, or an empty
+/// vector at clean EOF; malformed/truncated records and I/O errors fail the
+/// whole read. Use [`read_hmms_auto`] for binary input.
 pub fn read_hmms<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
     let mut lines = CappedLineReader::new(reader);
@@ -289,6 +317,11 @@ fn check_shared_alphabet(
     }
 }
 
+/// Read every ASCII HMMER3 record, allowing different 3/a–3/f versions.
+///
+/// All records must still use the same alphabet. Returns records in input
+/// order, including an empty vector at clean EOF. I/O, malformed-record,
+/// and alphabet-mismatch errors fail the whole read. The reader is consumed.
 pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut hmms = Vec::new();
     let mut lines = CappedLineReader::new(reader);
@@ -318,6 +351,11 @@ pub fn read_hmms_allow_mixed_formats<R: Read>(reader: BufReader<R>) -> HmmerResu
     Ok(hmms)
 }
 
+/// Read only the first ASCII HMMER3 record from a buffered stream.
+///
+/// Returns a format error if no record is present, and propagates I/O and
+/// parse errors. Later records are not validated. The reader is consumed;
+/// use a separate reader if you need to retain or process the remainder.
 pub fn read_first_hmm<R: Read>(reader: BufReader<R>) -> HmmerResult<Hmm> {
     let mut lines = CappedLineReader::new(reader);
     read_one_hmm_with_format(&mut lines)?
@@ -327,6 +365,11 @@ pub fn read_first_hmm<R: Read>(reader: BufReader<R>) -> HmmerResult<Hmm> {
 
 /// Read all HMMs from an open stream, auto-dispatching ASCII vs binary from
 /// the first four bytes. The prefix is chained back into the selected parser.
+///
+/// Returns records in input order; empty input returns an empty vector.
+/// Mixed alphabets are rejected, as are mixed ASCII format versions.
+/// Native-endian binary formats 3/a through 3/f are supported. Compression
+/// is not detected here: pass an already decompressed reader when needed.
 pub fn read_hmms_auto<R: Read>(mut reader: BufReader<R>) -> HmmerResult<Vec<Hmm>> {
     let mut prefix = Vec::with_capacity(4);
     while prefix.len() < 4 {
@@ -1053,6 +1096,10 @@ pub enum HmmAsciiFormat {
 }
 
 impl HmmAsciiFormat {
+    /// Parse an exact ASCII format selector (`3/a` through `3/f`).
+    ///
+    /// Returns `None` for unsupported strings; matching is case-sensitive and
+    /// does not accept the `HMMER` prefix or surrounding whitespace.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "3/a" => Some(Self::Hmmer3a),
@@ -1081,10 +1128,24 @@ impl HmmAsciiFormat {
     }
 }
 
+/// Write one core HMM as a HMMER3/f ASCII record to `w`.
+///
+/// Probabilities are serialized as `-ln(p)`, with `*` for zero; records end
+/// with `//` and may be concatenated. The HMM must have probability tables
+/// and annotation arrays consistent with its dimensions and flags.
+/// I/O failures return errors and can leave a partially written record;
+/// this function does not flush the writer.
 pub fn write_hmm<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     write_hmm_with_format(w, hmm, HmmAsciiFormat::Hmmer3f)
 }
 
+/// Write one core HMM as an ASCII record in the selected 3/a–3/f format.
+///
+/// `format` controls which version-dependent fields are emitted; older
+/// formats cannot preserve every modern annotation. `hmm` must have valid
+/// probability tables and annotation arrays consistent with its dimensions
+/// and flags. Appends to `w` without flushing it. I/O failures return errors
+/// and can leave partial output. Use [`write_hmm`] for the current format.
 pub fn write_hmm_with_format<W: std::io::Write>(
     w: &mut W,
     hmm: &Hmm,
@@ -1372,6 +1433,11 @@ pub fn write_hmm_with_format<W: std::io::Write>(
 /// "ls mode" (glocal) with default null-model and special-state (NECJ)
 /// transitions. Statistical calibration and the alignment checksum are omitted
 /// (H2 and H3 differ too much for those).
+///
+/// `hmm` must contain valid probability tables and matching annotations.
+/// Writes one complete record to `w` without flushing. I/O errors propagate
+/// and may leave partial output; conversion cannot preserve HMMER3-specific
+/// statistics and annotations.
 pub fn write_hmm_h2_ascii<W: std::io::Write>(w: &mut W, hmm: &Hmm) -> HmmerResult<()> {
     let abc = Alphabet::new(hmm.abc_type);
     let bg = crate::bg::Bg::new(&abc);

@@ -52,6 +52,12 @@ impl Default for ClusterParams {
 /// > traces the ensemble came from. Also drops envelopes dominated (>=80% covered
 /// > in sequence coords) by a higher-posterior neighbor, matching the post-cluster
 /// > pruning in `region_trace_ensemble()`.
+/// Segment endpoints and returned envelope endpoints are 1-based, inclusive
+/// sequence/model coordinates. Supply segments grouped by `trace_idx`,
+/// with valid increasing endpoints, so repeated segments from a trace are
+/// counted together. `ntraces` includes sampled traces that contributed no
+/// segments. Fractions in `params` are on a 0-to-1 scale. Returns an empty
+/// vector for an empty ensemble or zero traces.
 pub fn cluster(
     segments: &[SegmentPair],
     ntraces: usize,

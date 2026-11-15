@@ -16,6 +16,10 @@ pub enum PriorStrategy {
 /// parameters (`K` of each); result is `(counts[a] + alpha[a]) / sum` then
 /// renormalised. Thin `f32` wrapper around the `f64` core; used wherever a
 /// single Dirichlet component is enough (e.g. transitions).
+/// Supply nonnegative counts and prior parameters in identical category
+/// order, normally with equal lengths and positive total mass.
+/// An `alpha` shorter than `counts` can panic; extra alpha entries affect
+/// the denominator and should not be supplied.
 pub fn apply_dirichlet(counts: &[f32], alpha: &[f32]) -> Vec<f32> {
     let alpha_d: Vec<f64> = alpha.iter().map(|&v| v as f64).collect();
     apply_dirichlet_f64(counts, &alpha_d)
@@ -102,6 +106,9 @@ const SJOLANDER_ALPHA: [[f64; 20]; 9] = [
 /// `LogGamma` Bayes factors), normalises them, and forms the mixture-weighted
 /// mean of each component's posterior mean. Implements the amino-acid match
 /// branch of C's `p7_ParameterEstimation` / `esl_mixdchlet_MPParameters`.
+/// `counts` should contain 20 nonnegative counts in the amino alphabet's
+/// canonical residue order. At most the first 20 entries are used; the
+/// returned vector has `min(counts.len(), 20)` probability entries.
 pub fn apply_mixture_dirichlet(counts: &[f32]) -> Vec<f32> {
     let k = counts.len().min(20);
     let counts_d: Vec<f64> = counts[..k].iter().map(|&c| c as f64).collect();
@@ -257,6 +264,9 @@ impl TransitionPrior {
 
     /// Select the transition prior matching the alphabet size, mirroring
     /// C's `p7_builder.c:134-137` (nucleic for eslDNA/eslRNA, amino otherwise).
+    /// `abc_k` is the number of canonical residues, excluding gaps, ambiguity
+    /// codes, and sentinels: 4 selects nucleotide priors, every other size
+    /// selects amino-acid priors.
     pub fn for_alphabet(abc_k: usize) -> Self {
         if abc_k == 4 {
             TransitionPrior::nucleic()
@@ -348,6 +358,13 @@ pub fn apply_priors(hmm: &mut crate::hmm::Hmm) {
     apply_priors_with_strategy(hmm, PriorStrategy::Default);
 }
 
+/// Convert weighted training counts into normalized HMM probabilities in place.
+///
+/// `Default` uses alphabet-specific HMMER priors, `None` normalizes counts
+/// without pseudocounts, and `Laplace` adds uniform pseudocounts. Call this
+/// after counting and effective-sequence weighting, before calibration or
+/// scoring-profile configuration; applying it again treats probabilities
+/// as counts. Terminal transition conventions are enforced.
 pub fn apply_priors_with_strategy(hmm: &mut crate::hmm::Hmm, strategy: PriorStrategy) {
     match strategy {
         PriorStrategy::Default => apply_default_priors(hmm),

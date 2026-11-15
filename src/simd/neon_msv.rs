@@ -23,6 +23,15 @@ pub enum NeonMsvResult {
 ///
 /// # Safety
 /// Requires NEON support (always available on aarch64).
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn neon_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonMsvResult {
@@ -91,6 +100,15 @@ pub unsafe fn neon_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> NeonMsvRe
 }
 
 /// Non-aarch64 stub for [`neon_msv_filter`]; always returns `Ok(-inf)`.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn neon_msv_filter(_dsq: &[Dsq], _l: usize, _om: &OProfile) -> NeonMsvResult {
     NeonMsvResult::Ok(f32::NEG_INFINITY) // NEON not available

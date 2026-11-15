@@ -22,6 +22,15 @@ pub enum NeonFwdResult {
 /// `-inf` if the rescaled probability mass underflowed/blew up. The model must be
 /// configured in local alignment mode; the sparse-rescaling trick that keeps values
 /// within single-precision dynamic range cannot be safely applied in glocal/global.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
@@ -157,6 +166,15 @@ pub unsafe fn neon_forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 }
 
 /// Non-aarch64 stub for [`neon_forward_parser`]; always returns `-inf`.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn neon_forward_parser(_dsq: &[Dsq], _l: usize, _om: &OProfile) -> f32 {
     f32::NEG_INFINITY

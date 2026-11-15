@@ -29,10 +29,39 @@ pub struct Sequence {
 }
 
 impl Sequence {
+    /// Create a complete digital sequence from unaligned ASCII residue text.
+    ///
+    /// Validates with [`Alphabet::digitize_checked`], adds boundary sentinels,
+    /// and sets both length fields to the number of digitized residues.
+    /// Ignored characters such as whitespace do not count toward the length.
+    /// Accessions and descriptions are empty, and taxonomy is unset.
+    /// Invalid symbols, gaps, and missing-data markers return a format error.
+    pub fn from_text(
+        name: impl Into<String>,
+        residues: &[u8],
+        alphabet: &Alphabet,
+    ) -> HmmerResult<Self> {
+        let dsq = alphabet.digitize_checked(residues)?;
+        let n = dsq.len() - 2;
+        Ok(Self {
+            name: name.into(),
+            acc: String::new(),
+            desc: String::new(),
+            dsq,
+            n,
+            l: n,
+            taxid: -1,
+        })
+    }
+
     /// Create a new empty digital `Sequence` (port of `esl_sq_Create`).
     ///
     /// The dsq starts with a single `DSQ_SENTINEL`; subsequent reads append
     /// residues at positions `1..=n` and add a trailing sentinel.
+    ///
+    /// The empty buffer contains only the leading sentinel and is not yet a
+    /// complete sentinel-flanked sequence. Read into it with [`SeqFile::read`]
+    /// or populate both the residue buffer and length fields before scoring.
     pub fn new() -> Self {
         Sequence {
             name: String::new(),
@@ -81,6 +110,10 @@ pub enum SequenceFormat {
 }
 
 impl SequenceFormat {
+    /// Parse a format name case-insensitively.
+    ///
+    /// Accepts `fasta`, `uniprot`, `genbank`, `embl`, `ddbj`, and
+    /// `stockholm` (also `sto` or `pfam`). Returns `None` for other names.
     pub fn from_name(name: &str) -> Option<Self> {
         if name.eq_ignore_ascii_case("fasta") {
             Some(Self::Fasta)
@@ -126,6 +159,8 @@ pub struct SeqFile<R: Read> {
 impl<R: Read> SeqFile<R> {
     /// Wrap a `Read` source as a buffered sequence file using alphabet `abc`.
     /// Format autodetection happens on the first line of [`Self::read`].
+    /// `abc` determines how sequence text is digitized; it is not inferred
+    /// from the input. No input is consumed until [`Self::read`] is called.
     pub fn new(reader: R, abc: Alphabet) -> Self {
         SeqFile {
             reader: BufReader::new(reader),
@@ -138,12 +173,18 @@ impl<R: Read> SeqFile<R> {
     }
 
     /// Require FASTA input instead of using sequence format autodetection.
+    ///
+    /// Equivalent to [`Self::with_format`] with [`SequenceFormat::Fasta`].
+    /// Format validation occurs when [`Self::read`] consumes records.
     pub fn with_fasta_only(mut self) -> Self {
         self.asserted_format = Some(SequenceFormat::Fasta);
         self
     }
 
     /// Require a specific input format instead of using sequence format autodetection.
+    ///
+    /// This sets a reader option without consuming input. A mismatched record
+    /// header is reported by [`Self::read`] as a format error.
     pub fn with_format(mut self, format: SequenceFormat) -> Self {
         self.asserted_format = Some(format);
         self
@@ -155,8 +196,16 @@ impl<R: Read> SeqFile<R> {
     /// Auto-detects FASTA (`>name`), UniProt/Swiss-Prot (`ID … // SQ …`), or
     /// GenBank (`LOCUS … // ORIGIN …`) format from the first non-empty line
     /// and parses one record. Residues are digitised through the alphabet,
-    /// preserving ignored whitespace and rejecting illegal sequence symbols.
+    /// skipping ignored whitespace and rejecting illegal sequence symbols.
     /// Returns `Ok(false)` at EOF.
+    ///
+    /// Returns `Ok(true)` after replacing `sq` with a complete record; its
+    /// `n` and `l` are residue counts and its `dsq` has boundary sentinels.
+    /// Stockholm input yields individual ungapped sequences. Input uses the
+    /// alphabet provided at construction. I/O failures, illegal residues,
+    /// invalid headers, and malformed records return errors. On error or EOF,
+    /// `sq` may have been cleared or partially populated; use it only after
+    /// `Ok(true)`.
     pub fn read(&mut self, sq: &mut Sequence) -> HmmerResult<bool> {
         if self.at_eof {
             if let Some(next) = self.pending_msa_sequences.pop_front() {
@@ -518,6 +567,10 @@ fn read_capped_line<R: BufRead>(reader: &mut R, line: &mut String) -> HmmerResul
 /// Transparently wraps `.gz` files with a `flate2` decompressor; the
 /// underlying reader is type-erased into `Box<dyn Read>`. Returns
 /// [`HmmerError::Io`] if the path cannot be opened.
+///
+/// A path of `-` reads standard input. The alphabet is supplied by the
+/// caller; format detection and record validation occur during
+/// [`SeqFile::read`], not when this function returns.
 pub fn open_seq_file(
     path: &std::path::Path,
     abc: &Alphabet,
@@ -526,6 +579,11 @@ pub fn open_seq_file(
 }
 
 /// Open a sequence file and require FASTA records.
+///
+/// Like [`open_seq_file`], accepts `-` for standard input and decompresses
+/// paths ending in `.gz`. `abc` is cloned into the reader. Opening failures
+/// return an I/O error; format and residue errors are deferred to
+/// [`SeqFile::read`].
 pub fn open_fasta_seq_file(
     path: &std::path::Path,
     abc: &Alphabet,
@@ -534,6 +592,11 @@ pub fn open_fasta_seq_file(
 }
 
 /// Open a sequence file and require a specific supported format.
+///
+/// Like [`open_seq_file`], accepts `-` for standard input and decompresses
+/// paths ending in `.gz`. `abc` is cloned into the reader. Opening failures
+/// return an I/O error; format and residue errors are deferred to
+/// [`SeqFile::read`].
 pub fn open_seq_file_with_format(
     path: &std::path::Path,
     abc: &Alphabet,

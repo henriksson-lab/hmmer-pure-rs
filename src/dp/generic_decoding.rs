@@ -15,6 +15,13 @@ use crate::util::cmath::{c_exp_to_f32, c_expf_to_f32};
 /// row `i=0` is unused (left zero). Each row is renormalized to absorb log-sum
 /// table approximation error. Returns the overall Forward score used for
 /// normalization. Counterpart of `p7_GDecoding`.
+///
+/// `fwd` and `bck` must describe the same sequence and the same configured
+/// profile `gm`, with full boundary rows and model columns. Their cells contain
+/// log scores in nats, not already decoded posterior probabilities.
+/// Allocate `pp` for `gm.m` nodes and `fwd.l` residues before calling. Its active
+/// cells are overwritten with probabilities; the returned normalization score
+/// is in nats.
 pub fn g_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx, pp: &mut Gmx) -> f32 {
     let l = fwd.l;
     let m = gm.m;
@@ -102,6 +109,10 @@ pub fn g_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx, pp: &mut Gmx) -> f32 {
 /// Returns `mocc[0..=L]` where `mocc[i]` = P(residue `i` is emitted by the
 /// core model) = sum of `MMX(i,k) + IMX(i,k)` over all `k`. Helper used by
 /// downstream domain decoding/parsing.
+///
+/// `pp` must contain linear posterior probabilities, as produced by
+/// [`g_decoding`], rather than Forward log scores. Entry 0 of the result is 0;
+/// residues occupy entries `1..=pp.l`.
 pub fn domain_occupancy(pp: &Gmx) -> Vec<f32> {
     let l = pp.l;
     let m = pp.m;
@@ -127,6 +138,10 @@ pub fn domain_occupancy(pp: &Gmx) -> Vec<f32> {
 /// - `etot[i]` = expected number of domains ended at or before position `i`
 /// - `mocc[i]` = P(residue `i` is in a domain) = `1 - P(N|J|C loop)`
 /// Adapted for generic (log-space) DP matrices. Counterpart of `p7_GDomainDecoding`.
+///
+/// `fwd` and `bck` must describe the same sequence and the same configured
+/// profile `gm`, with full boundary rows and model columns. Their cells contain
+/// log scores in nats, not already decoded posterior probabilities.
 pub fn domain_decoding(gm: &Profile, fwd: &Gmx, bck: &Gmx) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let l = fwd.l;
     let overall_sc = fwd.xmx(l, P7G_C) + gm.xsc[P7P_C][P7P_MOVE];

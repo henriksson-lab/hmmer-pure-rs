@@ -49,6 +49,7 @@ pub struct Index {
 /// An Easel SSI v3 index loaded from disk.
 #[derive(Debug)]
 pub struct OnDiskIndex {
+    /// Indexed filename recorded in the SSI file; may be only a basename.
     pub indexed_path: PathBuf,
     primary_offsets: HashMap<String, u64>,
     secondary_to_primary: HashMap<String, String>,
@@ -56,6 +57,9 @@ pub struct OnDiskIndex {
 
 impl OnDiskIndex {
     /// Look up `key` first as a primary HMM name, then as a secondary accession.
+    ///
+    /// Returns a zero-based byte offset in the indexed HMM file, or `None`
+    /// when no key matches. Matching is exact and case-sensitive.
     pub fn lookup(&self, key: &str) -> Option<u64> {
         self.primary_offsets.get(key).copied().or_else(|| {
             self.secondary_to_primary
@@ -71,6 +75,10 @@ impl Index {
     /// Records each HMM's byte offset for SSI-style random access. Simpler
     /// in-memory alternative to the on-disk SSI files built by Easel's
     /// `esl_newssi_*` functions.
+    ///
+    /// Returns an error on I/O failure, malformed records, or duplicate names
+    /// or accessions. Offsets refer to the file as read; rebuilding is required
+    /// if its contents change.
     pub fn build_from_hmm_file(path: &Path) -> HmmerResult<Self> {
         let records = scan_hmm_records(path)?;
         let mut name_to_offset = HashMap::new();
@@ -129,10 +137,12 @@ impl Index {
         self.name_to_offset.len()
     }
 
+    /// Whether there are no indexed primary HMM names.
     pub fn is_empty(&self) -> bool {
         self.name_to_offset.is_empty()
     }
 
+    /// Number of indexed accession aliases, excluding primary names.
     pub fn accession_len(&self) -> usize {
         self.acc_to_offset.len()
     }
@@ -241,10 +251,14 @@ fn finish_ascii_record(
     Ok(())
 }
 
-/// Write a C/Easel-compatible SSI v3 index for an ASCII HMM file.
+/// Write a C/Easel-compatible SSI v3 sidecar for an ASCII or binary HMM file.
 ///
 /// HMM records have no data offset or length in C HMMER's `hmmfetch --index`,
 /// so primary keys store only record offsets and accessions are secondary keys.
+///
+/// Creates `<hmm_path>.ssi` and returns `(sidecar_path, name_count, accession_count)`.
+/// Returns an error if that sidecar already exists, input records cannot be
+/// indexed, or output fails. The original HMM file is read without modification.
 pub fn write_hmm_ssi(hmm_path: &Path) -> HmmerResult<(PathBuf, usize, usize)> {
     let index = Index::build_from_hmm_file(hmm_path)?;
     let ssi_path = path_with_appended_suffix(hmm_path, ".ssi");
@@ -275,7 +289,11 @@ pub fn write_hmm_ssi(hmm_path: &Path) -> HmmerResult<(PathBuf, usize, usize)> {
     )
 }
 
-/// Load the Easel SSI v3 sidecar for an HMM file, if it exists.
+/// Load `<hmm_path>.ssi`, returning `Ok(None)` when the sidecar is absent.
+///
+/// Returns an error for invalid SSI data, I/O failure, or a stored filename
+/// whose basename differs from `hmm_path`. Does not verify that indexed HMM
+/// contents or record offsets are still current.
 pub fn read_hmm_ssi(hmm_path: &Path) -> HmmerResult<Option<OnDiskIndex>> {
     let ssi_path = path_with_appended_suffix(hmm_path, ".ssi");
     if !ssi_path.exists() {
@@ -293,6 +311,11 @@ pub fn read_hmm_ssi(hmm_path: &Path) -> HmmerResult<Option<OnDiskIndex>> {
     Ok(Some(on_disk))
 }
 
+/// Read an Easel SSI v3 file from the explicit sidecar path `ssi_path`.
+///
+/// Supports single-file indexes with 32- or 64-bit offsets. Returns an error
+/// for unsupported formats, malformed records or extents, or I/O failure.
+/// The indexed HMM file itself is not opened or checked.
 pub fn read_ssi_path(ssi_path: &Path) -> HmmerResult<OnDiskIndex> {
     let mut file = std::fs::File::open(ssi_path).map_err(HmmerError::Io)?;
     let file_len = file.metadata().map_err(HmmerError::Io)?.len();
@@ -480,6 +503,14 @@ fn validate_ssi_extent(
 ///
 /// This is used by `hmmpress`, whose index points at generated `.h3m` binary
 /// records rather than the original ASCII input file.
+///
+/// Each record is `(name, optional_accession, zero_based_byte_offset)` into
+/// `indexed_path`; offsets are supplied by the caller and are not verified.
+/// Empty accessions are omitted. `overwrite` permits replacing `ssi_path`.
+/// Returns `(ssi_path, name_count, accession_count)`, or an error on output
+/// failure, duplicate names/accessions, embedded NUL bytes, an existing file
+/// when overwrite is false, or unrepresentable sizes. An error after file
+/// creation can leave a partial index at `ssi_path`.
 pub fn write_hmm_ssi_records<I>(
     indexed_path: &Path,
     ssi_path: &Path,
@@ -495,6 +526,10 @@ where
 /// Write an SSI v3 index while allowing the fixed file-table width and stored
 /// file-table name to differ. Easel sizes the field from the path passed to
 /// `esl_newssi_AddFile()`, but stores only its basename.
+///
+/// `indexed_path` determines the filename field width; `stored_path` is the
+/// value written into that field and must fit it. Record tuples, overwrite
+/// behavior, return values, and errors follow [`write_hmm_ssi_records`].
 pub fn write_hmm_ssi_records_with_stored_path<I>(
     indexed_path: &Path,
     stored_path: &Path,
@@ -721,6 +756,8 @@ fn path_bytes(path: &Path) -> Vec<u8> {
     path.as_os_str().as_bytes().to_vec()
 }
 
+/// Return the final path component without converting it through UTF-8.
+/// Returns an empty path when `path` has no filename component.
 pub fn path_file_name(path: &Path) -> PathBuf {
     path.file_name()
         .map(PathBuf::from)

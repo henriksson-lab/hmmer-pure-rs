@@ -44,6 +44,9 @@ pub fn f_increment(vec: &mut [f32], x: f32) {
 // ===== Add =====
 
 /// Element-wise add `vec2` into `vec1`. Port of `esl_vec_DAdd`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn d_add(vec1: &mut [f64], vec2: &[f64]) {
     for (a, b) in vec1.iter_mut().zip(vec2.iter()) {
         *a += *b;
@@ -51,6 +54,9 @@ pub fn d_add(vec1: &mut [f64], vec2: &[f64]) {
 }
 
 /// Element-wise add `vec2` into `vec1`. Port of `esl_vec_FAdd`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn f_add(vec1: &mut [f32], vec2: &[f32]) {
     for (a, b) in vec1.iter_mut().zip(vec2.iter()) {
         *a += *b;
@@ -58,6 +64,9 @@ pub fn f_add(vec1: &mut [f32], vec2: &[f32]) {
 }
 
 /// In-place vec1 += a * vec2 (element-wise). Port of `esl_vec_FAddScaled`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn f_add_scaled(vec1: &mut [f32], vec2: &[f32], a: f32) {
     for (v1, v2) in vec1.iter_mut().zip(vec2.iter()) {
         *v1 += *v2 * a;
@@ -65,6 +74,9 @@ pub fn f_add_scaled(vec1: &mut [f32], vec2: &[f32], a: f32) {
 }
 
 /// In-place vec1 += a * vec2 (element-wise). Port of `esl_vec_DAddScaled`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn d_add_scaled(vec1: &mut [f64], vec2: &[f64], a: f64) {
     for (v1, v2) in vec1.iter_mut().zip(vec2.iter()) {
         *v1 += *v2 * a;
@@ -104,24 +116,29 @@ pub fn f_sum(vec: &[f32]) -> f32 {
 // ===== Max, Min, ArgMax, ArgMin =====
 
 /// Return the maximum element in `vec`. Port of `esl_vec_DMax`.
+///
+/// Returns negative infinity for an empty slice.
 pub fn d_max(vec: &[f64]) -> f64 {
     vec.iter().copied().fold(f64::NEG_INFINITY, f64::max)
 }
 
 /// Return the maximum element in `vec`. Port of `esl_vec_FMax`.
+///
+/// Returns negative infinity for an empty slice.
 pub fn f_max(vec: &[f32]) -> f32 {
     vec.iter().copied().fold(f32::NEG_INFINITY, f32::max)
 }
 
 /// Return the minimum element in `vec`. Port of `esl_vec_FMin`.
+///
+/// Returns positive infinity for an empty slice.
 pub fn f_min(vec: &[f32]) -> f32 {
     vec.iter().copied().fold(f32::INFINITY, f32::min)
 }
 
 /// Return the index of the maximum element in `vec`. Port of `esl_vec_FArgMax`.
 ///
-/// On ties the smallest index is returned, matching the C convention HMMER's
-/// optimal-accuracy tracebacks depend on. Returns 0 for an empty slice.
+/// On ties the largest index is returned. Returns 0 for an empty slice.
 pub fn f_argmax(vec: &[f32]) -> usize {
     vec.iter()
         .enumerate()
@@ -131,6 +148,8 @@ pub fn f_argmax(vec: &[f32]) -> usize {
 }
 
 /// Return the index of the maximum element in `vec`. Port of `esl_vec_IArgMax`.
+///
+/// On ties the largest index is returned. An empty slice returns 0.
 pub fn i_argmax(vec: &[i32]) -> usize {
     vec.iter()
         .enumerate()
@@ -142,16 +161,25 @@ pub fn i_argmax(vec: &[i32]) -> usize {
 // ===== Copy =====
 
 /// Copy `src` into `dst[..src.len()]`. Port of `esl_vec_DCopy`.
+///
+/// Panics if `dst.len() < src.len()`. Entries beyond the copied prefix
+/// of a longer destination remain unchanged.
 pub fn d_copy(src: &[f64], dst: &mut [f64]) {
     dst[..src.len()].copy_from_slice(src);
 }
 
 /// Copy `src` into `dst[..src.len()]`. Port of `esl_vec_FCopy`.
+///
+/// Panics if `dst.len() < src.len()`. Entries beyond the copied prefix
+/// of a longer destination remain unchanged.
 pub fn f_copy(src: &[f32], dst: &mut [f32]) {
     dst[..src.len()].copy_from_slice(src);
 }
 
 /// Copy `src` into `dst[..src.len()]`. Port of `esl_vec_ICopy`.
+///
+/// Panics if `dst.len() < src.len()`. Entries beyond the copied prefix
+/// of a longer destination remain unchanged.
 pub fn i_copy(src: &[i32], dst: &mut [i32]) {
     dst[..src.len()].copy_from_slice(src);
 }
@@ -173,8 +201,8 @@ pub fn i_reverse(vec: &[i32], rev: &mut [i32]) {
 
 /// Normalize a probability vector so it sums to 1.0. Port of `esl_vec_DNorm`.
 ///
-/// If the current sum is 0, the vector is left untouched (the C version
-/// fills with 1/n).
+/// If the current sum is zero, a nonempty vector is filled uniformly with
+/// `1 / vec.len()`. An empty vector is left empty.
 pub fn d_norm(vec: &mut [f64]) {
     let sum = d_sum(vec);
     if sum != 0.0 {
@@ -185,6 +213,9 @@ pub fn d_norm(vec: &mut [f64]) {
 }
 
 /// Normalize a probability vector so it sums to 1.0. Port of `esl_vec_FNorm`.
+///
+/// A nonempty vector whose sum is zero is filled uniformly; an empty
+/// vector stays empty. Input values are not checked for nonnegativity.
 pub fn f_norm(vec: &mut [f32]) {
     let sum = f_sum(vec);
     if sum != 0.0 {
@@ -210,6 +241,10 @@ pub fn f_exp(vec: &mut [f32]) {
 ///
 /// Subtracts the max before exponentiating to avoid overflow; on return
 /// `vec` sums to 1.0 in probability space. Port of `esl_vec_FLogNorm`.
+///
+/// At least one entry must be finite and none may be NaN or positive
+/// infinity for a valid normalized result. All-negative-infinity inputs
+/// produce NaNs rather than a uniform distribution.
 pub fn f_lognorm(vec: &mut [f32]) {
     let max = f_max(vec);
     let mut sum = 0.0_f32;
@@ -227,6 +262,10 @@ pub fn f_lognorm(vec: &mut [f32]) {
 ///
 /// Same shift-by-max stabilization as `f_lognorm`, but in log base 2.
 /// Port of `esl_vec_FLog2Norm`.
+///
+/// At least one entry must be finite and none may be NaN or positive
+/// infinity for a valid normalized result. All-negative-infinity inputs
+/// produce NaNs rather than a uniform distribution.
 pub fn f_log2norm(vec: &mut [f32]) {
     let max = f_max(vec);
     let mut sum = 0.0_f32;
@@ -271,6 +310,10 @@ pub fn f_entropy(p: &[f32]) -> f32 {
 ///
 /// Port of `esl_vec_DRelEntropy`. Unlike the C version this returns 0 for
 /// (p_i>0, q_i==0) pairs rather than +inf, matching existing call sites.
+///
+/// Use normalized distributions with matching lengths. Only the shared
+/// prefix is processed, and terms with nonpositive `p` or `q` are skipped;
+/// inputs are neither validated nor normalized.
 pub fn d_rel_entropy(p: &[f64], q: &[f64]) -> f64 {
     let mut kl = 0.0;
     for (&pi, &qi) in p.iter().zip(q.iter()) {
@@ -282,6 +325,10 @@ pub fn d_rel_entropy(p: &[f64], q: &[f64]) -> f64 {
 }
 
 /// Single-precision KL divergence D(p || q) in bits. Port of `esl_vec_FRelEntropy`.
+///
+/// Use normalized distributions with matching lengths. Only the shared
+/// prefix is processed, and terms with nonpositive `p` or `q` are skipped;
+/// inputs are neither validated nor normalized.
 pub fn f_rel_entropy(p: &[f32], q: &[f32]) -> f32 {
     let mut kl = 0.0_f32;
     for (&pi, &qi) in p.iter().zip(q.iter()) {
@@ -295,6 +342,9 @@ pub fn f_rel_entropy(p: &[f32], q: &[f32]) -> f32 {
 // ===== Type conversion =====
 
 /// Copy a double vector to a float vector with lossy conversion. Port of `esl_vec_D2F`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn d2f(src: &[f64], dst: &mut [f32]) {
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         *d = *s as f32;
@@ -302,6 +352,9 @@ pub fn d2f(src: &[f64], dst: &mut [f32]) {
 }
 
 /// Copy a float vector to a double vector. Port of `esl_vec_F2D`.
+///
+/// Only the shared prefix of the two slices is processed. A longer
+/// destination retains its remaining entries; extra source entries are ignored.
 pub fn f2d(src: &[f32], dst: &mut [f64]) {
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         *d = *s as f64;
@@ -346,7 +399,7 @@ pub fn d_validate(vec: &[f64], tol: f64) -> bool {
     (sum - 1.0).abs() <= tol && vec.iter().all(|&v| v >= 0.0 && v <= 1.0 + tol)
 }
 
-/// Return true if `vec` is a valid f32 probability vector (sum near 1, all in `[0,1]`).
+/// Return true if `vec` is a valid f32 probability vector (sum near 1, all in `[0,1+tol]`).
 /// Port of `esl_vec_FValidate`.
 pub fn f_validate(vec: &[f32], tol: f32) -> bool {
     let sum = f_sum(vec);

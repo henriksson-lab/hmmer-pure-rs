@@ -10,13 +10,13 @@ use crate::simd::sse::*;
 
 /// Result of the MSV filter: either a finite score or a saturating overflow.
 pub enum MsvResult {
-    /// Sequence passed filter, score is returned
+    /// Computed MSV score in nats; the caller applies the filter threshold.
     Ok(f32),
     /// Score overflowed (extremely high-scoring hit)
     Overflow,
 }
 
-/// Calculates the MSV score, vewy vewy fast, in limited precision (C: `p7_MSVFilter`).
+/// Calculate an approximate MSV score using byte precision (C: `p7_MSVFilter`).
 ///
 /// Computes an approximation of the MSV score for digital sequence `dsq` of length `l`
 /// using optimized profile `om`. Returns the estimated MSV score in nats, or `Overflow`
@@ -28,6 +28,15 @@ pub enum MsvResult {
 ///
 /// # Safety
 /// Requires SSE2 support. Caller must verify CPU support.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
     let q_count = nqb(om.m);
@@ -130,6 +139,14 @@ pub unsafe fn p7_msv_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> MsvResult {
 /// Identical math to [`p7_msv_filter`] but skips the per-call allocation by reusing the
 /// caller's `dp` vector. Keep tracehash builds on `p7_msv_filter()` unless a trace proves
 /// this allocation change is harmless for exact instrumentation-sensitive comparisons.
+///
+/// `l` is the number of residues at `dsq[1..=l]`. `dp` may start empty;
+/// it is resized and overwritten when the DP recurrence runs, and can
+/// be retained across calls. Returned scores are in nats.
+///
+/// # Safety
+/// Requires the CPU support and valid sequence/profile layout documented
+/// for [`p7_msv_filter`].
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter_with_scratch_rust_helper(
     dsq: &[Dsq],
@@ -168,6 +185,14 @@ pub unsafe fn p7_msv_filter_with_scratch_rust_helper(
 ///
 /// # Safety
 /// Requires SSE2 support.
+///
+/// `l` is the number of residues at `dsq[1..=l]`. `dp` may start empty;
+/// it is resized and overwritten when the DP recurrence runs, and can
+/// be retained across calls. Returned scores are in nats.
+///
+/// # Safety
+/// Requires the CPU support and valid sequence/profile layout documented
+/// for [`p7_msv_filter`].
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_msv_filter_dp_only_rust_helper(
     dsq: &[Dsq],

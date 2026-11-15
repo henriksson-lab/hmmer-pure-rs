@@ -312,6 +312,12 @@ fn unpack2(psq: &[u32], start: usize, out: &mut Vec<Dsq>) -> HmmerResult<(usize,
 /// amino uses 5-bit packing, matching C.
 ///
 /// Each sequence's `taxid` is written from [`Sequence::taxid`] (`-1` = none).
+///
+/// `basename` is the shared path prefix, not one of the companion filenames.
+/// Each input sequence must have `n` residues at `dsq[1..=n]` with boundary
+/// sentinels and codes from `alphabet`. Existing database files are
+/// truncated. Invalid sequences, unsupported alphabets, and I/O failures
+/// return errors; errors during writing may leave partial companion files.
 pub fn write_dsqdata(
     basename: &Path,
     sequences: &[Sequence],
@@ -427,8 +433,8 @@ pub fn write_dsqdata(
 ///
 /// Implements a two-thread pipeline mirroring Easel's loader/unpacker design:
 /// a background **loader thread** streams raw packed bytes and metadata off
-/// disk in chunks of up to [`CHUNK_MAXSEQ`] sequences and sends each
-/// [`RawChunk`] over a channel; the main thread receives each chunk and
+/// disk in chunks of up to `CHUNK_MAXSEQ` sequences and sends each
+/// `RawChunk` over a channel; the main thread receives each chunk and
 /// unpacks (decompresses) it while the loader prefetches the next one. This
 /// overlaps disk I/O with CPU decompression, faithfully reflecting C's
 /// threaded pipeline (which uses more threads but the same two-stage
@@ -440,7 +446,12 @@ pub fn write_dsqdata(
 ///
 /// Returns the sequences with their leading/trailing [`DSQ_SENTINEL`] bytes
 /// restored. Accession/description are populated from the metadata file.
-/// Taxid is read (and format-validated) but not stored; see module docs.
+/// Taxonomy IDs are preserved in [`Sequence::taxid`].
+///
+/// `basename` is the shared prefix without `.dsqi`, `.dsqm`, or `.dsqs`.
+/// All records are collected in memory in database order. Missing files,
+/// mismatched file tags, unsupported alphabets/byte order, corrupt offsets
+/// or metadata, and truncated input return errors.
 pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     let p = basename;
 
@@ -658,7 +669,7 @@ pub fn read_dsqdata(basename: &Path) -> HmmerResult<Vec<Sequence>> {
     Ok(sequences)
 }
 
-/// Unpack a [`RawChunk`] into [`Sequence`]s, appending to `out`.
+/// Unpack a `RawChunk` into [`Sequence`]s, appending to `out`.
 ///
 /// This is the "unpacker" side of the two-thread pipeline. It mirrors
 /// `dsqdata_unpack_chunk()` in the C implementation but operates on

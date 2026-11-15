@@ -1,5 +1,11 @@
 //! Exponential distribution functions.
 //! Direct port of Easel's esl_exponential.c.
+//!
+//! `x` and the location/offset `mu` use the same units (for example, bits
+//! when evaluating calibrated bit scores). `lambda` is a positive rate, or
+//! inverse scale, in reciprocal units. Evaluators do not validate parameters.
+//! Functions named `log*` return natural logarithms; densities are not point
+//! probabilities for these continuous distributions.
 
 use crate::util::cmath::c_exp_f64;
 
@@ -28,7 +34,7 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
     -lambda * (x - mu)
 }
 
-/// Probability density function P(X = x) for the exponential.
+/// Probability density at `x` for the exponential.
 ///
 /// Returns 0.0 for x < mu; otherwise lambda * exp(-lambda*(x-mu)).
 /// Port of Easel `esl_exp_pdf`.
@@ -59,6 +65,11 @@ pub fn cdf(x: f64, mu: f64, lambda: f64) -> f64 {
 ///
 /// ML mu is the smallest sample; ML lambda is the reciprocal of the mean
 /// of (x_i - mu). Returns `(mu, lambda)`. Port of `esl_exp_FitComplete`.
+///
+/// Provide a nonempty slice of finite observations with nonzero spread for
+/// a finite positive rate. This function does not report invalid input as an
+/// error: an empty slice produces nonfinite parameters and constant samples
+/// produce an infinite rate. `mu` uses sample units and `lambda` reciprocal units.
 pub fn fit_complete(x: &[f64]) -> (f64, f64) {
     let n = x.len() as f64;
     let mu = x.iter().copied().fold(f64::INFINITY, f64::min);

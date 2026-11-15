@@ -38,6 +38,12 @@ struct Args {
 /// ASCII by default, as a selected legacy HMMER3 format with `--outfmt`,
 /// or HMMER3 binary with `-b`.
 /// Mirrors the default and binary output paths of `main()` in hmmer/src/hmmconvert.c.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
 

@@ -362,6 +362,12 @@ fn parse_pextend(s: &str) -> Result<f64, String> {
 /// then sorts/thresholds and prints the canonical per-sequence tabular block.
 /// Optional `--tblout` is delegated to `hmmsearch::write_tblout`. Corresponds
 /// to `serial_master()` in hmmer/src/phmmer.c.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
     let cpu_was_requested = args

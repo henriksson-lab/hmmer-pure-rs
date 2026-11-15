@@ -16,6 +16,18 @@ use crate::util::cmath::c_logf_to_f32;
 /// expected number of hits (default 2.0). Returns the MSV lod score in nats.
 /// CC, NN, JJ transitions are real scores here (unlike the SIMD impls which fix
 /// them to 0). Counterpart of `p7_GMSV`.
+///
+/// `l` is the number of target residues (amino acids or nucleotides), excluding
+/// sentinels. `dsq` must contain valid digital alphabet codes at `1..=l`, with
+/// an unused/sentinel element at index 0. Configure `gm` for this target length
+/// before scoring. `gx` must already have capacity for `gm.m` model nodes and
+/// `l` residues, including boundary row/column 0; this function does not grow it.
+/// The active matrix cells are overwritten. The returned score is in natural-log
+/// units; converting a null-corrected score to bits also requires division by
+/// `ln(2)`.
+///
+/// `nu` must be at least 1: it determines the mean number of ungapped hits,
+/// with 1 disabling the transition to another hit.
 pub fn g_msv(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx, nu: f32) -> f32 {
     let m = gm.m;
     let tloop = c_logf_to_f32(l as f32 / (l as f32 + 3.0));

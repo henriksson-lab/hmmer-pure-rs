@@ -89,6 +89,12 @@ struct TextMsa {
 /// optimal-accuracy traceback per sequence, then assembles a multiple alignment
 /// (Stockholm or A2M). Optionally merges a `--mapali` source alignment via the
 /// HMM's map and checksum. Corresponds to `main()` in hmmer/src/hmmalign.c.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let args = Args::parse_from(&args);
     if args.hmmfile == std::path::Path::new("-") && args.seqfile == std::path::Path::new("-") {

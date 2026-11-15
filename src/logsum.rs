@@ -37,6 +37,10 @@ pub fn p7_flogsuminit() {
 /// Inner-loop primitive of the generic Forward algorithm. Either input may be
 /// `-INFINITY`, but neither may be `+INFINITY` or `NaN`. Counterpart to C's
 /// `p7_FLogsum()`.
+///
+/// Inputs and result are natural logarithms (nats). Call
+/// [`p7_flogsuminit`] before using this function, including before concurrent
+/// scoring, so the shared lookup table has been initialized.
 #[inline]
 pub fn p7_flogsum(a: f32, b: f32) -> f32 {
     let max = a.max(b);
@@ -53,6 +57,9 @@ pub fn p7_flogsum(a: f32, b: f32) -> f32 {
 
 /// Absolute error in probability space introduced by `p7_flogsum()`'s table
 /// lookup: `exp(approx) - exp(exact)`. Counterpart to C's `p7_FLogsumError()`.
+///
+/// Call [`p7_flogsuminit`] first. Inputs are natural logarithms; the
+/// returned difference is signed, in linear probability space.
 pub fn p7_flogsum_error(a: f32, b: f32) -> f32 {
     // Mirror C bit-for-bit: `float exact = log(exp(a)+exp(b));` evaluates
     // exp/log in double (libm) but rounds the result to float on store, and

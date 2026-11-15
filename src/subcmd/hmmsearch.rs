@@ -301,6 +301,12 @@ fn copy_reporting_thresholds(dst: &mut Pipeline, src: &Pipeline) {
 /// `--cpu` is 0 or 1, otherwise rayon-parallel over a target batch), thresholds
 /// and emits the standard hmmsearch text report plus optional --tblout,
 /// --domtblout, --pfamtblout, and -A (Stockholm) outputs.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
     let cpu_was_requested = args
@@ -1501,6 +1507,14 @@ fn read_hmms(
 /// longest target name / accession and the query name / accession,
 /// minimums 20/10/20/10) followed by one row per reported hit with full
 /// sequence and best-domain stats.
+///
+/// `qname`/`qacc` identify the query; a missing or empty accession prints `-`.
+/// `th` supplies reporting flags and output order. `z` is the effective target
+/// count used to scale P-values into E-values. `show_header` controls column
+/// headings. Scores are printed in bits.
+///
+/// # Panics
+/// Panics if writing to `f` fails.
 pub fn write_tblout<W: Write>(
     f: &mut W,
     qname: &str,
@@ -1625,6 +1639,8 @@ pub fn write_tblout<W: Write>(
     }
 }
 
+/// Borrow the highest-bit-score domain, or `None` if `hit.dcl` is empty.
+/// Ties between finite scores select the first domain in stored order.
 pub fn best_domain(hit: &Hit) -> Option<&Domain> {
     // C p7_pipeline.c:1110 uses a strict `>` scan, so the FIRST domain with the
     // maximum bitscore wins on a tie. `Iterator::max_by` keeps the LAST max, so
@@ -1657,6 +1673,17 @@ fn truncate_for_textw(s: &str, width: usize) -> String {
     s.chars().take(width).collect()
 }
 
+/// Write the human-readable sequence/domain tables and optional alignments.
+///
+/// `th` supplies hit/domain reporting flags and ordering. `model_name`,
+/// `model_acc`, `model_len` (match states), and optional `model_cs` describe the
+/// query HMM. `z` and `domz` are the search-space multipliers for sequence and
+/// conditional domain E-values. `textw` is the display width (zero disables
+/// wrapping); `show_acc` prefers accessions, `noali` suppresses alignments, and
+/// `show_hit_status` enables iterative-search status markers.
+///
+/// # Panics
+/// Panics if writing to `out` fails.
 pub fn write_standard_stdout_tables<W: Write>(
     out: &mut W,
     th: &TopHits,
@@ -1923,6 +1950,14 @@ pub fn write_standard_stdout_tables<W: Write>(
 /// row per reported domain with full-sequence stats plus per-domain c-Evalue,
 /// i-Evalue, score, bias, and hmm/ali/env coordinate triples. Column widths
 /// auto-fit target names and accessions, with 20/10 minimums.
+///
+/// `qname`/`qacc` identify the query and `qlen` is its model length in match
+/// states. `th` supplies reporting flags and output order. `z` scales sequence
+/// and independent-domain P-values; `domz` scales conditional-domain P-values.
+/// `show_header` controls column headings. Coordinates are one-based inclusive.
+///
+/// # Panics
+/// Panics if writing to `f` fails.
 pub fn write_domtblout<W: Write>(
     f: &mut W,
     qname: &str,
@@ -2078,6 +2113,13 @@ pub fn write_domtblout<W: Write>(
 /// Two sections: sequence scores then domain scores, both restricted to
 /// reported hits. Domain rows are re-sorted as C pseudo-hits, using the full
 /// sort-key comparator from `p7_tophits_TabularXfam`.
+///
+/// `qlen` is the query model length in match states; `z` scales P-values
+/// into E-values. `_qname`, `_qacc`, and `_domz` are currently unused. Uses
+/// default pipeline settings for domain pseudo-hit reporting thresholds.
+///
+/// # Panics
+/// Panics if writing to `f` fails.
 pub fn write_pfamtblout<W: Write>(
     f: &mut W,
     _qname: &str,
@@ -2278,6 +2320,13 @@ fn compare_pfamtblout_domain_pseudo_hits(
         })
 }
 
+/// Write HMMER table provenance comments and the completion marker to `f`.
+///
+/// `program` and `pipeline_mode` label the run; `query_file`, `target_file`,
+/// and `cmdline` are displayed as supplied. Adds the current directory and time.
+///
+/// # Panics
+/// Panics if writing fails.
 pub fn write_table_footer<W: Write>(
     f: &mut W,
     program: &str,

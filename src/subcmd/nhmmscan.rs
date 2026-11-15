@@ -230,6 +230,12 @@ fn parse_window_beta(s: &str) -> Result<f64, String> {
 /// adjusted into scan E-value space, deduplicated by model/alignment position,
 /// thresholded, and printed with HMM names in the target column. Corresponds
 /// to `serial_master()`/`serial_loop()` in `hmmer/src/nhmmscan.c`.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
     let table_cmdline = normalize_nhmmscan_table_cmdline(&cmdline);

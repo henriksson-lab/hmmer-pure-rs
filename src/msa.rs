@@ -93,6 +93,10 @@ impl Msa {
     /// Validate that every stored alignment character can be digitized by
     /// `abc`. Gap characters are accepted explicitly because aligned MSA text
     /// maps them to the alphabet gap code before normal symbol digitization.
+    ///
+    /// Returns a format error identifying the first unsupported symbol and its
+    /// sequence name. Does not mutate or digitize the alignment, and does not
+    /// check row lengths or annotation dimensions.
     pub fn validate_digitizable(&self, abc: &Alphabet) -> HmmerResult<()> {
         for (idx, seq) in self.aseq.iter().enumerate() {
             for &ch in seq {
@@ -124,6 +128,11 @@ impl Msa {
     /// alignment columns. Aligned gap characters (`-` or `.`) are mapped
     /// to the alphabet's gap code; symbols that the alphabet ignores
     /// (e.g. whitespace) are skipped silently.
+    ///
+    /// Call [`Self::validate_digitizable`] first for untrusted input: this
+    /// method preserves illegal-symbol codes rather than returning an error.
+    /// Rows remain aligned and contain gap codes; they are not ungapped
+    /// sequences suitable for direct target scoring.
     pub fn digitize(&self, abc: &Alphabet) -> Vec<Vec<Dsq>> {
         let gap = abc.gap_code();
         self.aseq
@@ -156,6 +165,10 @@ impl Msa {
 /// reference, e.g. when `hmmalign --mapali` is mapping new sequences onto
 /// the seed alignment an HMM was built from. Implements the variant of
 /// Jenkins' hash from `esl_keyhash`.
+///
+/// `abc` must be the alphabet used to interpret the alignment. Annotation
+/// and sequence names do not affect the checksum; alphabet choice and
+/// sequence order do. This is a compatibility checksum, not a cryptographic hash.
 pub fn checksum(msa: &Msa, abc: &Alphabet) -> u32 {
     let mut val = 0u32;
     for row in msa.digitize(abc) {
@@ -173,6 +186,11 @@ pub fn checksum(msa: &Msa, abc: &Alphabet) -> u32 {
 
 /// Read every Stockholm alignment in `path` (convenience wrapper that opens
 /// the file and dispatches to [`read_stockholm_from_reader`]).
+///
+/// Returns alignments in file order, with an empty vector when no alignment
+/// blocks are found. Paths are opened directly without gzip decompression.
+/// I/O failures and malformed alignment records return errors. Rows remain
+/// text; no biological alphabet is inferred or validated here.
 pub fn read_stockholm(path: &Path) -> HmmerResult<Vec<Msa>> {
     Ok(read_stockholm_preserved(path)?
         .into_iter()
@@ -182,6 +200,11 @@ pub fn read_stockholm(path: &Path) -> HmmerResult<Vec<Msa>> {
 
 /// Read every Stockholm alignment in `path`, preserving original body lines
 /// alongside parsed MSA fields.
+///
+/// Returns alignments in file order, with an empty vector when no alignment
+/// blocks are found. Paths are opened directly without gzip decompression.
+/// I/O failures and malformed alignment records return errors. Rows remain
+/// text; no biological alphabet is inferred or validated here.
 pub fn read_stockholm_preserved(path: &Path) -> HmmerResult<Vec<StockholmMsa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let reader = BufReader::new(file);
@@ -189,6 +212,12 @@ pub fn read_stockholm_preserved(path: &Path) -> HmmerResult<Vec<StockholmMsa>> {
 }
 
 /// Read one aligned FASTA/AFA alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_afa(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -196,6 +225,12 @@ pub fn read_afa(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one aligned FASTA/AFA alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_afa_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -205,6 +240,12 @@ pub fn read_afa_from_reader<R: Read>(
 }
 
 /// Read one A2M alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_a2m(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -217,6 +258,12 @@ pub fn read_a2m(path: &Path) -> HmmerResult<Vec<Msa>> {
 /// residues are inserts, and `.` insert-column placeholders are ignored.
 /// Rows may therefore have unequal raw lengths as long as they contain the
 /// same number of consensus columns.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_a2m_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -226,6 +273,12 @@ pub fn read_a2m_from_reader<R: Read>(
 }
 
 /// Read one PSIBLAST alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_psiblast(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -233,6 +286,12 @@ pub fn read_psiblast(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one PSIBLAST alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_psiblast_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -242,6 +301,12 @@ pub fn read_psiblast_from_reader<R: Read>(
 }
 
 /// Read one CLUSTAL/CLUSTAL-like alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_clustal(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -249,6 +314,12 @@ pub fn read_clustal(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one CLUSTAL/CLUSTAL-like alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_clustal_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -258,6 +329,12 @@ pub fn read_clustal_from_reader<R: Read>(
 }
 
 /// Read one SELEX alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_selex(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -265,6 +342,12 @@ pub fn read_selex(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one SELEX alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_selex_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -274,6 +357,12 @@ pub fn read_selex_from_reader<R: Read>(
 }
 
 /// Read one interleaved PHYLIP alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_phylip(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -281,6 +370,12 @@ pub fn read_phylip(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one interleaved PHYLIP alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_phylip_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -293,6 +388,12 @@ pub fn read_phylip_from_reader<R: Read>(
 }
 
 /// Read one sequential PHYLIP alignment from `path`.
+///
+/// Returns a one-element vector whose alignment name is derived from the
+/// file stem. Does not decompress gzip input. I/O failures, invalid UTF-8,
+/// input larger than 512 MiB, and malformed alignment data return errors.
+/// Rows are stored as aligned text; choose an alphabet and validate or
+/// digitize them separately with [`Msa::validate_digitizable`].
 pub fn read_phylips(path: &Path) -> HmmerResult<Vec<Msa>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     let mut reader = BufReader::new(file);
@@ -300,6 +401,12 @@ pub fn read_phylips(path: &Path) -> HmmerResult<Vec<Msa>> {
 }
 
 /// Read one sequential PHYLIP alignment from an open reader.
+///
+/// Reads the remaining stream to EOF and returns a one-element vector.
+/// `alignment_name` supplies the resulting MSA name. I/O failures, invalid
+/// UTF-8, input larger than 512 MiB, and malformed alignment data return
+/// errors. Output rows are text, not digital sequences; validate against
+/// an alphabet separately with [`Msa::validate_digitizable`].
 pub fn read_phylips_from_reader<R: Read>(
     reader: &mut R,
     alignment_name: String,
@@ -954,6 +1061,10 @@ fn alignment_name_from_path(path: &Path) -> String {
 /// by `//`) to `parse_stockholm_block`. Concatenated multi-MSA files are
 /// supported. Lightweight Rust port of the Stockholm subset of
 /// `esl_msafile_stockholm.c`.
+///
+/// Consumes the reader and returns alignments in block order. Empty input
+/// returns an empty vector. I/O and parse errors propagate. Residues remain
+/// text; alphabet validation and digital conversion are separate operations.
 pub fn read_stockholm_from_reader<R: Read>(reader: BufReader<R>) -> HmmerResult<Vec<Msa>> {
     Ok(read_stockholm_preserved_from_reader(reader)?
         .into_iter()
@@ -963,6 +1074,10 @@ pub fn read_stockholm_from_reader<R: Read>(reader: BufReader<R>) -> HmmerResult<
 
 /// Read all Stockholm-format alignments from an open reader, preserving body
 /// lines for writers that need to round-trip annotations.
+///
+/// Consumes the reader and returns alignments in block order. Empty input
+/// returns an empty vector. I/O and parse errors propagate. Residues remain
+/// text; alphabet validation and digital conversion are separate operations.
 pub fn read_stockholm_preserved_from_reader<R: Read>(
     mut reader: BufReader<R>,
 ) -> HmmerResult<Vec<StockholmMsa>> {
@@ -1628,6 +1743,11 @@ impl FullStockholm {
 
 /// Read every Stockholm alignment in `path` into the full-fidelity
 /// [`FullStockholm`] model (text mode).
+///
+/// Returns alignments in file order, with an empty vector when no alignment
+/// blocks are found. Paths are opened directly without gzip decompression.
+/// I/O failures and malformed alignment records return errors. Rows remain
+/// text; no biological alphabet is inferred or validated here.
 pub fn read_stockholm_full(path: &Path) -> HmmerResult<Vec<FullStockholm>> {
     let file = std::fs::File::open(path).map_err(HmmerError::Io)?;
     read_stockholm_full_from_reader(BufReader::new(file))
@@ -1638,6 +1758,10 @@ pub fn read_stockholm_full(path: &Path) -> HmmerResult<Vec<FullStockholm>> {
 /// Faithful text-mode port of the bucketing performed by the Easel Stockholm
 /// reader (`stockholm_parse_{gf,gs,gc,gr,sq,comment}`). One `FullStockholm` is
 /// returned per `# STOCKHOLM`/`//` record.
+///
+/// Consumes the reader and returns alignments in block order. Empty input
+/// returns an empty vector. I/O and parse errors propagate. Residues remain
+/// text; alphabet validation and digital conversion are separate operations.
 pub fn read_stockholm_full_from_reader<R: Read>(
     reader: BufReader<R>,
 ) -> HmmerResult<Vec<FullStockholm>> {
@@ -1865,6 +1989,11 @@ fn max_width<I: IntoIterator<Item = usize>>(lens: I) -> usize {
 /// alphabet (digital mode). If `abc` is `None`, sequences are written verbatim
 /// (text mode, line 1232). Annotation lines (`#=GR`/`#=GC`) are always text and
 /// never normalized, exactly as in C.
+///
+/// `cpl` is a positive number of alignment columns per output block; use
+/// 200 for normal Stockholm output. `msa` must have consistent row and
+/// annotation lengths. Writes to `out` without flushing it, and propagates
+/// I/O errors, which may leave partial output.
 pub fn write_stockholm_full(
     out: &mut dyn std::io::Write,
     msa: &FullStockholm,
@@ -2230,6 +2359,10 @@ pub struct WriteRow<'a> {
 /// Faithful port of Easel's text-mode `esl_msafile_afa_Write`: each record is a
 /// `>name [acc] [desc]` header followed by the aligned sequence wrapped at 60
 /// columns per line. Aligned text (including gap characters) is emitted verbatim.
+///
+/// `rows` must contain aligned text rows of equal length in columns.
+/// Writes to `out` without flushing it. I/O failures propagate and may
+/// leave partial output.
 pub fn write_afa(out: &mut dyn std::io::Write, rows: &[WriteRow<'_>]) -> std::io::Result<()> {
     for row in rows {
         write!(out, ">{}", row.name)?;
@@ -2260,6 +2393,14 @@ pub fn write_afa(out: &mut dyn std::io::Write, rows: &[WriteRow<'_>]) -> std::io
 /// ends with a consensus line: in text mode (where the alphabet is unknown),
 /// only `*` (a column with exactly one distinct alphabetic symbol) and ` `
 /// appear, matching `make_text_consensus_line`.
+///
+/// `rows` must contain aligned text rows of equal length in columns.
+/// Writes to `out` without flushing it. I/O failures propagate and may
+/// leave partial output. Supply ASCII alignment text; block writers may
+/// panic if row lengths or annotation widths are inconsistent.
+///
+/// `clustallike = true` writes an EASEL header using `easel_version`;
+/// `false` writes a CLUSTAL 2.1 header and ignores that version string.
 pub fn write_clustal(
     out: &mut dyn std::io::Write,
     rows: &[WriteRow<'_>],
@@ -2335,6 +2476,14 @@ fn text_consensus_line(rows: &[WriteRow<'_>], alen: usize) -> Vec<u8> {
 /// used as the reference, matching Easel). Within each column an alphanumeric
 /// symbol is uppercased in consensus columns and lowercased in insert columns;
 /// every non-residue character becomes `-`.
+///
+/// `rows` must contain aligned text rows of equal length in columns.
+/// Writes to `out` without flushing it. I/O failures propagate and may
+/// leave partial output. Supply ASCII alignment text; block writers may
+/// panic if row lengths or annotation widths are inconsistent.
+///
+/// If supplied, `rf` is a zero-based reference annotation with one byte per
+/// alignment column; it must cover the full alignment width.
 pub fn write_psiblast(
     out: &mut dyn std::io::Write,
     rows: &[WriteRow<'_>],
@@ -2394,6 +2543,14 @@ pub fn write_psiblast(
 /// left-justified to a common width (minimum 4, to accommodate `#=RF` etc.).
 /// Blocks after the first are separated by a blank line. An optional `rf`
 /// reference line is written as `#=RF` at the top of each block.
+///
+/// `rows` must contain aligned text rows of equal length in columns.
+/// Writes to `out` without flushing it. I/O failures propagate and may
+/// leave partial output. Supply ASCII alignment text; block writers may
+/// panic if row lengths or annotation widths are inconsistent.
+///
+/// If supplied, `rf` is a zero-based reference annotation with one byte per
+/// alignment column; it must cover the full alignment width.
 pub fn write_selex(
     out: &mut dyn std::io::Write,
     rows: &[WriteRow<'_>],
@@ -2433,6 +2590,11 @@ pub fn write_selex(
 /// of each sequence. Residues per line default to 60. Text symbols are rectified
 /// per `phylip_rectify_output_seq_text`: lowercase to uppercase, `.`/`_`/space to
 /// `-`, and `~` to `?`.
+///
+/// `rows` must contain aligned text rows of equal length in columns.
+/// Writes to `out` without flushing it. I/O failures propagate and may
+/// leave partial output. Supply ASCII alignment text; block writers may
+/// panic if row lengths or annotation widths are inconsistent.
 pub fn write_phylip(
     out: &mut dyn std::io::Write,
     rows: &[WriteRow<'_>],

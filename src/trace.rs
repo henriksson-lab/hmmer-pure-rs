@@ -59,6 +59,8 @@ impl Trace {
 
     /// Reinitialize the trace, retaining allocations for reuse.
     /// Port of `p7_trace_Reuse()`.
+    /// `m` and `l` metadata are retained; set them separately if reusing the
+    /// allocation for a different model or sequence.
     #[inline(always)]
     pub fn clear(&mut self) {
         self.st.clear();
@@ -73,6 +75,10 @@ impl Trace {
     /// Append one state (no PP) to a left-to-right-growing trace.
     /// Port of `p7_trace_Append()`. For emit-on-transition states (N/C/J), the
     /// first state in a run is recorded with i=0; subsequent ones carry `i`.
+    /// `k` is a 1-based model-node index for M/D/I states, and `i` a 1-based
+    /// sequence coordinate for emitting states. Unused coordinates are stored
+    /// as zero according to the state type. This does not validate the path
+    /// or update the trace's model/sequence length metadata.
     #[inline(always)]
     pub fn append(&mut self, state: State, k: usize, i: usize) {
         self.append_internal(state, k, i, None);
@@ -81,6 +87,8 @@ impl Trace {
     /// Append one state with an associated posterior probability for emitted
     /// residues. Port of `p7_trace_AppendWithPP()`; lazily allocates `self.pp`.
     /// `pp` is silently ignored for nonemitting states (recorded as 0.0).
+    /// Coordinates follow [`Self::append`]. `pp` is a linear posterior
+    /// probability in `[0, 1]`, not a log probability or a percentage.
     #[inline(always)]
     pub fn append_with_pp(&mut self, state: State, k: usize, i: usize, pp: f32) {
         self.append_internal(state, k, i, Some(pp));
@@ -140,6 +148,8 @@ impl Trace {
     /// Return the (hmmfrom, hmmto, sqfrom, sqto) bounds of the first domain
     /// (states between the first B and the next E). Port of
     /// `p7_trace_GetDomainCoords()` restricted to the first domain.
+    /// Bounds are 1-based and inclusive, anchored on match states. Returns
+    /// `None` if no match state is found before the first domain end.
     pub fn domain_coords(&self) -> Option<(usize, usize, usize, usize)> {
         let mut hmmfrom = 0;
         let mut hmmto = 0;
@@ -216,6 +226,11 @@ fn esl_fcompare_old(a: f32, b: f32, tol: f32) -> bool {
 /// the full `prev + tsc + emission` sum in exactly the order Viterbi computed
 /// them (B,M,I,D for M-states), per the J1/121 note in the C source, so the
 /// near-equality tie-break matches C cell-for-cell.
+/// `l` is the target residue count, excluding sentinels; `dsq[1..=l]`
+/// must contain codes in the profile alphabet. `gx` must be the completed
+/// generic Viterbi matrix for this exact sequence and configured profile,
+/// with room for `l` residues and `gm.m` model nodes. A mismatched or
+/// undersized matrix/sequence can panic or yield an invalid traceback.
 pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
     let m = gm.m;
     let mut tr = Trace::new();
@@ -448,8 +463,13 @@ pub fn g_trace(dsq: &[Dsq], l: usize, gm: &Profile, gx: &Gmx) -> Trace {
 }
 
 /// Build the printable alignment-display strings (model, mline, aseq, ppline,
-/// rfline) for the first domain in `tr`. Equivalent to a minimal
+/// rfline) for a single-domain trace `tr`. Equivalent to a minimal
 /// `p7_alidisplay_Create()` call. Use `alignment_display_with_pp` for real PPs.
+/// Supply a trace for a single domain (the display spans the first through
+/// last match state), with 1-based sequence positions into `dsq` and model
+/// positions into `hmm`. `abc` must match both. Returns `None` if the trace
+/// contains no match states. Without posterior data the PP line uses
+/// placeholder characters.
 pub fn alignment_display(
     tr: &Trace,
     dsq: &[Dsq],
@@ -461,6 +481,10 @@ pub fn alignment_display(
 
 /// Like `alignment_display`, but uses the supplied posterior-probability
 /// matrix to emit a real ppline. Port of `p7_alidisplay_Create()` with PPs.
+/// Other arguments and empty-trace handling follow [`alignment_display`].
+/// `pp`, when present, must contain posterior probabilities on the linear
+/// 0-to-1 scale for this sequence/model, indexed by the same 1-based
+/// sequence and model coordinates as `tr`. `None` uses placeholders.
 pub fn alignment_display_with_pp(
     tr: &Trace,
     dsq: &[Dsq],
@@ -476,6 +500,10 @@ pub fn alignment_display_with_pp(
 /// reparameterized: C's p7_alidisplay_Create compares `FGetEmission > 1.0`
 /// (i.e. emission / reparameterized_bg > 1), so Rust's mline `+` threshold
 /// needs the same reparameterized bg to be byte-identical.
+/// Sequence, trace, and posterior-matrix contracts follow
+/// [`alignment_display_with_pp`]. `bg_override` contains canonical residue
+/// frequencies in alphabet order; `None` uses default amino frequencies
+/// or uniform nucleotide frequencies.
 pub fn alignment_display_with_pp_bg(
     tr: &Trace,
     dsq: &[Dsq],
@@ -489,6 +517,12 @@ pub fn alignment_display_with_pp_bg(
 
 /// Build an alignment display, optionally using optimized-profile emission
 /// odds for C-style match-line `+` decisions.
+/// Arguments follow [`alignment_display_with_pp_bg`]. For protein models,
+/// `emission_odds` is called with `(model_node, residue_code)`, where the
+/// node is 1-based and the residue code is zero-based. It returns a linear
+/// emission/background ratio; `None` from the callback falls back to the
+/// HMM probability comparison. Nucleotide models use the latter directly.
+/// Returns `None` when the trace has no match states.
 pub fn alignment_display_with_pp_emission_odds(
     tr: &Trace,
     dsq: &[Dsq],
@@ -680,6 +714,10 @@ pub fn alignment_display_with_pp_emission_odds(
 
 /// Compute the same coordinate span as `alignment_display_with_pp` without
 /// constructing printable alignment strings.
+/// Returns `(hmmfrom, hmmto, sqfrom, sqto)` as 1-based inclusive endpoints,
+/// or `None` if there are no match states. Use a single-domain trace;
+/// leading/trailing insertions and deletions outside the outer match
+/// states are excluded.
 pub fn alignment_coords(tr: &Trace) -> Option<(usize, usize, usize, usize)> {
     // M-only anchoring, matching C's p7_alidisplay_Create (z1 = first M,
     // z2 = last M). Leading/trailing D and I are excluded.

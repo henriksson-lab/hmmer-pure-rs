@@ -67,6 +67,9 @@ impl Bg {
     /// The bias-filter HMM is not configured here — call `set_filter()`
     /// after this and before using the filter score.
     /// Counterpart to C's `p7_bg_Create()`.
+    ///
+    /// The initial null-model mean length is 350 residues. Call [`Self::set_length`]
+    /// for the target length before scoring; profile length configuration is separate.
     pub fn new(abc: &Alphabet) -> Self {
         let k = abc.k;
         let mut f = vec![1.0 / k as f32; k]; // uniform default
@@ -103,6 +106,9 @@ impl Bg {
     /// Counterpart to C's `p7_bg_CreateUniform()`. This is primarily used by
     /// experimental calibration/simulation commands that deliberately avoid
     /// HMMER's default amino-acid background composition.
+    ///
+    /// Uses `1 / abc.k` for every canonical residue. As with [`Self::new`],
+    /// configure the target length and bias filter separately before scoring.
     pub fn new_uniform(abc: &Alphabet) -> Self {
         let mut bg = Self::new(abc);
         let p = 1.0 / abc.k as f32;
@@ -114,6 +120,14 @@ impl Bg {
 
     /// Read replacement residue background frequencies from a C HMMER
     /// `p7_bg_Read()` style file.
+    ///
+    /// `abc` must match this background model. The file starts with `amino`,
+    /// `DNA`, or `RNA`, followed by one `residue probability` line per canonical
+    /// residue; blank lines and `#` comments are ignored. Frequencies must sum
+    /// to 1 within 0.001 and are normalized after parsing. Files larger than
+    /// 1 MiB, malformed records, and alphabet mismatches return format errors;
+    /// opening/reading failures return errors. Frequencies are replaced only on
+    /// success. Reconfigure the bias filter after loading custom frequencies.
     pub fn read_file<P: AsRef<Path>>(&mut self, abc: &Alphabet, path: P) -> HmmerResult<()> {
         let path = path.as_ref();
         let mut file = std::fs::File::open(path).map_err(|e| {
@@ -253,6 +267,11 @@ impl Bg {
 
     /// Set the geometric null-model length distribution to a mean of `l` residues.
     /// Counterpart to C's `p7_bg_SetLength()`.
+    ///
+    /// `l` normally equals the target's residue count, excluding sentinels.
+    /// Updates the null1 and background-state bias-filter transitions. This does
+    /// not configure a search profile; use [`crate::profile::reconfig_length`]
+    /// for that profile as well.
     pub fn set_length(&mut self, l: usize) {
         self.p1 = l as f32 / (l as f32 + 1.0);
         self.fhmm_t[0][0] = self.p1;
@@ -264,6 +283,10 @@ impl Bg {
     /// Because the null1 residue composition matches the background used in
     /// profile scoring, only the null model transitions contribute:
     /// `L*log(p1) + log(1-p1)`. Counterpart to C's `p7_bg_NullOne()`.
+    ///
+    /// `l` is the number of residues scored, excluding sentinels. The return
+    /// value is in nats, not bits. Call [`Self::set_length`] first to select
+    /// the expected length distribution; this method only evaluates it.
     pub fn null_one(&self, l: usize) -> f32 {
         (l as f64 * c_log_f64(self.p1 as f64) + c_log_f64(1.0_f64 - self.p1 as f64)) as f32
     }
@@ -275,6 +298,11 @@ impl Bg {
     /// (`L1 = M/8`). The expected total filter length defaults to ~400; a later
     /// `set_length()` call adjusts it to the target sequence length.
     /// Counterpart to C's `p7_bg_SetFilter()`.
+    ///
+    /// `compo` must provide at least `self.k` canonical residue probabilities
+    /// in alphabet order; shorter slices may panic when ambiguity emissions
+    /// are computed. Call [`Self::set_length`] after this method to select the
+    /// target length before calling [`Self::filter_score`].
     pub fn set_filter(&mut self, m: usize, compo: &[f32]) {
         let l1 = m as f32 / 8.0; // expected length in biased state
 
@@ -337,6 +365,12 @@ impl Bg {
     /// Scores the two-state filter HMM against `dsq[1..=l]` using rescaled
     /// forward DP, then adds the geometric length term. Returns log-likelihood
     /// in nats. Counterpart to C's `p7_bg_FilterScore()`.
+    ///
+    /// `dsq` must use this background's alphabet and contain residues at indices
+    /// `1..=l`; the leading sentinel is ignored. `l` is a residue count, not a
+    /// buffer length. Configure [`Self::set_filter`] and [`Self::set_length`]
+    /// first. The result includes emission odds relative to the background and
+    /// the length term, so it is intended for the pipeline's bias correction.
     pub fn filter_score(&self, dsq: &[Dsq], l: usize) -> f32 {
         if l == 0 {
             let term = self.fhmm_pi[0] * self.fhmm_t[0][2] + self.fhmm_pi[1] * self.fhmm_t[1][2];

@@ -110,6 +110,10 @@ impl ScoreMatrix {
     /// matrix to the built-in named `name`, which must exist for the matrix's
     /// alphabet. Amino matrices are PAM30/70/120/240 and BLOSUM45/50/62/80/90;
     /// the only nucleotide built-in is DNA1.
+    ///
+    /// `abc` must match the alphabet used to create this matrix. Names are
+    /// case-sensitive; an unavailable or incompatible name returns
+    /// `ScoreMatrixError::NotFound`. Existing scores are overwritten on success.
     pub fn set(&mut self, name: &str, abc: &Alphabet) -> Result<(), ScoreMatrixError> {
         let (table, outorder) = match abc.abc_type {
             AlphabetType::Amino => {
@@ -160,7 +164,12 @@ impl ScoreMatrix {
     ///
     /// Comment character is `#` (esl_scorematrix.c:1060), blank lines are
     /// skipped — that is `ESL_FILEPARSER` behaviour, reproduced by
-    /// [`matrix_line_tokens`].
+    /// `matrix_line_tokens`.
+    ///
+    /// `abc` determines the permitted residue labels and digital-code order.
+    /// `filename` supplies metadata only; this method parses `text` and does
+    /// not open a file. Malformed labels, scores, or matrix dimensions return
+    /// `ScoreMatrixError::Invalid`.
     pub fn read(
         text: &str,
         filename: Option<&str>,
@@ -347,6 +356,12 @@ impl ScoreMatrix {
     /// below 50) until `f(lambda) > 0`, then Newton/Raphson. Returns
     /// `(lambda, P)` where `P` is the `Kp x Kp` joint probability matrix, with
     /// degenerate entries filled in as marginals by [`set_degenerate_probs`].
+    ///
+    /// `fi` and `fj` are normalized canonical background frequencies for
+    /// the row and column alphabets, each with at least `self.k` entries.
+    /// `abc` must match this matrix. Returns an error if the positive scale
+    /// parameter cannot be bracketed or the root finder fails to converge.
+    /// `lambda * score` is a natural-log odds value.
     pub fn probify_given_bg(
         &self,
         fi: &[f64],

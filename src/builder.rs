@@ -53,6 +53,10 @@ const PB_RNGSEED: u64 = 42;
 /// (`esl_rand64_Deal`), marks fragments by the same span rule, and determines
 /// consensus columns from the sample (or rejects when too many fragments are
 /// seen, falling back to `consensus_by_all`).
+/// Returns one weight per MSA row in input order. `abc` must match the
+/// alignment alphabet. Set `ignore_rf` to `false` to use existing RF
+/// reference annotation for consensus columns, or `true` to infer columns
+/// from the alignment instead.
 pub fn pb_weights(msa: &Msa, abc: &Alphabet, ignore_rf: bool) -> Vec<f64> {
     let nseq = msa.nseq;
     let alen = msa.alen;
@@ -417,12 +421,17 @@ fn normalize_weights_to_nseq(weights: &mut [f64], nseq: usize) {
 }
 
 /// Use MSA-supplied sequence weights exactly as parsed, or 1.0 defaults.
+/// The returned vector follows MSA row order and is not renormalized.
+/// Supplied weights must have one entry per sequence.
 pub fn given_weights(msa: &Msa) -> Vec<f64> {
     msa.weights.clone().unwrap_or_else(|| vec![1.0; msa.nseq])
 }
 
 /// BLOSUM relative weights: single-linkage cluster at pairwise identity
 /// `max_id`, then divide one unit of weight over each cluster.
+/// `max_id` is an identity fraction in `[0, 1]`, not a percentage.
+/// `abc` must match the MSA alphabet. Pairwise identity counts identical
+/// residue-code matches relative to the shorter sequence's residue count.
 pub fn blosum_weights(msa: &Msa, abc: &Alphabet, max_id: f64) -> Vec<f64> {
     let nseq = msa.nseq;
     if nseq <= 1 {
@@ -462,6 +471,9 @@ pub fn blosum_weights(msa: &Msa, abc: &Alphabet, max_id: f64) -> Vec<f64> {
 ///
 /// This is the effective-sequence-number calculation used by hmmbuild
 /// `--eclust`: any pair with identity >= cutoff links their clusters.
+/// `max_id` is an identity fraction in `[0, 1]`, not a percentage.
+/// `abc` must match the MSA alphabet. Pairwise identity counts identical
+/// residue-code matches relative to the shorter sequence's residue count.
 pub fn single_linkage_cluster_count(msa: &Msa, abc: &Alphabet, max_id: f64) -> usize {
     let nseq = msa.nseq;
     if nseq <= 1 {
@@ -488,6 +500,9 @@ pub fn single_linkage_cluster_count(msa: &Msa, abc: &Alphabet, max_id: f64) -> u
 
 /// Gerstein/Sonnhammer/Chothia tree weights, using UPGMA over fractional
 /// pairwise differences, normalized to sum to `nseq`.
+/// The returned vector follows MSA row order; `abc` must match the alignment
+/// alphabet. Empty and single-sequence alignments return zero and one
+/// weights, respectively.
 pub fn gsc_weights(msa: &Msa, abc: &Alphabet) -> Vec<f64> {
     let nseq = msa.nseq;
     if nseq <= 1 {
@@ -745,6 +760,13 @@ pub enum RelativeWeighting {
 /// insert columns. This is the same fragment-marking, weighting, and `--hand`
 /// logic used by `build_hmm_from_msa_with_prior()`, exposed so `hmmbuild -O`
 /// can write the post-processed MSA that corresponds to the built model.
+/// `abc` must match the alignment alphabet. `symfrac` is the minimum
+/// weighted residue fraction for selecting a match column in automatic
+/// architecture mode (a fraction from 0 to 1). `fragthresh` is the residue
+/// length cutoff as a fraction of the alignment length for identifying
+/// fragments. With `hand_arch`, RF reference annotation selects match
+/// columns when present; otherwise automatic selection is used.
+/// `weighting_strategy` determines relative sequence contributions.
 pub fn model_mask_from_msa(
     msa: &Msa,
     abc: &Alphabet,
@@ -767,6 +789,9 @@ pub fn model_mask_from_msa(
 
 /// Return aligned text rows with fragment flanks marked as missing (`~`),
 /// matching the `esl_msa_MarkFragments_old()` step in the C builder flow.
+/// `fragthresh` is the sequence residue-length cutoff as a fraction of
+/// `msa.alen`. Returns one zero-based text row per input row, preserving
+/// alignment width. The input MSA is unchanged and `abc` must match it.
 pub fn fragment_marked_msa_rows(msa: &Msa, abc: &Alphabet, fragthresh: f32) -> Vec<Vec<u8>> {
     let mut ax = msa.digitize(abc);
     mark_fragments_old(&mut ax, abc, msa.alen, fragthresh);
@@ -785,6 +810,11 @@ pub fn fragment_marked_msa_rows(msa: &Msa, abc: &Alphabet, fragthresh: f32) -> V
 /// Reconstruct the processed text MSA that HMMER's builder saves with
 /// `hmmbuild -O`: mark fragments, build doctored faux traces from the assigned
 /// match columns, trace-align them, annotate RF, and rejustify insertions.
+/// `model_mask` must have one byte per original alignment column, with
+/// `x` marking match columns (as returned by [`model_mask_from_msa`]).
+/// `fragthresh` uses the same units as [`fragment_marked_msa_rows`]. Returns
+/// `(rf_annotation, aligned_rows)` with zero-based text columns; processed
+/// width can differ from the original MSA.
 pub fn tracealigned_post_msa_rows(
     msa: &Msa,
     abc: &Alphabet,
@@ -976,6 +1006,18 @@ fn tracealign_rf(m: usize, alen: usize, matuse: &[bool], matmap: &[usize]) -> Ve
 /// effective Neff estimation -> Dirichlet priors ->
 /// composition/consensus annotation -> E-value calibration.
 /// Counterpart to C's `p7_Builder()` (with `build.c`'s `build_model()`).
+/// `abc` must match the alignment alphabet. `symfrac` is the minimum
+/// weighted residue fraction for selecting a match column in automatic
+/// architecture mode (a fraction from 0 to 1). `fragthresh` is the residue
+/// length cutoff as a fraction of the alignment length for identifying
+/// fragments. With `hand_arch`, RF reference annotation selects match
+/// columns when present; otherwise automatic selection is used.
+/// `weighting_strategy` determines relative sequence contributions.
+/// `bg` must use the same alphabet. `effn_strategy` determines effective
+/// sequence count; `seed` selects the calibration random stream. Returns
+/// an annotated model with default priors and calibration settings, or an
+/// error if calibration fails. If no match columns are selected, returns
+/// a trivial one-node HMM without calibration.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa(
     msa: &Msa,
@@ -1003,6 +1045,12 @@ pub fn build_hmm_from_msa(
     )
 }
 
+/// Build an HMM using explicit prior and calibration settings.
+///
+/// Alignment, alphabet, architecture, weighting, seed, and error semantics
+/// are those of [`build_hmm_from_msa`]. `prior_strategy` selects how weighted
+/// counts become probabilities; `calibration_config` controls simulation
+/// lengths in residues, sample counts, and Forward tail fraction.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa_with_prior(
     msa: &Msa,
@@ -1033,6 +1081,12 @@ pub fn build_hmm_from_msa_with_prior(
     )
 }
 
+/// Build an HMM with explicit priors, calibration, and an optional insertion cap.
+///
+/// Arguments and errors follow [`build_hmm_from_msa_with_prior`].
+/// `max_insert_len` is a residue count: `Some(limit)` caps insert
+/// self-transition counts at `limit` times the insert-entry count before
+/// parameter estimation. `None` leaves insertion counts unrestricted.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hmm_from_msa_with_prior_and_max_insert(
     msa: &Msa,
@@ -1221,6 +1275,11 @@ pub fn build_hmm_from_msa_with_prior_and_max_insert(
     Ok(hmm)
 }
 
+/// Copy optional Stockholm GA, TC, and NC bit-score cutoffs into `hmm`.
+///
+/// Each supplied pair is `(sequence_cutoff, domain_cutoff)` in bits.
+/// Corresponding HMM annotation flags are set; absent cutoff families
+/// leave existing values and flags unchanged.
 pub fn copy_stockholm_cutoffs_to_hmm(cutoffs: msa::StockholmCutoffs, hmm: &mut Hmm) {
     if let Some([seq_cutoff, dom_cutoff]) = cutoffs.ga {
         hmm.cutoff[P7_GA1] = seq_cutoff;
@@ -1254,6 +1313,10 @@ fn clamp_insert_self_transition_counts(hmm: &mut Hmm, max_insert_len: usize) {
 /// This is the Rust counterpart of C `p7_Builder_MaxLength()`: it accumulates
 /// the emitted-length distribution for the core model until the remaining tail
 /// mass is below `emit_thresh`, bounded by `min(20*M, 100000)` and at least `M`.
+/// `hmm` must contain transition probabilities. `emit_thresh` is a tail
+/// probability (typically `1e-7`), not a sequence length. Returns a residue
+/// count suitable for a nucleotide search window; the bounded computation
+/// may stop before the requested tail probability is reached.
 pub fn max_length_from_beta(hmm: &Hmm, emit_thresh: f64) -> i32 {
     let model_len = hmm.m;
     if model_len <= 1 {
@@ -1339,6 +1402,9 @@ pub fn max_length_from_beta(hmm: &Hmm, emit_thresh: f64) -> i32 {
     max_length
 }
 
+/// `emit_thresh` is the permitted emitted-length tail probability.
+/// Stores the residue count from [`max_length_from_beta`] in
+/// `hmm.max_length`.
 pub fn set_max_length_from_beta(hmm: &mut Hmm, emit_thresh: f64) {
     hmm.max_length = max_length_from_beta(hmm, emit_thresh);
 }
@@ -1785,6 +1851,10 @@ impl Builder {
     /// assigns them right after (nhmmer.c:882-883, hmmbuild.c:604-605). This
     /// port initializes them to the values those callers use by default rather
     /// than leaving them indeterminate.
+    /// `abc_type` selects protein, DNA, or RNA defaults. The score system is
+    /// initially unset: call [`Self::load_score_system`],
+    /// [`Self::set_score_system`], or [`Self::set_score_system_from_matrix`]
+    /// before building a single-sequence HMM.
     pub fn new(abc_type: AlphabetType) -> Self {
         Builder {
             abc_type,
@@ -1810,6 +1880,8 @@ impl Builder {
     }
 
     /// `bld->EmL` .. `bld->Eft` (p7_builder.c:113-119).
+    /// Set simulation lengths (residues), sample counts, and Forward tail
+    /// fraction for subsequent builds. Returns the updated builder.
     pub fn with_calibration(mut self, calibration: CalibrationConfig) -> Self {
         self.calibration = calibration;
         self
@@ -1817,6 +1889,11 @@ impl Builder {
 
     /// `bld->w_len` / `bld->w_beta`, as nhmmer.c:882-883 and hmmbuild.c:604-605
     /// assign them.
+    /// Configure nucleotide model window lengths. Positive `w_len` sets an
+    /// explicit residue count. Otherwise `w_beta` selects the emitted-length
+    /// tail probability used by [`max_length_from_beta`]; zero selects `4*M`.
+    /// `None` uses `-1` for length and [`DEFAULT_WINDOW_BETA`] for probability.
+    /// These settings do not affect protein models.
     pub fn with_window(mut self, w_len: Option<i32>, w_beta: Option<f64>) -> Self {
         self.w_len = w_len.unwrap_or(-1);
         self.w_beta = w_beta.unwrap_or(DEFAULT_WINDOW_BETA);
@@ -1825,6 +1902,8 @@ impl Builder {
 
     /// The gap defaults for this builder's alphabet: amino 0.02/0.4, nucleotide
     /// 0.03125/0.75 (hmmbuild.c:575-582).
+    /// The tuple is `(gap_open_probability, gap_extension_probability)`;
+    /// these values are probabilities, not bit-score penalties.
     pub fn default_gap_probs(abc_type: AlphabetType) -> (f64, f64) {
         match abc_type {
             AlphabetType::Amino => (POPEN_AMINO, PEXTEND_AMINO),
@@ -1837,6 +1916,11 @@ impl Builder {
     /// Initializes the builder to parameterize single-sequence queries using
     /// the built-in score matrix named `matrix`, converting its scores to
     /// conditional probabilities against the background frequencies in `bg`.
+    /// `abc` and `bg` must use the builder's alphabet. `popen` and `pextend`
+    /// are gap transition probabilities, not scores: use `0 <= popen <= 0.5`
+    /// and `0 <= pextend < 1` for valid transitions. Returns an error if the
+    /// matrix cannot be loaded or converted to probabilities against `bg`.
+    /// On success the builder retains the score system for subsequent builds.
     pub fn load_score_system(
         &mut self,
         matrix: &str,
@@ -1865,6 +1949,11 @@ impl Builder {
     /// Like [`Self::load_score_system`], but reads the matrix from `mxfile`. A
     /// `None` `mxfile` means "use the alphabet's default built-in": BLOSUM62
     /// for amino, DNA1 otherwise (p7_builder.c:296-301).
+    /// `abc` and `bg` must use the builder's alphabet. `popen` and `pextend`
+    /// are gap transition probabilities, not scores: use `0 <= popen <= 0.5`
+    /// and `0 <= pextend < 1` for valid transitions. Returns an error if the
+    /// matrix cannot be loaded or converted to probabilities against `bg`.
+    /// On success the builder retains the score system for subsequent builds.
     pub fn set_score_system(
         &mut self,
         mxfile: Option<&std::path::Path>,
@@ -1902,6 +1991,11 @@ impl Builder {
     /// Install an already-constructed score matrix. This is the shared tail of
     /// `p7_builder_LoadScoreSystem()` and `p7_builder_SetScoreSystem()`,
     /// exposed for callers that obtained an `ESL_SCOREMATRIX` some other way.
+    /// `abc` and `bg` must use the builder's alphabet. `popen` and `pextend`
+    /// are gap transition probabilities, not scores: use `0 <= popen <= 0.5`
+    /// and `0 <= pextend < 1` for valid transitions. Returns an error if the
+    /// matrix cannot be loaded or converted to probabilities against `bg`.
+    /// On success the builder retains the score system for subsequent builds.
     pub fn set_score_system_from_matrix(
         &mut self,
         s: ScoreMatrix,
@@ -1962,6 +2056,11 @@ impl Builder {
     ///    (p7_builder.c:1010). This port's callers build the profile and
     ///    optimized profile themselves from the returned HMM, via
     ///    `profile_config()` / `OProfile::convert()`.
+    /// `name` becomes the model name. `n` is the number of query residues,
+    /// with codes in `dsq[1..=n]` from `abc` and digital sentinels outside
+    /// that range. `abc` and `bg` must match the builder's alphabet.
+    /// Returns an annotated, E-value-calibrated HMM, or an error if no score
+    /// system is installed or calibration fails. An undersized `dsq` can panic.
     pub fn single_builder(
         &self,
         name: &str,

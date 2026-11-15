@@ -1,9 +1,10 @@
-# hmmer-pure-rs 0.8.1
+# hmmer-pure-rs 0.9.0
 
 A Rust port of [HMMER 3.4](http://hmmer.org/) for biological sequence analysis using profile hidden Markov models (profile HMMs). Searches sequence databases for homologous sequences.
 
 Original-code snapshot used for translation/parity work and benchmark baselines: vendored upstream HMMER from `https://github.com/EddyRivasLab/hmmer.git`, commit `9acd8b6758a0` (`infernal-1.1.5-dirty`).
 
+* 2026-11-15 (0.9.0): Added checked constructors, reusable batch searches and streaming sessions, with expanded public API documentation. Existing public APIs remain available.
 * 2026-11-14: Apple SIMD optimizations (thanks Sean!)
 * 2026-08-01: Fixed a stray use of libc log(). inclusion error. Added CI tests. Updated benchmarks
 * 2026-06-01: Stable state, speed on parity or better. **if you find cases where ouput deviates from original, please post an issue**
@@ -260,7 +261,7 @@ input remains unsupported.
 
 ### hmmsearch flags
 
-```
+```text
 Output:       -o, --tblout, --domtblout, --pfamtblout, -A, --noali, --acc, --notextw, --textw
 Thresholds:   -E, -T, --domE, --domT, --incE, --incT, --incdomE, --incdomT
 Cutoffs:      --cut_ga, --cut_nc, --cut_tc
@@ -270,48 +271,91 @@ Expert:       --nonull2, -Z, --domZ, --seed, --tformat fasta, --cpu
 
 ## Library Usage
 
-```rust
-use hmmer_pure_rs::{Alphabet, Bg, Pipeline, Profile, OProfile, TopHits};
-use hmmer_pure_rs::hmmfile;
-use hmmer_pure_rs::profile::{profile_config, reconfig_length, P7_LOCAL};
-use hmmer_pure_rs::sequence::Sequence;
+The convenience API handles alphabet/background setup, scoring profiles, target
+lengths, and final E-value thresholds. `Searcher` borrows a calibrated HMM and
+reuses scoring buffers across independent searches. It uses local multihit
+alignment: each domain may match part of the model, and a target may contain
+multiple domains. It searches complete sequences; use the existing low-level
+APIs for strand-aware genome scanning or other alignment modes.
+
+### Search sequences in memory
+
+```rust,no_run
+use hmmer_pure_rs::{hmmfile, Searcher, Sequence};
 use std::path::Path;
 
-// Load an HMM
-let hmms = hmmfile::read_hmm_file(Path::new("query.hmm")).unwrap();
-let hmm = &hmms[0];
+fn main() -> hmmer_pure_rs::errors::HmmerResult<()> {
+    let hmm = hmmfile::read_first_hmm_file_auto(Path::new("query.hmm"))?;
+    let mut searcher = Searcher::new(&hmm)?;
+    let target = Sequence::from_text(
+        "my_seq",
+        b"ACDEFGHIKLMNPQRSTVWY",
+        searcher.alphabet(),
+    )?;
 
-// Set up alphabet, background model, and scoring profile
-let abc = Alphabet::new(hmm.abc_type);
-let bg = Bg::new(&abc);
-let mut gm = Profile::new(hmm.m, &abc);
-profile_config(hmm, &bg, &mut gm, 400, P7_LOCAL);
-let om = OProfile::convert(&gm);
-
-// Create pipeline and hits collector
-hmmer::logsum::p7_flogsuminit();
-let mut pli = Pipeline::new();
-pli.new_model(&gm);
-let mut th = TopHits::new();
-
-// Search a sequence programmatically (no file I/O needed)
-let dsq = abc.digitize(b"ACDEFGHIKLMNPQRSTVWY");
-let sq = Sequence {
-    name: "my_seq".into(),
-    acc: String::new(),
-    desc: String::new(),
-    dsq,
-    n: 20,
-    l: 20,
-};
-pli.run(&gm, &om, &bg, &sq, &mut th);
-
-// Access results
-th.sort_by_sortkey();
-for hit in &th.hits {
-    println!("{}: score={:.1} bits", hit.name, hit.score);
+    let results = searcher.search([&target])?;
+    for hit in results.reported_hits() {
+        println!(
+            "{}: {:.1} bits, E={:.2e}",
+            hit.name, hit.score, results.sequence_evalue(hit),
+        );
+    }
+    Ok(())
 }
 ```
+
+`Sequence::from_text` validates unaligned residue text, adds digital sentinels,
+and calculates lengths. Digitize targets using `searcher.alphabet()`; digital
+sequence codes do not retain the alphabet that produced them. Repeating
+`searcher.search(...)` starts fresh results and counters while keeping scoring
+buffers allocated. Uncalibrated models return an error rather than being
+calibrated implicitly.
+
+### Stream a sequence database
+
+```rust,no_run
+use hmmer_pure_rs::{hmmfile, sequence::open_seq_file, Searcher, Sequence};
+use std::path::Path;
+
+fn main() -> hmmer_pure_rs::errors::HmmerResult<()> {
+    let hmm = hmmfile::read_first_hmm_file_auto(Path::new("query.hmm"))?;
+    let mut searcher = Searcher::new(&hmm)?;
+    let mut targets = open_seq_file(Path::new("targets.fasta"), searcher.alphabet())?;
+    let mut target = Sequence::new();
+    let mut session = searcher.begin_search();
+
+    while targets.read(&mut target)? {
+        session.add(&target)?;
+        target.reuse();
+    }
+    let results = session.finish();
+
+    for hit in results.included_hits() {
+        println!("{}: E={:.2e}", hit.name, results.sequence_evalue(hit));
+    }
+    println!("Searched {} targets", results.stats().targets);
+    Ok(())
+}
+```
+
+`add()` scores each target immediately, so the input buffer can be reused.
+`finish()` applies final thresholds using the complete database size and the
+number of reported sequences for conditional domain E-values. It returns sorted
+results and releases the searcher for another session. Dropping an unfinished
+session discards its partial results.
+
+Use `Searcher::with_options(&hmm, SearchOptions { ... })` to set reporting and
+inclusion E-values, explicit database sizes for subset searches, or maximum
+sensitivity. Defaults match the existing pipeline. `SearchResults` exposes
+reported/included hit iterators, conditional and independent domain E-values,
+search statistics, and the underlying `TopHits` collection.
+
+For custom low-level scoring, `Profile::from_hmm(&hmm, &bg, target_length, mode)`
+allocates and configures a checked profile. `target_length` counts residues;
+`SearchMode::{LocalMultihit, GlocalMultihit, LocalUnihit, GlocalUnihit}` supplies
+named alternatives to integer modes. The original `Profile::new`,
+`profile_config`, `Pipeline::run`, and `P7_*` constants remain available with
+their existing signatures.
 
 ## Testing
 

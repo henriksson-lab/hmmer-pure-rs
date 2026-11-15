@@ -155,6 +155,11 @@ pub struct SsvScores {
 }
 
 impl SsvScores {
+    ///
+    /// Allocate a zero-filled match score table for `m` model nodes and `kp`
+    /// digital alphabet codes. `m` must be nonnegative; `kp` includes ambiguity
+    /// and special codes. Boundary node 0 is allocated automatically. Stored
+    /// scores are in bits, not nats.
     pub fn new(m: i32, kp: usize) -> Self {
         let len = ((m as usize) + 1) * kp;
         Self {
@@ -164,11 +169,19 @@ impl SsvScores {
         }
     }
 
+    ///
+    /// Read a match log-odds score in bits at model node `k` and residue code `x`.
+    /// Use `1..=self.m` for model nodes (`0` is boundary storage) and
+    /// `0..self.kp` for codes. Invalid coordinates may panic.
     #[inline]
     pub fn get(&self, k: i32, x: usize) -> f32 {
         self.scores[(k as usize) * self.kp + x]
     }
 
+    ///
+    /// Store match log-odds score `v` in bits at model node `k` and residue code
+    /// `x`. Use nodes `1..=self.m` and codes `0..self.kp`; node 0 is boundary
+    /// storage. Coordinates must fit the allocated table.
     #[inline]
     pub fn set(&mut self, k: i32, x: usize, v: f32) {
         self.scores[(k as usize) * self.kp + x] = v;

@@ -55,6 +55,9 @@ const fn build_packed_byte_lt_counts() -> [[u8; 256]; 4] {
     table
 }
 
+/// Shared, read-only file bytes used by mapped FM-index components.
+///
+/// Keep the underlying file unchanged while any index holds this mapping.
 pub struct MmapBytes {
     storage: MmapStorage,
 }
@@ -65,6 +68,10 @@ enum MmapStorage {
 }
 
 impl MmapBytes {
+    /// Map `path` read-only, rejecting files larger than `max_len` bytes.
+    ///
+    /// Returns shared ownership of the mapping; empty files expose an empty slice.
+    /// Returns a descriptive error on open, metadata, size conversion, or mapping failure.
     pub fn open(path: &Path, max_len: u64) -> Result<Arc<Self>, String> {
         let file = File::open(path).map_err(|e| {
             format!(
@@ -109,6 +116,7 @@ impl MmapBytes {
         }
     }
 
+    /// Borrow all mapped file bytes for the lifetime of this mapping.
     pub fn as_slice(&self) -> &[u8] {
         match &self.storage {
             MmapStorage::Mmap(mmap) => mmap,
@@ -479,27 +487,34 @@ pub struct FmIndex {
     occ_rank: OccRank,
 }
 
+/// Half-open range `[lo, hi)` of zero-based suffix-array/BWT rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FmInterval {
+    /// First included row.
     pub lo: usize,
+    /// First excluded row.
     pub hi: usize,
 }
 
 impl FmInterval {
+    /// Number of suffix-array rows in this half-open interval; zero if reversed.
     pub fn len(self) -> usize {
         self.hi.saturating_sub(self.lo)
     }
 
+    /// Whether the interval contains no rows (`lo >= hi`).
     pub fn is_empty(self) -> bool {
         self.lo >= self.hi
     }
 }
 
 impl FmIndex {
-    /// Build an FM-index over `text` (typically uppercase ACGT, plus appended
-    /// sentinel). Constructs the suffix array via divsufsort, derives the BWT
-    /// from it, and tabulates the cumulative C[] array used for backward
-    /// search. Counterpart to C's `fm_FM_read()` / makehmmerdb construction.
+    /// Build an exact, case-sensitive byte index over `text`, typically uppercase DNA.
+    ///
+    /// Supply raw text without a sentinel: this function appends a zero byte.
+    /// Input must not contain zero bytes and must fit the `i32` suffix-array
+    /// representation. Retains a full suffix array for locating matches.
+    /// Patterns use the same byte encoding as the input; no normalization occurs.
     pub fn build(text: &[u8]) -> Self {
         // Append sentinel
         let mut text_s = text.to_vec();
@@ -552,6 +567,11 @@ impl FmIndex {
         Self::build_sampled_with_rate(text, DEFAULT_SA_SAMPLE_RATE)
     }
 
+    /// Build from raw text, retaining every `sample_rate`th suffix-array row.
+    ///
+    /// A zero rate is treated as one. Larger rates save resident memory at the
+    /// cost of more LF backtracking during location; construction first builds
+    /// the full suffix array. Input bytes follow [`Self::build`].
     pub fn build_sampled_with_rate(text: &[u8], sample_rate: usize) -> Self {
         let mut index = Self::build(text);
         let sample_rate = sample_rate.max(1);
@@ -574,6 +594,18 @@ impl FmIndex {
         index
     }
 
+    /// Load an unpacked makehmmerdb DNA BWT and its sampling tables.
+    ///
+    /// `bwt` uses ASCII bases and one zero sentinel at row `term_loc`.
+    /// `raw_sa_samples` contains text offsets sampled every `freq_sa` rows;
+    /// negative samples represent the terminal text position. `freq_cnt_b` is
+    /// the occurrence block width in symbols. `occ_b_codes` and `occ_sb_codes`
+    /// are flattened four-base block (`u16`) and superblock (`u32`) counts,
+    /// with the terminal symbol included in the A-code counts.
+    /// Returns an error for invalid BWT lengths, sentinel/C-table data,
+    /// sample offsets, sampling frequency, or occurrence-table dimensions.
+    /// The caller must ensure DNA symbols, `term_loc`, and table values agree
+    /// with the BWT; those cross-checks are not performed here.
     pub fn from_makehmmerdb_raw_parts(
         bwt: Vec<u8>,
         raw_sa_samples: Vec<i32>,
@@ -700,6 +732,16 @@ impl FmIndex {
         })
     }
 
+    /// Load a makehmmerdb DNA BWT stored as four two-bit symbols per byte.
+    ///
+    /// Symbols are packed most significant bits first (`A=0, C=1, G=2, T=3`).
+    /// `bwt_len` counts symbols including the sentinel, whose BWT row is
+    /// `term_loc`; encode its packed bits as zero (the A code). The byte vector must have
+    /// `ceil(bwt_len / 4)` entries. Sampling and count arguments follow
+    /// [`Self::from_makehmmerdb_raw_parts`]. Returns an error for invalid spans,
+    /// sampling metadata, occurrence-table dimensions, or final count totals.
+    /// The caller must ensure occurrence-table values match the packed BWT;
+    /// their per-position consistency is not checked.
     pub fn from_makehmmerdb_packed_dna_parts(
         packed_bwt: Vec<u8>,
         bwt_len: usize,
@@ -780,6 +822,13 @@ impl FmIndex {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Load a packed DNA BWT while retaining suffix-array samples in a mapping.
+    ///
+    /// BWT and count arguments follow [`Self::from_makehmmerdb_packed_dna_parts`].
+    /// `raw_sa_offset` is a byte offset into `mapped_bytes`; `raw_sa_count` is
+    /// the number of little-endian `i32` samples, sampled every `freq_sa` rows.
+    /// The mapping is retained by the index. Returns an error for invalid
+    /// components, mapped spans, or sample values.
     pub fn from_makehmmerdb_packed_dna_parts_mapped_sa(
         packed_bwt: Vec<u8>,
         bwt_len: usize,
@@ -814,6 +863,14 @@ impl FmIndex {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Retain both a packed DNA BWT and suffix-array samples in shared mappings.
+    ///
+    /// `packed_bwt_offset` and `packed_bwt_bytes` select a byte span in
+    /// `mapped_packed_bwt`; `bwt_len` counts unpacked symbols including the
+    /// sentinel at row `term_loc`. `raw_sa_offset` and `raw_sa_count` select
+    /// little-endian `i32` samples in `mapped_sa_bytes` (byte offset, entry count).
+    /// Encoding and sampling follow [`Self::from_makehmmerdb_packed_dna_parts`].
+    /// Returns an error for invalid spans or inconsistent sampling/count metadata.
     pub fn from_makehmmerdb_mapped_packed_dna_parts_mapped_sa(
         mapped_packed_bwt: Arc<MmapBytes>,
         packed_bwt_offset: usize,
@@ -902,8 +959,7 @@ impl FmIndex {
         })
     }
 
-    /// Return the full suffix-array interval before any pattern characters are
-    /// applied.
+    /// Number of BWT symbols, including the sentinel (`n + 1`).
     pub fn bwt_len(&self) -> usize {
         if let Some(mapped) = &self.mapped_bwt {
             mapped.len
@@ -942,6 +998,7 @@ impl FmIndex {
         self.bwt_slice().get(pos).copied()
     }
 
+    /// Full half-open suffix-array interval before any pattern is applied.
     pub fn root_interval(&self) -> FmInterval {
         FmInterval {
             lo: 0,
@@ -969,6 +1026,9 @@ impl FmIndex {
     /// `text_len` is the length of the indexed text before the internal
     /// sentinel. Serialized makehmmerdb container indexes store BWT/SA/C arrays
     /// separately, so nhmmer uses this constructor when loading those records.
+    /// `bwt` must contain one zero sentinel; `sa` must contain `text_len + 1`
+    /// valid text offsets. `c[byte]` counts BWT symbols smaller than that byte.
+    /// Returns an error for invalid lengths, sentinel counts, offsets, or C entries.
     pub fn from_parts(
         bwt: Vec<u8>,
         sa: Vec<i32>,
@@ -980,9 +1040,9 @@ impl FmIndex {
 
     /// Reconstruct an FM-index while retaining only sampled suffix-array rows.
     ///
-    /// This preserves FM locate semantics and trades up to `sample_rate - 1`
-    /// LF steps per located row for substantially lower resident memory when
-    /// loading makehmmerdb container records.
+    /// Uses a row sampling rate of 32 to reduce resident memory, at the cost
+    /// of LF backtracking during location. Input contracts and errors match
+    /// [`Self::from_parts`]; construction still takes a full suffix array.
     pub fn from_parts_sampled(
         bwt: Vec<u8>,
         sa: Vec<i32>,
@@ -992,6 +1052,12 @@ impl FmIndex {
         Self::from_parts_inner(bwt, sa, c, text_len, Some(DEFAULT_SA_SAMPLE_RATE))
     }
 
+    /// Reconstruct an index with an owned BWT and a mapped full suffix array.
+    ///
+    /// `sa_offset` is a byte offset into `mapped_bytes`; `sa_len` counts
+    /// little-endian `i32` entries and must equal `bwt.len()`. `c` contains the
+    /// number of symbols smaller than each byte; `text_len` excludes the sentinel.
+    /// Retains the mapping and returns an error for invalid BWT/C data or spans.
     pub fn from_mapped_parts(
         bwt: Vec<u8>,
         sa_len: usize,
@@ -1037,6 +1103,12 @@ impl FmIndex {
         })
     }
 
+    /// Reconstruct an index with its BWT and full suffix array in one mapping.
+    ///
+    /// Offsets are bytes into `mapped_bytes`; `bwt_len` counts BWT bytes and
+    /// `sa_len` counts little-endian `i32` entries. Both lengths must be
+    /// `text_len + 1`, including the sentinel. `c` is the cumulative symbol
+    /// count table. Returns an error for invalid lengths, spans, or BWT/C data.
     pub fn from_mapped_file_parts(
         mapped_bytes: Arc<MmapBytes>,
         bwt_offset: usize,
@@ -1059,6 +1131,13 @@ impl FmIndex {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Load mapped BWT/SA components and makehmmerdb occurrence tables.
+    ///
+    /// BWT/SA arguments follow [`Self::from_mapped_file_parts`]. Occurrence
+    /// offsets are byte offsets into that same mapping; counts are numbers of
+    /// little-endian `u16` block or `u32` superblock entries. `term_loc` is the
+    /// sentinel BWT row; `freq_cnt_b` is the block width in symbols.
+    /// Returns an error for invalid spans or inconsistent component metadata.
     pub fn from_mapped_file_parts_with_makehmmerdb_occ(
         mapped_bytes: Arc<MmapBytes>,
         bwt_offset: usize,
@@ -1293,7 +1372,8 @@ impl FmIndex {
 
     /// Count exact occurrences of `pattern` in the indexed text by BWT
     /// backward search. Returns 0 when the pattern does not occur.
-    /// Analog of C's `getSARangeReverse()` interval-shrinking loop.
+    /// Matching is case-sensitive and uses raw bytes, with no alphabet conversion.
+    /// Empty patterns and patterns containing the reserved zero sentinel return 0.
     pub fn count(&self, pattern: &[u8]) -> usize {
         if pattern.is_empty() || self.n == 0 || pattern.contains(&0) {
             return 0;
@@ -1324,6 +1404,9 @@ impl FmIndex {
     /// Same backward search as `count()`, then maps the resulting suffix-array
     /// interval back to text positions. Analog of C's `fm_getOriginalPosition()`
     /// applied across the matching SA range.
+    ///
+    /// Results are in suffix-array order, not coordinate order. Matching is
+    /// case-sensitive; empty patterns and patterns containing zero return no positions.
     pub fn locate(&self, pattern: &[u8]) -> Vec<usize> {
         if pattern.is_empty() || self.n == 0 || pattern.contains(&0) {
             return Vec::new();
@@ -1341,7 +1424,10 @@ impl FmIndex {
         self.locate_interval(interval)
     }
 
-    /// Locate all text positions in an already-computed suffix-array interval.
+    /// Locate zero-based text offsets for a half-open suffix-array interval.
+    ///
+    /// Returns positions in suffix-array order, excluding the sentinel position.
+    /// Empty, reversed, or out-of-range intervals return an empty vector.
     pub fn locate_interval(&self, interval: FmInterval) -> Vec<usize> {
         if interval.is_empty() || interval.hi > self.bwt_len() {
             return Vec::new();
@@ -1377,7 +1463,10 @@ impl FmIndex {
     ///
     /// `suffix_position()` already performs the same LF backtracking to a
     /// sampled suffix-array row when only samples are resident, and returns the
-    /// text position represented by this row.
+    /// zero-based text position represented by this row. Returns `None` for
+    /// the suffix starting at the appended text sentinel, invalid rows, or a
+    /// failed sample lookup. The BWT row containing the sentinel instead
+    /// represents text position zero.
     pub fn backtrack_seed_position(&self, row: usize) -> Option<usize> {
         self.suffix_position(row).filter(|&pos| pos < self.n)
     }
@@ -1511,7 +1600,7 @@ impl FmIndex {
     /// backward-search step) and `fwd` is the SA-range of the forward pattern
     /// `W` itself (updated via the `OccLT` offset). Appending `ch` to the
     /// pattern (`W -> W·ch`) returns the new `(bk, fwd)` pair, where `fwd` is
-    /// directly locatable via [`locate_interval`]. Returns `None` when the
+    /// directly locatable via [`Self::locate_interval`]. Returns `None` when the
     /// extended pattern does not occur.
     ///
     /// C uses inclusive `[lower, upper]` ranges; this port uses the crate's

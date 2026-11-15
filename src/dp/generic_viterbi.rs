@@ -12,6 +12,15 @@ use crate::profile::*;
 /// leaves the filled Viterbi matrix in `gx` (so the caller may then recover the
 /// path via `g_trace`). Caller subtracts a null model lod score and converts to
 /// bits. Counterpart of `p7_GViterbi`.
+///
+/// `l` is the number of target residues (amino acids or nucleotides), excluding
+/// sentinels. `dsq` must contain valid digital alphabet codes at `1..=l`, with
+/// an unused/sentinel element at index 0. Configure `gm` for this target length
+/// before scoring. `gx` must already have capacity for `gm.m` model nodes and
+/// `l` residues, including boundary row/column 0; this function does not grow it.
+/// The active matrix cells are overwritten. The returned score is in natural-log
+/// units; converting a null-corrected score to bits also requires division by
+/// `ln(2)`.
 pub fn g_viterbi(dsq: &[Dsq], l: usize, gm: &Profile, gx: &mut Gmx) -> f32 {
     let m = gm.m;
     let esc: f32 = if gm.is_local() {

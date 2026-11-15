@@ -32,6 +32,15 @@ pub use crate::util::scorematrix::{is_known_builtin_score_matrix_name, ScoreMatr
 /// `popen`/`pextend` are `f64` because C's are: they come from
 /// `esl_opt_GetReal()`, so `1.0 - 2 * popen` is evaluated in double and only
 /// narrowed to `float` on assignment.
+/// `dsq` is 1-based: query residues occupy `dsq[1..=m]`, with digital
+/// sentinels outside that range. `q` rows are indexed by digital query
+/// residue and need at least `abc.k` columns; `f` needs `abc.k` entries.
+/// Use nonnegative gap probabilities with `popen <= 0.5` and
+/// `pextend < 1.0` so transition probabilities remain valid.
+///
+/// The returned core HMM is not E-value calibrated and has no computed
+/// consensus/composition annotation. Use [`Builder::single_builder`] for
+/// the complete construction workflow. Undersized input arrays may panic.
 #[allow(clippy::too_many_arguments)]
 pub fn seqmodel(
     abc: &Alphabet,
@@ -105,6 +114,12 @@ pub fn seqmodel(
 /// Unlike the 0.7.x version, this picks the default matrix by alphabet the way
 /// `p7_builder_SetScoreSystem()` does (p7_builder.c:296-301) instead of
 /// hardcoding BLOSUM62, so it no longer panics on a DNA/RNA alphabet.
+/// `seq_len` counts residues, with `dsq[1..=seq_len]` holding query codes
+/// from `abc`. `bg` must use that alphabet. `popen` and `pextend` are
+/// probabilities, not score penalties (see [`seqmodel`]). Returns an
+/// annotated, calibrated HMM; this convenience wrapper panics if score
+/// system setup or calibration fails. Use the fallible matrix variants
+/// when those errors need to be handled.
 pub fn build_single_seq_hmm(
     name: &str,
     dsq: &[Dsq],
@@ -123,6 +138,9 @@ pub fn build_single_seq_hmm(
 
 /// As [`build_single_seq_hmm`], with an explicit score matrix.
 /// Compatibility wrapper over [`Builder`].
+/// The sequence layout and gap probabilities follow [`build_single_seq_hmm`].
+/// `matrix`, `abc`, and `bg` must describe the same alphabet. Returns an
+/// error if matrix probability conversion or E-value calibration fails.
 #[allow(clippy::too_many_arguments)]
 pub fn build_single_seq_hmm_with_matrix(
     name: &str,
@@ -150,6 +168,9 @@ pub fn build_single_seq_hmm_with_matrix(
 
 /// As [`build_single_seq_hmm_with_matrix`], with an explicit calibration seed
 /// and config. Compatibility wrapper over [`Builder`].
+/// Input layout and errors follow [`build_single_seq_hmm_with_matrix`].
+/// `calibration_config` sets simulation lengths in residues, sample counts,
+/// and tail fraction; `calibration_seed` selects the random stream.
 #[allow(clippy::too_many_arguments)]
 pub fn build_single_seq_hmm_with_matrix_and_calibration(
     name: &str,

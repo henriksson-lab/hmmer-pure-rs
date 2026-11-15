@@ -658,8 +658,13 @@ impl OProfile {
     ///
     /// Ports C `p7_oprofile_Convert()`: runs the MSV (byte), Viterbi (word),
     /// and Forward/Backward (float) striping conversions in one pass.
-    /// Requires `gm.m <= allocM` and matching alphabet. Sets `mode`, `L`, `M`,
+    /// Allocates storage from the model and alphabet dimensions of `gm`. Sets `mode`, `L`, `M`,
     /// `nj`, `evparam`, `cutoff`, `compo`, and copies the model name.
+    ///
+    /// `gm` must already be populated by [`crate::profile::profile_config`].
+    /// The result owns newly allocated striped tables and initially uses
+    /// `gm.l` as the expected target length. Update this length before scoring
+    /// a different target with [`Self::reconfig_length`].
     pub fn convert(gm: &Profile) -> Self {
         let m = gm.m;
         let kp = gm.abc_kp;
@@ -731,6 +736,11 @@ impl OProfile {
     /// new mean target length `l`. The acceleration pipeline (and nhmmer's
     /// long-target SSV scan) uses this to defer reconfiguring the rest of the
     /// length model until after the MSV stage.
+    ///
+    /// `l` is the nonnegative expected target length in residues (amino acids
+    /// or nucleotides), excluding sentinels. During a database search, use
+    /// the actual target length, or the window length when scoring a window.
+    /// This does not update the generic profile or the background model.
     pub fn reconfig_msv_length(&mut self, l: i32) {
         self.tjb_b = unbiased_byteify(self.scale_b, c_logf_to_f32(3.0_f32 / (l as f32 + 3.0)));
     }
@@ -740,8 +750,13 @@ impl OProfile {
     /// Ports `p7_oprofile_ReconfigLength` (combines MSV + "rest" length
     /// reconfigs): updates `tjb_b`, N/C/J transition floats `xf` and words
     /// `xw` for a new mean target length `l`. Does not touch the null model
-    /// (caller must also `p7_bg_SetLength`). Must be fast — sits in the hot
+    /// (caller must also call [`crate::bg::Bg::set_length`]). Must be fast — sits in the hot
     /// path, called once per target sequence.
+    ///
+    /// `l` is the nonnegative expected target length in residues (amino acids
+    /// or nucleotides), excluding sentinels. During a database search, use
+    /// the actual target length, or the window length when scoring a window.
+    /// This does not update the generic profile or the background model.
     pub fn reconfig_length(&mut self, l: i32) {
         self.reconfig_msv_length(l);
         self.reconfig_rest_length(l);
@@ -751,6 +766,11 @@ impl OProfile {
     ///
     /// Ports `p7_oprofile_ReconfigRestLength`: updates N/C/J transition floats
     /// and words for Forward/Viterbi filters without touching `tjb_b`.
+    ///
+    /// `l` is the nonnegative expected target length in residues (amino acids
+    /// or nucleotides), excluding sentinels. During a database search, use
+    /// the actual target length, or the window length when scoring a window.
+    /// This does not update the generic profile or the background model.
     pub fn reconfig_rest_length(&mut self, l: i32) {
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
         let ploop = 1.0 - pmove;
@@ -777,6 +797,11 @@ impl OProfile {
     /// definition. Calls `reconfig_length(l)` to refresh the length model.
     /// Avoids rebuilding through generic log-space scores so low-bit parity
     /// with the original is preserved.
+    ///
+    /// `l` is the nonnegative expected target length in residues (amino acids
+    /// or nucleotides), excluding sentinels. During a database search, use
+    /// the actual target length, or the window length when scoring a window.
+    /// This does not update the generic profile or the background model.
     pub fn reconfig_multihit(&mut self, l: i32) {
         self.xf[P7O_E][P7O_MOVE] = 0.5;
         self.xf[P7O_E][P7O_LOOP] = 0.5;
@@ -794,6 +819,11 @@ impl OProfile {
     /// Ports `p7_oprofile_ReconfigUnihit`: sets E->move=1, E->loop=0, `nj=0`,
     /// and refreshes the length model via `reconfig_length(l)`. Used by domain
     /// definition to score isolated single-domain envelopes.
+    ///
+    /// `l` is the nonnegative expected target length in residues (amino acids
+    /// or nucleotides), excluding sentinels. During a database search, use
+    /// the actual target length, or the window length when scoring a window.
+    /// This does not update the generic profile or the background model.
     pub fn reconfig_unihit(&mut self, l: i32) {
         self.xf[P7O_E][P7O_MOVE] = 1.0;
         self.xf[P7O_E][P7O_LOOP] = 0.0;

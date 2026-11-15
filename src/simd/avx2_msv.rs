@@ -30,6 +30,11 @@ pub struct OProfileAvx2 {
 impl OProfileAvx2 {
     /// Build an AVX2 MSV profile by restriping the SSE2 `OProfile` byte scores into
     /// 32-way striped vectors.
+    ///
+    /// `om` must be a fully converted optimized profile. Length-dependent
+    /// transition values are copied at conversion time; rebuild this AVX2
+    /// representation if the source profile configuration changes. This
+    /// conversion itself does not require AVX2 CPU support.
     pub fn from_oprofile(om: &OProfile) -> Self {
         let m = om.m;
         let nq = nqb_avx2(m);
@@ -84,6 +89,15 @@ pub enum Avx2MsvResult {
 ///
 /// # Safety
 /// Requires AVX2 support.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn avx2_msv_filter(dsq: &[Dsq], l: usize, om: &OProfileAvx2) -> Avx2MsvResult {

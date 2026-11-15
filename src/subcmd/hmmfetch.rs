@@ -42,6 +42,12 @@ struct Args {
 /// `--index` writes a C/Easel-compatible SSI index (`<hmmfile>.ssi`). Normal
 /// lookup builds an SSI-style in-memory lookup table, then re-scans the file to
 /// locate the matching HMM by name or accession before writing it.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run_os(args: Vec<OsString>) -> std::process::ExitCode {
     run_from(args)
 }

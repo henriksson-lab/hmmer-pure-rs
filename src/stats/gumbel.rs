@@ -1,5 +1,11 @@
 //! Gumbel (type I extreme value) distribution functions.
 //! Direct port of Easel's esl_gumbel.c.
+//!
+//! `x` and the location/offset `mu` use the same units (for example, bits
+//! when evaluating calibrated bit scores). `lambda` is a positive rate, or
+//! inverse scale, in reciprocal units. Evaluators do not validate parameters.
+//! Functions named `log*` return natural logarithms; densities are not point
+//! probabilities for these continuous distributions.
 
 use crate::errors::{HmmerError, HmmerResult};
 use crate::util::cmath::c_sqrt_f64;
@@ -7,7 +13,7 @@ use crate::util::cmath::{c_exp_f64, c_log_f64, c_pow_f64};
 
 const SMALLX1: f64 = 5e-9;
 
-/// Probability density at `x`: P(X = x) for a Gumbel with location `mu`, scale `lambda`.
+/// Probability density at `x` for a Gumbel with location `mu` and rate `lambda`.
 ///
 /// Let y = lambda*(x-mu); returns lambda * exp(-y - exp(-y)).
 /// Useful dynamic range is roughly -6.5 <= y <= 710 for f64.
@@ -17,7 +23,7 @@ pub fn pdf(x: f64, mu: f64, lambda: f64) -> f64 {
     lambda * c_exp_f64(-y - c_exp_f64(-y))
 }
 
-/// Log probability density at `x`: log P(X = x) for the Gumbel.
+/// Natural logarithm of the Gumbel probability density at `x`.
 ///
 /// Equals log(lambda) - y - exp(-y) where y = lambda*(x-mu).
 /// Port of Easel `esl_gumbel_logpdf`.
@@ -79,6 +85,10 @@ pub fn logsurv(x: f64, mu: f64, lambda: f64) -> f64 {
 /// Inverse CDF: return quantile x such that P(X <= x) = p.
 ///
 /// Port of Easel `esl_gumbel_invcdf`.
+///
+/// `p` is a probability strictly between 0 and 1 for a finite quantile.
+/// `mu` is the location and `lambda` the positive inverse scale; the returned
+/// quantile has the same units as `mu`. Inputs are not validated.
 pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
     mu - (c_log_f64(-c_log_f64(p)) / lambda)
 }
@@ -87,6 +97,10 @@ pub fn invcdf(p: f64, mu: f64, lambda: f64) -> f64 {
 ///
 /// Uses log(1-p) ~ -p and log(p) ~ (p^p - 1)/p for small `p` to avoid
 /// the inf at p < ~1e-15. Port of Easel `esl_gumbel_invsurv`.
+///
+/// `p` is a probability strictly between 0 and 1 for a finite quantile.
+/// `mu` is the location and `lambda` the positive inverse scale; the returned
+/// quantile has the same units as `mu`. Inputs are not validated.
 pub fn invsurv(p: f64, mu: f64, lambda: f64) -> f64 {
     let log_part = if p < SMALLX1 {
         (c_pow_f64(p, p) - 1.0) / p
@@ -127,6 +141,11 @@ fn lawless416(x: &[f64], lambda: f64) -> (f64, f64) {
 /// Needs ~1000+ samples for a reliable lambda estimate. Returns
 /// `HmmerError::NoResult` if the search cannot bracket/converge.
 /// Port of Easel `esl_gumbel_FitComplete`.
+///
+/// `x` contains uncensored observations in a common unit. Use finite samples
+/// with nonzero variance. Returns `(location, inverse_scale)`, with units of
+/// `x` and reciprocal units respectively. Fewer than two samples returns
+/// `HmmerError::InvalidArg`; degenerate or nonfinite data are not prevalidated.
 pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
     let n = x.len();
     if n <= 1 {
@@ -201,6 +220,11 @@ pub fn fit_complete(x: &[f64]) -> HmmerResult<(f64, f64)> {
 ///
 /// Straight simplification of `fit_complete`: substitute lambda directly
 /// into Lawless 4.1.5. Errors if n <= 1. Port of `esl_gumbel_FitCompleteLoc`.
+///
+/// `x` contains uncensored observations; `lambda` is a positive inverse
+/// scale in reciprocal sample units. Returns the location in sample units.
+/// The function checks the sample count, but does not validate `lambda` or
+/// the finiteness of the observations.
 pub fn fit_complete_loc(x: &[f64], lambda: f64) -> HmmerResult<f64> {
     let n = x.len();
     if n <= 1 {

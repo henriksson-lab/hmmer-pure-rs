@@ -112,6 +112,12 @@ impl Hmm {
     /// All transition and emission tables are zeroed; metadata fields are set
     /// to their "unset" sentinels. Combines the C shell+body allocation:
     /// counterpart to `p7_hmm_Create()` / `p7_hmm_CreateBody()`.
+    ///
+    /// `m` counts match states; `abc_k` is the number of canonical residues
+    /// (20 for amino acids, 4 for DNA/RNA) and must agree with `abc_type`.
+    /// Nodes are 1-based, with extra node-0 tables for begin/insert transitions.
+    /// This allocates storage only: fill and normalize probability tables before
+    /// configuring a scoring profile or computing occupancy.
     pub fn new(m: usize, abc_type: AlphabetType, abc_k: usize) -> Self {
         let t = vec![[0.0f32; NTRANSITIONS]; m + 1];
         let mat = vec![vec![0.0f32; abc_k]; m + 1];
@@ -156,6 +162,11 @@ impl Hmm {
 /// `(1.0 - mocc[k-1]) * hmm->t[k-1][p7H_DM]` is evaluated in double and only
 /// the final sum is narrowed back to `float`. The first product stays in
 /// `float`. Computing the whole line in `f32` shifts results in the last bits.
+///
+/// `hmm` must contain valid core probabilities. Match outputs are 1-based
+/// with `mocc[0] = 0`; `iocc[0]` describes the initial insert state. Insert
+/// occupancies count expected emissions and can exceed 1. Panics for
+/// undersized output slices.
 pub fn calculate_occupancy(hmm: &Hmm, mocc: &mut [f32], iocc: Option<&mut [f32]>) {
     mocc[0] = 0.0; // no M_0 state
     if hmm.m >= 1 {
@@ -181,6 +192,10 @@ pub fn calculate_occupancy(hmm: &Hmm, mocc: &mut [f32], iocc: Option<&mut [f32]>
 /// Sets `hmm.compo[]` to the model's expected residue composition, weighting
 /// each match emission by its occupancy and each insert emission by its insert
 /// occupancy, then normalizing. Raises `P7H_COMPO`.
+///
+/// Requires a nonempty HMM with valid transition and emission probabilities.
+/// The result is stored in canonical alphabet order in `hmm.compo`;
+/// this mutates the annotation and flags, not the emission tables.
 pub fn set_composition(hmm: &mut Hmm) {
     let mut mocc = vec![0.0_f32; hmm.m + 1];
     let mut iocc = vec![0.0_f32; hmm.m + 1];
@@ -219,6 +234,11 @@ pub fn set_composition(hmm: &mut Hmm) {
 /// lower-cased. For DNA/RNA, where `mthresh` is 0.9 and single-sequence
 /// self-emission probabilities are well under that, canonical residues are
 /// lower-cased too, so the two agree in practice.
+///
+/// `abc` must match the HMM's alphabet. A supplied `dsq` must contain query
+/// residues at indices `1..=hmm.m` (excluding its leading sentinel from the
+/// count); a short slice panics. Stores a 1-based ASCII consensus array and
+/// sets `P7H_CONS`, replacing any previous consensus annotation.
 pub fn set_consensus(hmm: &mut Hmm, abc: &crate::alphabet::Alphabet, dsq: Option<&[u8]>) {
     let mthresh: f32 = match hmm.abc_type {
         AlphabetType::Dna | AlphabetType::Rna => 0.9,

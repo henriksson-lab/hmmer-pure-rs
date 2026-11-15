@@ -131,66 +131,117 @@ mod neon {
 
     // ---- f32 arithmetic, comparison, logic -------------------------------
 
+    /// Return four zero `f32` lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_setzero_ps() -> __m128 {
         __m128(vdupq_n_f32(0.0))
     }
+    /// Broadcast `a` into all four `f32` lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_set1_ps(a: f32) -> __m128 {
         __m128(vdupq_n_f32(a))
     }
+    /// Add corresponding `f32` lanes of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_add_ps(a: __m128, b: __m128) -> __m128 {
         __m128(vaddq_f32(f(a), f(b)))
     }
+    /// Subtract each `f32` lane of `b` from the corresponding lane of `a`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_sub_ps(a: __m128, b: __m128) -> __m128 {
         __m128(vsubq_f32(f(a), f(b)))
     }
+    /// Multiply corresponding `f32` lanes of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_mul_ps(a: __m128, b: __m128) -> __m128 {
         __m128(vmulq_f32(f(a), f(b)))
     }
     /// SSE `maxps`: `a > b ? a : b` per lane, so `b` when either is NaN (NEON's
     /// `fmax` would propagate the NaN instead).
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_max_ps(a: __m128, b: __m128) -> __m128 {
         __m128(vbslq_f32(vcgtq_f32(f(a), f(b)), f(a), f(b)))
     }
+    /// Compare `a > b` per `f32` lane, returning all-one bits for true and zero for false.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cmpgt_ps(a: __m128, b: __m128) -> __m128 {
         from_u32s(vcgtq_f32(f(a), f(b)))
     }
+    /// Compare `a <= b` per `f32` lane, returning all-one bits for true and zero for false.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cmple_ps(a: __m128, b: __m128) -> __m128 {
         from_u32s(vcleq_f32(f(a), f(b)))
     }
+    /// Return the bitwise AND of all 128 bits of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_and_ps(a: __m128, b: __m128) -> __m128 {
         from_u32s(vandq_u32(u32s(a), u32s(b)))
     }
+    /// Return the bitwise OR of all 128 bits of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_or_ps(a: __m128, b: __m128) -> __m128 {
         from_u32s(vorrq_u32(u32s(a), u32s(b)))
     }
     /// `(!a) & b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_andnot_ps(a: __m128, b: __m128) -> __m128 {
         from_u32s(vbicq_u32(u32s(b), u32s(a)))
     }
     /// Lane sign bits in bits 0..4.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_movemask_ps(a: __m128) -> i32 {
         let l = lanes_f32(a);
         (0..4).fold(0, |m, i| m | (((l[i].to_bits() >> 31) as i32) << i))
     }
     /// Lane 0 from `b`, lanes 1..4 from `a`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_move_ss(a: __m128, b: __m128) -> __m128 {
         __m128(vsetq_lane_f32::<0>(vgetq_lane_f32::<0>(f(b)), f(a)))
     }
     /// Lanes 0,1 picked from `a` and lanes 2,3 from `b` by the four 2-bit fields
     /// of `MASK`, low field first.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_shuffle_ps<const MASK: i32>(a: __m128, b: __m128) -> __m128 {
         let (a, b) = (lanes_f32(a), lanes_f32(b));
@@ -200,22 +251,47 @@ mod neon {
 
     // ---- f32 loads and stores --------------------------------------------
 
+    /// Load four `f32` values from `p` into a vector.
+    /// # Safety
+    /// `p` must be 16-byte aligned and valid for reading four initialized
+    /// `f32` values. The memory must not be concurrently mutated.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_load_ps(p: *const f32) -> __m128 {
         __m128(vld1q_f32(p))
     }
+    /// Load four `f32` values from `p` without a 16-byte alignment requirement.
+    /// # Safety
+    /// `p` must be valid for reading four initialized `f32` values. The memory
+    /// must not be concurrently mutated.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_loadu_ps(p: *const f32) -> __m128 {
         __m128(vld1q_f32(p))
     }
+    /// Store all four lanes of `a` to `p`.
+    /// # Safety
+    /// `p` must be 16-byte aligned and valid for writing four `f32` values.
+    /// The write must respect Rust's aliasing and data-race rules.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_store_ps(p: *mut f32, a: __m128) {
         vst1q_f32(p, f(a))
     }
+    /// Store all four lanes of `a` to `p` without a 16-byte alignment requirement.
+    /// # Safety
+    /// `p` must be valid for writing four `f32` values. The write must respect
+    /// Rust's aliasing and data-race rules.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_storeu_ps(p: *mut f32, a: __m128) {
         vst1q_f32(p, f(a))
     }
+    /// Store only lane 0 of `a` to `p`.
+    /// # Safety
+    /// `p` must be aligned and valid for writing one `f32`. The write must
+    /// respect Rust's aliasing and data-race rules.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_store_ss(p: *mut f32, a: __m128) {
         *p = vgetq_lane_f32::<0>(f(a));
@@ -223,16 +299,27 @@ mod neon {
 
     // ---- conversions and casts -------------------------------------------
 
+    /// Reinterpret the 128 bits of `a` as an integer vector without numeric conversion.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_castps_si128(a: __m128) -> __m128i {
         __m128i(vreinterpretq_u8_f32(a.0))
     }
+    /// Reinterpret the 128 bits of `a` as four `f32` lanes without numeric conversion.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_castsi128_ps(a: __m128i) -> __m128 {
         __m128(vreinterpretq_f32_u8(a.0))
     }
     /// Truncating conversion; NaN and out-of-range lanes become `i32::MIN`, the
     /// x86 "integer indefinite" value (NEON would saturate instead).
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cvttps_epi32(a: __m128) -> __m128i {
         let l = lanes_f32(a);
@@ -246,10 +333,17 @@ mod neon {
         from_lanes_u32([lane(l[0]), lane(l[1]), lane(l[2]), lane(l[3])])
     }
     /// Round-to-nearest conversion, as `cvtdq2ps` under the default MXCSR.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cvtepi32_ps(a: __m128i) -> __m128 {
         __m128(vcvtq_f32_s32(i32s(a)))
     }
+    /// Return signed 32-bit lane 0 of `a`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cvtsi128_si32(a: __m128i) -> i32 {
         vgetq_lane_s32::<0>(i32s(a))
@@ -257,26 +351,52 @@ mod neon {
 
     // ---- integer construction, loads, stores -----------------------------
 
+    /// Return an integer vector with all 128 bits zero.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_setzero_si128() -> __m128i {
         __m128i(vdupq_n_u8(0))
     }
+    /// Broadcast `a` into all sixteen signed byte lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_set1_epi8(a: i8) -> __m128i {
         __m128i(vdupq_n_u8(a as u8))
     }
+    /// Broadcast `a` into all eight signed 16-bit lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_set1_epi16(a: i16) -> __m128i {
         from_i16s(vdupq_n_s16(a))
     }
+    /// Broadcast `a` into all four signed 32-bit lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_set1_epi32(a: i32) -> __m128i {
         from_i32s(vdupq_n_s32(a))
     }
+    /// Load 16 bytes at `p` into an integer vector.
+    /// # Safety
+    /// `p` must reference 16 readable initialized bytes; 16-byte alignment is
+    /// not required. The memory must not be concurrently mutated.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_loadu_si128(p: *const __m128i) -> __m128i {
         __m128i(vld1q_u8(p as *const u8))
     }
+    /// Store the 16 bytes of `a` at `p`.
+    /// # Safety
+    /// `p` must reference 16 writable bytes; 16-byte alignment is not required.
+    /// The write must respect Rust's aliasing and data-race rules.
+    /// Requires NEON (baseline on aarch64).
     #[inline(always)]
     pub unsafe fn _mm_storeu_si128(p: *mut __m128i, a: __m128i) {
         vst1q_u8(p as *mut u8, a.0)
@@ -284,22 +404,42 @@ mod neon {
 
     // ---- integer arithmetic and comparison -------------------------------
 
+    /// Return the bitwise OR of all 128 bits of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_or_si128(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vorrq_u8(a.0, b.0))
     }
+    /// Return the maximum of corresponding unsigned byte lanes of `a` and `b`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_max_epu8(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vmaxq_u8(a.0, b.0))
     }
+    /// Add corresponding unsigned byte lanes, saturating at 255.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_adds_epu8(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vqaddq_u8(a.0, b.0))
     }
+    /// Subtract unsigned byte lanes of `b` from `a`, saturating at zero.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_subs_epu8(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vqsubq_u8(a.0, b.0))
     }
+    /// Subtract signed byte lanes of `b` from `a`, saturating at -128 or 127.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_subs_epi8(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vreinterpretq_u8_s8(vqsubq_s8(
@@ -307,22 +447,42 @@ mod neon {
             vreinterpretq_s8_u8(b.0),
         )))
     }
+    /// Compare byte lanes for equality, returning 0xff for true and zero for false.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cmpeq_epi8(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vceqq_u8(a.0, b.0))
     }
+    /// Return the maximum of corresponding signed 16-bit lanes.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_max_epi16(a: __m128i, b: __m128i) -> __m128i {
         from_i16s(vmaxq_s16(i16s(a), i16s(b)))
     }
+    /// Add signed 16-bit lanes, saturating at -32768 or 32767.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_adds_epi16(a: __m128i, b: __m128i) -> __m128i {
         from_i16s(vqaddq_s16(i16s(a), i16s(b)))
     }
+    /// Compare signed 16-bit lanes `a > b`, returning 0xffff for true and zero for false.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_cmpgt_epi16(a: __m128i, b: __m128i) -> __m128i {
         __m128i(vreinterpretq_u8_u16(vcgtq_s16(i16s(a), i16s(b))))
     }
+    /// Add corresponding 32-bit lanes with wrapping arithmetic.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_add_epi32(a: __m128i, b: __m128i) -> __m128i {
         from_i32s(vaddq_s32(i32s(a), i32s(b)))
@@ -330,6 +490,9 @@ mod neon {
     /// Logical left shift of each dword; counts above 31 give zero, as on x86.
     /// Takes the count as an argument, matching the legacy call form the
     /// kernels use for this one intrinsic.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_slli_epi32(a: __m128i, imm8: i32) -> __m128i {
         if !(0..32).contains(&imm8) {
@@ -341,6 +504,9 @@ mod neon {
         )))
     }
     /// Logical right shift of each dword.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_srli_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
         if !(0..32).contains(&IMM8) {
@@ -351,13 +517,19 @@ mod neon {
             vdupq_n_s32(-IMM8),
         )))
     }
-    /// Byte `i` of the result is the sign bit of byte `i`.
+    /// Bit `i` of the result is the sign bit of byte lane `i`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_movemask_epi8(a: __m128i) -> i32 {
         let b = lanes_u8(a);
         (0..16).fold(0, |m, i| m | (((b[i] >> 7) as i32) << i))
     }
     /// Unsigned 16-bit lane `IMM8`, zero-extended.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_extract_epi16<const IMM8: i32>(a: __m128i) -> i32 {
         lanes_u16(a)[(IMM8 & 7) as usize] as i32
@@ -366,6 +538,9 @@ mod neon {
     // ---- whole-register byte shifts and lane shuffles --------------------
 
     /// Shift the 128 bits right by `IMM8` bytes, filling with zero.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_srli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
         let z = vdupq_n_u8(0);
@@ -387,6 +562,9 @@ mod neon {
         }
     }
     /// Shift the 128 bits left by `IMM8` bytes, filling with zero.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_slli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
         let z = vdupq_n_u8(0);
@@ -406,6 +584,9 @@ mod neon {
         }
     }
     /// Dword `i` of the result is dword `(IMM8 >> 2i) & 3` of `a`.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_shuffle_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
         let l = lanes_u32(a);
@@ -413,6 +594,9 @@ mod neon {
         from_lanes_u32([l[m & 3], l[(m >> 2) & 3], l[(m >> 4) & 3], l[(m >> 6) & 3]])
     }
     /// Words 0..4 shuffled as `_mm_shuffle_epi32` does dwords; words 4..8 kept.
+    /// # Safety
+    /// Requires NEON (baseline on aarch64). No pointer or memory preconditions;
+    /// this is unsafe to match the corresponding x86 intrinsic signature.
     #[inline(always)]
     pub unsafe fn _mm_shufflelo_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
         let l = lanes_u16(a);

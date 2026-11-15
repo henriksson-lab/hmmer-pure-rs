@@ -20,6 +20,12 @@ const LOG2_INV: f64 = ESL_CONST_LOG2R;
 /// relative entropy matches the target (in bits). Caller passes a count-based
 /// HMM; the HMM itself is not modified except for `eff_nseq`.
 /// Returns Neff in `[0, hmm.nseq]`. Counterpart to C's `p7_EntropyWeight()`.
+/// `bg` must match the model alphabet; `prior` selects the prior used for
+/// trial probability estimates. `target_re` is bits per match position,
+/// with `None` choosing the alphabet default. `target_sigma` is the total
+/// information target in bits used for the short-model correction;
+/// `None` uses 45 bits. For `hmm.nseq <= 0`, returns 1 without updating
+/// `eff_nseq`.
 pub fn entropy_weight(
     hmm: &mut Hmm,
     bg: &Bg,
@@ -101,6 +107,11 @@ fn bisection<F: FnMut(f64) -> f64>(mut xl: f64, mut xr: f64, abs_tol: f64, mut f
 ///
 /// Counterpart to C's `p7_EntropyWeight_exp()` plus the subsequent
 /// `p7_hmm_ScaleExponential()` call in the builder.
+/// Inputs have the same meanings as [`entropy_weight`]. Unlike linear
+/// weighting, this modifies transition and emission counts in place by
+/// column-dependent scaling. Returns the resulting mean match count and
+/// stores it in `hmm.eff_nseq`; model probabilities still need to be
+/// estimated with the selected prior afterward.
 pub fn entropy_weight_exp(
     hmm: &mut Hmm,
     bg: &Bg,
@@ -170,6 +181,9 @@ fn relative_entropy_exp_fx(
 
 /// Multiply all transition and emission counts in `hmm` by `scale` in place.
 /// Used to rescale a count-based HMM to its effective sequence number.
+/// `scale` is a nonnegative dimensionless multiplier, typically
+/// `effective_sequence_count / original_sequence_count`. This operates on
+/// counts, does not normalize probabilities, and does not update `eff_nseq`.
 pub fn scale_counts(hmm: &mut Hmm, scale: f64) {
     for k in 0..=hmm.m {
         for t in &mut hmm.t[k] {

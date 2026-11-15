@@ -20,6 +20,11 @@ use crate::simd::probmx::{ProbMx, PXB, PXC, PXE, PXJ, PXN};
 /// Convenience wrapper that allocates a `Trace` and forwards to
 /// `stochastic_trace_pmx_into`. Works on the striped `ProbMx` produced by the
 /// SIMD Forward parser.
+///
+/// `l` is the target length in residues. `ox` must store the full Forward
+/// DP matrix for that target and `om`; a parser-only matrix lacks the core
+/// cells needed for traceback. The call advances `rng`. Trace residue and
+/// model-node coordinates are 1-based.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn stochastic_trace_pmx(
     rng: &mut MersenneTwister,
@@ -37,6 +42,11 @@ pub fn stochastic_trace_pmx(
 /// Samples one path from the posterior alignment distribution and appends it
 /// to `tr` (which is cleared first). Reverses the appended states so the
 /// trace reads `S..T` on return.
+///
+/// `l` is the target length in residues. `ox` must store the full Forward
+/// DP matrix for that target and `om`; a parser-only matrix lacks the core
+/// cells needed for traceback. The call advances `rng`. Trace residue and
+/// model-node coordinates are 1-based.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn stochastic_trace_pmx_into(
     rng: &mut MersenneTwister,
@@ -303,6 +313,11 @@ fn f_norm(vec: &mut [f32]) {
 /// Samples an alignment of digital sequence `dsq` (length `L`) to profile `gm`
 /// from the filled Forward DP matrix `gx`. Returns the sampled `Trace`,
 /// reversed to read `S..T`. Counterpart of `p7_GStochasticTrace`.
+///
+/// `l` is the number of residues at `dsq[1..=l]`, excluding sentinels.
+/// `gx` must be the full Forward matrix computed for this same sequence
+/// and configured `gm`. The call advances `rng`; repeat calls sample
+/// additional alignments without modifying `gx`.
 pub fn g_stochastic_trace(
     rng: &mut MersenneTwister,
     dsq: &[Dsq],

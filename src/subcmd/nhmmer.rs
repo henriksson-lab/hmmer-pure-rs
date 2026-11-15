@@ -951,6 +951,12 @@ fn residue_code_for_alignment_score(abc: &Alphabet, residue: u8) -> u8 {
 /// `search_sequence`. Adjusts hit lnP for nhmmer's residue-based E-value
 /// space (lnP += ln(N/W)), deduplicates, thresholds, and emits the
 /// long_target text report plus optional `--tblout`.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
     let table_cmdline = normalize_nhmmer_table_cmdline(&cmdline);

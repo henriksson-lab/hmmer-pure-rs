@@ -29,6 +29,11 @@ const MAX_ITER: u32 = 100;
 /// `rel_tolerance * R->x` term reads.
 ///
 /// Returns `Err` where C throws `eslENOHALT` ("failed to converge in Newton").
+///
+/// `guess` is the initial value of the unknown. The callback must provide
+/// both the function and its derivative at each requested value; avoid a
+/// zero derivative on the iteration path. Returns the estimated root or an
+/// error after 100 iterations. This method does not enforce a search bracket.
 pub fn newton_raphson<F>(mut fdf: F, guess: f64) -> Result<f64, String>
 where
     F: FnMut(f64) -> (f64, f64),

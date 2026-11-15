@@ -52,6 +52,10 @@ pub struct Alphabet {
 impl Alphabet {
     /// Create one of the standard bio alphabets (DNA, RNA, or Amino).
     /// Counterpart to Easel's `esl_alphabet_Create()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics for [`AlphabetType::Unknown`].
     pub fn new(abc_type: AlphabetType) -> Self {
         match abc_type {
             AlphabetType::Dna => Self::create_dna(),
@@ -345,6 +349,10 @@ impl Alphabet {
 
     /// Digitize a single ASCII character to its digital code, or DSQ_ILLEGAL.
     #[inline]
+    ///
+    /// Input is an ASCII byte, not an existing digital code. Returns
+    /// [`DSQ_IGNORED`] for ignored characters and [`DSQ_ILLEGAL`] for unsupported
+    /// characters, including non-ASCII bytes; neither value is a residue code.
     pub fn digitize_symbol(&self, c: u8) -> Dsq {
         if (c as usize) < 128 {
             self.inmap[c as usize]
@@ -362,6 +370,10 @@ impl Alphabet {
     /// Digitize an ASCII sequence into a new `Vec<Dsq>`.
     /// Returns a 1-based digital sequence: `dsq[0] = SENTINEL`, `dsq[1..=L]` = residues,
     /// `dsq[L+1] = SENTINEL`. Counterpart to Easel's `esl_abc_Digitize()`.
+    ///
+    /// Both ignored characters and illegal bytes are silently omitted; the
+    /// returned residue count is `result.len() - 2`, which may differ from
+    /// `seq.len()`. Use [`Self::digitize_checked`] to reject malformed input.
     pub fn digitize(&self, seq: &[u8]) -> Vec<Dsq> {
         let mut dsq = Vec::with_capacity(seq.len() + 2);
         dsq.push(DSQ_SENTINEL);
@@ -377,6 +389,11 @@ impl Alphabet {
 
     /// Checked variant of [`Self::digitize`]. Illegal symbols return an error
     /// instead of being silently dropped.
+    ///
+    /// Returns a 1-based sequence with leading/trailing [`DSQ_SENTINEL`] bytes.
+    /// Ignored characters are skipped. Gaps, missing-data markers, illegal
+    /// symbols, and non-ASCII bytes return a format error; the nonresidue marker
+    /// `*` is accepted. Input is unaligned sequence text.
     pub fn digitize_checked(&self, seq: &[u8]) -> crate::errors::HmmerResult<Vec<Dsq>> {
         let mut dsq = Vec::with_capacity(seq.len() + 2);
         dsq.push(DSQ_SENTINEL);
@@ -404,6 +421,10 @@ impl Alphabet {
     /// Convert a 1-based digital sequence back to ASCII text.
     /// Counterpart to Easel's `esl_abc_Textize()`.
     #[allow(clippy::needless_range_loop)]
+    ///
+    /// `l` is the residue count, excluding sentinels; `dsq[1..=l]` is read.
+    /// The output has no sentinels. Codes outside the alphabet become `?`.
+    /// Panics if `dsq` is shorter than `l + 1` elements.
     pub fn textize(&self, dsq: &[Dsq], l: usize) -> String {
         let mut s = String::with_capacity(l);
         for i in 1..=l {
@@ -419,6 +440,10 @@ impl Alphabet {
 
     /// Reverse-complement a 1-based digital sequence in place (DNA/RNA only).
     /// Counterpart to Easel's `esl_abc_revcomp()`. Panics if the alphabet has no complement table.
+    ///
+    /// `n` is the residue count, excluding sentinels. Only indices `1..=n`
+    /// are modified; sentinel bytes stay in place. Panics if this is an amino
+    /// alphabet, the buffer is too short, or a residue code has no table entry.
     pub fn revcomp(&self, dsq: &mut [Dsq], n: usize) {
         let comp = self
             .complement

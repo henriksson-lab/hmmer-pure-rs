@@ -250,6 +250,12 @@ fn parse_positive_f64(s: &str) -> Result<f64, String> {
 /// printed in the canonical HMMER per-sequence tabular layout. Corresponds to
 /// `serial_master()` in hmmer/src/hmmscan.c. MPI is omitted; pressed HMM
 /// databases are required and read through the `.h3*` sidecar path.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let cmdline = args.join(" ");
     let table_cmdline = normalize_hmmscan_table_cmdline(&cmdline);

@@ -60,7 +60,12 @@ unsafe fn hmax_ps(v: __m128) -> f32 {
 /// the analogous failure mode (caller should fall back to the generic path).
 ///
 /// # Safety
-/// Requires SSE2 support and full striped matrices in `fwd`, `bck`, and `pp`.
+/// Requires SSE2 support and full striped matrices in `fwd` and `bck`
+/// with identical dimensions matching `om`; `pp` is resized internally.
+///
+/// `fwd` and `bck` must be full Forward/Backward matrices for the same
+/// sequence and profile `om`, with compatible scale metadata. `pp` is
+/// resized automatically and overwritten with linear posterior probabilities.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn posterior_decoding_pmx(fwd: &ProbMx, bck: &ProbMx, om: &OProfile, pp: &mut ProbMx) {
     let l = fwd.l;
@@ -158,7 +163,14 @@ pub unsafe fn posterior_decoding_pmx(fwd: &ProbMx, bck: &ProbMx, om: &OProfile, 
 /// 4 passes to match C's `esl_sse_rightshift_ps` cascade.
 ///
 /// # Safety
-/// Requires SSE2 support and full striped matrices in `pp` and `ox`.
+/// Requires SSE2 support and a full striped `pp` matching `om`.
+/// For traceback, `ox` must have matching dimensions and contain the
+/// completed OA calculation; the fill routine resizes `ox` internally.
+///
+/// `pp` must contain full striped linear posterior probabilities for
+/// `om`, as produced by [`posterior_decoding_pmx`]. `ox` is resized
+/// automatically and overwritten. The return value is an expected count
+/// of correct residue assignments, not a score in nats or bits.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn optimal_accuracy_pmx(om: &OProfile, pp: &ProbMx, ox: &mut ProbMx) -> f32 {
     let m = om.m;
@@ -318,7 +330,14 @@ pub unsafe fn optimal_accuracy_pmx(om: &OProfile, pp: &ProbMx, ox: &mut ProbMx) 
 /// `None` if no model/sequence coordinates were ever entered.
 ///
 /// # Safety
-/// Requires SSE2 support and full striped matrices in `pp` and `ox`.
+/// Requires SSE2 support and a full striped `pp` matching `om`.
+/// For traceback, `ox` must have matching dimensions and contain the
+/// completed OA calculation; the fill routine resizes `ox` internally.
+///
+/// `pp` and `ox` must be the posterior and OA matrices for the same
+/// sequence and profile `om`; compute `ox` with [`optimal_accuracy_pmx`]
+/// first. Returned model-node and residue coordinates are 1-based.
+/// The tuple is `(hmmfrom, hmmto, sqfrom, sqto)`, with inclusive endpoints.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn oa_trace_coords_pmx(
     om: &OProfile,
@@ -418,7 +437,13 @@ pub unsafe fn oa_trace_coords_pmx(
 /// runaway safety break (`tr.n > L + M + 100`).
 ///
 /// # Safety
-/// Requires SSE2 support and full striped matrices in `pp` and `ox`.
+/// Requires SSE2 support and a full striped `pp` matching `om`.
+/// For traceback, `ox` must have matching dimensions and contain the
+/// completed OA calculation; the fill routine resizes `ox` internally.
+///
+/// `pp` and `ox` must be the posterior and OA matrices for the same
+/// sequence and profile `om`; compute `ox` with [`optimal_accuracy_pmx`]
+/// first. Returned model-node and residue coordinates are 1-based.
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn oa_trace_pmx(om: &OProfile, pp: &ProbMx, ox: &ProbMx) -> Trace {
     let mut tr = Trace::new();

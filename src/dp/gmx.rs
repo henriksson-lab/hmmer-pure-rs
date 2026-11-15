@@ -15,7 +15,13 @@ pub const P7G_B: usize = 3;
 pub const P7G_C: usize = 4;
 pub const P7G_NXCELLS: usize = 5;
 
-/// Generic DP matrix.
+/// Generic DP matrix with boundary row and column 0.
+///
+/// Sequence residues use rows `1..=l`; model match states use columns
+/// `1..=m`. Cell accessors require indices within the allocated dimensions.
+/// Values are log scores in nats after Forward/Backward/Viterbi, linear
+/// probabilities after posterior decoding, and expected counts after OA.
+/// The matrix itself does not enforce or convert between these meanings.
 #[derive(Debug)]
 pub struct Gmx {
     pub m: usize,
@@ -35,6 +41,10 @@ impl Gmx {
     /// Allocate a new generic DP matrix sized for a model up to `alloc_m` and
     /// a sequence up to `alloc_l`. Reusable and resizable via [`Gmx::grow_to`].
     /// Counterpart of `p7_gmx_Create`.
+    ///
+    /// `alloc_m` counts model match states; `alloc_l` counts target residues.
+    /// Boundary row and column 0 are allocated automatically. Initial cell values
+    /// are negative infinity, while active dimensions `m` and `l` start at zero.
     pub fn new(alloc_m: usize, alloc_l: usize) -> Self {
         let alloc_w = alloc_m + 1;
         let alloc_r = alloc_l + 1;
@@ -61,6 +71,10 @@ impl Gmx {
     /// Ensure the matrix is large enough for a model of size `m` and sequence of
     /// length `l`; reallocates with `-INFINITY` fill if needed. Any prior data is
     /// invalidated. Counterpart of `p7_gmx_GrowTo`.
+    ///
+    /// `m` counts model nodes and `l` target residues, excluding boundary cells.
+    /// This resets active dimensions to zero even if no allocation is needed;
+    /// existing cells are only reinitialized when allocation grows.
     pub fn grow_to(&mut self, m: usize, l: usize) {
         let new_w = m + 1;
         let new_r = l + 1;
@@ -156,6 +170,9 @@ impl Gmx {
 
     /// Reset bookkeeping so the matrix can be reused for a new calculation
     /// (allocation is preserved). Counterpart of `p7_gmx_Reuse`.
+    ///
+    /// Cell contents are retained; the next algorithm must initialize or
+    /// overwrite them before reading.
     pub fn reuse(&mut self) {
         self.m = 0;
         self.l = 0;

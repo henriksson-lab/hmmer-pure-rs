@@ -87,6 +87,10 @@ impl Mt19937 {
         p.len() - 1
     }
 
+    ///
+    /// `bg_f` is a nonempty canonical-symbol probability vector in digital
+    /// alphabet order, with at most 256 entries. The return value is a digital
+    /// residue code; no boundary sentinels are added.
     pub fn sample_residue(&mut self, bg_f: &[f32]) -> u8 {
         self.sample_discrete(bg_f) as u8
     }
@@ -122,9 +126,9 @@ impl MersenneTwister {
         self.next_u32() as f64 / 4294967296.0 // 2^32
     }
 
-    /// Uniform random deviate on [0.0, 1.0) as a float, computed in f64 first.
+    /// Uniform random deviate computed in f64, then rounded to f32.
     ///
-    /// Casting to f32 only after sampling preserves the half-open range.
+    /// The final cast can round a value just below 1.0 up to 1.0.
     pub fn next_f32(&mut self) -> f32 {
         self.next_f64() as f32
     }
@@ -132,8 +136,9 @@ impl MersenneTwister {
     /// Sample an index from a normalized discrete distribution `p[0..n-1]`.
     ///
     /// Returns the index `i` selected with probability `p[i]`. Caller must
-    /// pass a normalized (sum-to-one) vector; behavior on unnormalized input
-    /// is the last index. Port of Easel `esl_rnd_FChoose` (simplified).
+    /// pass nonnegative weights with sum near one (checked by a debug
+    /// assertion). Weights are renormalized during sampling. An empty
+    /// slice is invalid. Port of Easel `esl_rnd_FChoose`.
     pub fn sample_discrete(&mut self, p: &[f32]) -> usize {
         // Mirror Easel `esl_rnd_FChoose` exactly. Computing in double
         // precision is important: casting `roll` to f32 would give a [0,1]
@@ -164,6 +169,10 @@ impl MersenneTwister {
     ///
     /// Thin wrapper around `sample_discrete` that returns a `u8` suitable
     /// for a digital sequence alphabet.
+    ///
+    /// `bg_f` is a nonempty canonical-symbol probability vector in digital
+    /// alphabet order, with at most 256 entries. The return value is a digital
+    /// residue code; no boundary sentinels are added.
     pub fn sample_residue(&mut self, bg_f: &[f32]) -> u8 {
         self.sample_discrete(bg_f) as u8
     }
@@ -174,6 +183,9 @@ impl MersenneTwister {
     /// `u = esl_random_uint32(r) / factor` until `u < n`. The rejection bound
     /// is the raw u32 comparison `u >= n` (with `n` treated as a u32), so the
     /// RNG stream is consumed identically to the reference.
+    ///
+    /// `n` must be in `1..=u32::MAX`; zero panics and larger values cannot
+    /// be represented by this generator's 32-bit rejection bound.
     pub fn roll(&mut self, n: usize) -> usize {
         assert!(n > 0);
         let n = n as u32;
@@ -327,6 +339,10 @@ impl Rand64 {
 /// `esl_rand64_Deal` (esl_rand64.c:359): sample `m` integers without
 /// replacement from `0..n-1`, returned in ascending order, via Vitter's
 /// sequential sampling "Method D". Direct port; bit-faithful to the C.
+///
+/// `m_in` is the number of selections and `n_in` the population size;
+/// require `0 <= m_in <= n_in`. The population is `0..n_in` (upper bound
+/// excluded). The call advances `rng` and returns exactly `m_in` indices.
 pub fn esl_rand64_deal(rng: &mut Rand64, m_in: i64, n_in: i64) -> Vec<i64> {
     let mut m = m_in;
     let mut n = n_in;

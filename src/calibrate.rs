@@ -11,14 +11,25 @@ use crate::stats;
 use crate::util::cmath::{c_log_f64, ESL_CONST_LOG2, ESL_CONST_LOG2R};
 use crate::util::random::MersenneTwister;
 
+/// Monte Carlo sample sizes and lengths used to calibrate model E-values.
+///
+/// Lengths count residues; sample counts must permit statistical fitting.
+/// Defaults use 200 samples per stage, lengths 200/200/100, and a 4% Forward tail.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalibrationConfig {
+    /// Length in residues of each MSV calibration sequence.
     pub em_l: usize,
+    /// Number of independent MSV calibration sequences.
     pub em_n: usize,
+    /// Length in residues of each Viterbi calibration sequence.
     pub ev_l: usize,
+    /// Number of independent Viterbi calibration sequences.
     pub ev_n: usize,
+    /// Length in residues of each Forward calibration sequence.
     pub ef_l: usize,
+    /// Number of independent Forward calibration sequences.
     pub ef_n: usize,
+    /// Fraction of the Forward score distribution fitted as an exponential tail, in `(0, 1)`.
     pub eft: f64,
 }
 
@@ -124,6 +135,10 @@ fn forward_filter_score(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 /// `log(2) + 1.44 / (M * H)`, where H is the mean match-state relative
 /// entropy in bits. Used for both Viterbi Gumbel and Forward exponential
 /// tails. Counterpart to C's `p7_Lambda()`.
+/// `hmm` must contain normalized emission probabilities for a nonempty
+/// model; `bg` must use the same alphabet. The result is the positive
+/// rate parameter used with bit-score distributions. Zero relative entropy
+/// makes the correction infinite.
 pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
     let k = hmm.abc_k;
     // Use f64 precision for entropy computation in bits (log2), matching C's double
@@ -158,11 +173,17 @@ pub fn p7_lambda(hmm: &Hmm, bg: &Bg) -> f32 {
 /// `fwd tau`, evalues.c:105-107), which the drivers wrap as `build failed: %s`.
 /// On failure `hmm.evparam` may be partially written and `P7H_STATS` is not
 /// raised, as in C.
+/// `abc`, `bg`, and `hmm` must use the same alphabet, and `hmm` must already
+/// contain model probabilities rather than training counts. Uses seed 42
+/// and [`CalibrationConfig::default`] for reproducible simulations.
 pub fn calibrate(hmm: &mut Hmm, abc: &Alphabet, bg: &Bg) -> Result<(), String> {
     calibrate_with_seed(hmm, abc, bg, 42)
 }
 
 /// Calibrate E-value parameters with a caller-selected Easel fast RNG seed.
+/// Uses the same model/alphabet prerequisites, mutation, and fit errors as
+/// [`calibrate`], with default simulation settings and the supplied `seed`.
+/// See [`crate::util::random::MersenneTwister::new`] for seed-zero behavior.
 pub fn calibrate_with_seed(
     hmm: &mut Hmm,
     abc: &Alphabet,
@@ -174,6 +195,15 @@ pub fn calibrate_with_seed(
 
 /// Calibrate E-value parameters with caller-selected simulation lengths,
 /// counts, Forward tail mass, and Easel fast RNG seed.
+/// `hmm` must be a probabilistic model, and `abc` and `bg` must match its
+/// alphabet. Simulation lengths count residues, counts specify the number
+/// of independently sampled sequences, and `config.eft` is the fraction
+/// of the Forward score distribution fitted as a tail (between 0 and 1).
+/// Use positive lengths and counts large enough for distribution fitting.
+///
+/// Writes `hmm.evparam` and sets `P7H_STATS` on success. Returns a string
+/// identifying the failed fit; earlier fit parameters may already have
+/// been written when an error is returned.
 pub fn calibrate_with_config(
     hmm: &mut Hmm,
     abc: &Alphabet,

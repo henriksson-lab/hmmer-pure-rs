@@ -17,6 +17,11 @@ use crate::util::cmath::{c_expf_to_f32, c_logf_to_f32};
 /// state-usage frequencies of the posterior matrix `pp` over envelope
 /// `ienv..=jenv`. Returns the odds-ratio vector (caller can convert to a score
 /// correction via `null2_score`). Counterpart of `p7_GNull2_ByExpectation`.
+///
+/// `ienv` and `jenv` are inclusive, 1-based residue coordinates and must satisfy
+/// `1 <= ienv <= jenv <= pp.l`. `pp` must hold posterior probabilities for
+/// `gm`, not log scores. The result has `gm.abc_k` entries in canonical
+/// alphabet-code order; entries are odds ratios, not logarithms.
 pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) -> Vec<f32> {
     let m = gm.m;
     let k = gm.abc_k;
@@ -76,6 +81,11 @@ pub fn null2_by_expectation(gm: &Profile, pp: &Gmx, ienv: usize, jenv: usize) ->
 ///
 /// Returns the total correction in nats: `sum_{i=ienv..=jenv} ln(null2[dsq[i]])`.
 /// The caller subtracts this from the raw domain score.
+///
+/// `ienv..=jenv` uses 1-based digital-sequence coordinates. Codes outside
+/// `null2` and nonpositive odds ratios contribute zero. The implementation
+/// only visits positions present in `dsq`, so provide the complete envelope
+/// when a correction for every residue is required.
 pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
     let mut score = 0.0_f32;
     for &sym in dsq.iter().take(jenv + 1).skip(ienv) {
@@ -94,6 +104,10 @@ pub fn null2_score(null2: &[f32], dsq: &[u8], ienv: usize, jenv: usize) -> f32 {
 /// trace positions `zstart..=zend`. Target sequence is irrelevant; profile
 /// configuration is irrelevant (only emission odds are used).
 /// Counterpart of `p7_GNull2_ByTrace`.
+///
+/// `zstart` and `zend` are zero-based indices into the trace, not residue
+/// coordinates; `zend` is clipped to the last trace entry. The returned vector
+/// has `gm.abc_k` entries in canonical alphabet-code order.
 pub fn null2_by_trace(gm: &Profile, tr: &Trace, zstart: usize, zend: usize) -> Vec<f32> {
     let m = gm.m;
     let k = gm.abc_k;

@@ -224,6 +224,11 @@ fn write_annotation<W: Write>(w: &mut W, annotation: Option<&[u8]>, m: usize) ->
 }
 
 /// Write one C HMMER3/f `.h3f` MSV-filter record.
+/// `w` receives one native-endian binary record at its current position.
+/// `hmm` and `om` must describe the same alphabet and model. `offsets`
+/// contains byte offsets to the corresponding `.h3m`, `.h3f`, and `.h3p`
+/// records, in that order. Returns I/O or unsupported/invalid format errors;
+/// a failed write may leave a partial record in `w`.
 pub fn write_h3f_record<W: Write>(
     w: &mut W,
     hmm: &Hmm,
@@ -276,6 +281,10 @@ pub fn write_h3f_record<W: Write>(
 }
 
 /// Write one C HMMER3/f `.h3p` optimized-profile remainder record.
+/// `w` receives one native-endian binary record at its current position.
+/// `hmm` supplies annotation and alphabet information and must match `om`.
+/// Returns I/O or unsupported/invalid format errors; a failed write may
+/// leave a partial record in the writer.
 pub fn write_h3p_record<W: Write>(w: &mut W, hmm: &Hmm, om: &OProfile) -> HmmerResult<()> {
     let abc_type = alphabet_type_code(hmm.abc_type)?;
     let q8 = nqw(om.m);
@@ -376,6 +385,10 @@ fn alphabet_dimensions(abc_type: i32, sidecar: &str) -> HmmerResult<(usize, usiz
 /// Read one MSV filter (`.h3f`) record produced by `hmmpress`.
 /// Reads the V3F magic, the SSV/MSV byte score table, and footer magic; mirrors
 /// `p7_oprofile_ReadMSV` in `hmmer/src/p7_hmmfile.c`. Returns `Ok(None)` at EOF.
+/// `r` must be positioned at a record boundary in a native-endian HMMER3/f
+/// sidecar. A clean EOF before the record returns `Ok(None)`; truncated
+/// records, invalid headers, or malformed payloads return errors. On
+/// success the reader is positioned immediately after the record.
 pub fn read_h3f_record<R: Read>(r: &mut R) -> HmmerResult<Option<MsvFilterData>> {
     let Some(magic) = read_record_magic_ne(r)? else {
         return Ok(None);
@@ -456,12 +469,17 @@ pub fn read_h3f_record<R: Read>(r: &mut R) -> HmmerResult<Option<MsvFilterData>>
 
 /// True iff all four pressed-database sidecars (`.h3f`, `.h3p`, `.h3i`, `.h3m`)
 /// exist next to `hmm_path`.
+/// Sidecar names are formed by appending suffixes to the source database
+/// path, e.g. `models.hmm.h3f`. This only tests existence; use
+/// [`pressed_db_available`] to validate contents.
 pub fn pressed_db_exists(hmm_path: &Path) -> bool {
     pressed_sidecar_paths(hmm_path).iter().all(|p| p.exists())
 }
 
 /// Return `Ok(true)` when every pressed-database sidecar exists, `Ok(false)`
 /// when none exist, and an error for partial sidecar sets.
+/// Pass the unsuffixed source HMM path (for example `models.hmm`), not a
+/// sidecar path. This checks existence only, without reading file contents.
 pub fn pressed_db_sidecars_complete(hmm_path: &Path) -> HmmerResult<bool> {
     let paths = pressed_sidecar_paths(hmm_path);
     let existing = paths.iter().filter(|p| p.exists()).count();
@@ -477,6 +495,10 @@ pub fn pressed_db_sidecars_complete(hmm_path: &Path) -> HmmerResult<bool> {
     Ok(true)
 }
 
+/// Return the `.h3m` sidecar path for the source HMM database path.
+///
+/// The suffix is appended rather than replacing an extension:
+/// `models.hmm` becomes `models.hmm.h3m`. No file is opened or validated.
 pub fn pressed_h3m_path(hmm_path: &Path) -> PathBuf {
     pressed_sidecar_paths(hmm_path)[3].clone()
 }
@@ -485,6 +507,10 @@ pub fn pressed_h3m_path(hmm_path: &Path) -> PathBuf {
 /// exists. Return an error for partial or malformed sidecar sets, because C
 /// HMMER treats those as pressed-database failures rather than silently falling
 /// back to the source HMM.
+/// `hmm_path` is the unsuffixed source database path. In addition to
+/// sidecar existence, this checks record/index consistency across the
+/// database and can read all models/profiles; it is not a cheap existence
+/// probe. I/O failures are returned as errors.
 pub fn pressed_db_available(hmm_path: &Path) -> HmmerResult<bool> {
     if !pressed_db_sidecars_complete(hmm_path)? {
         return Ok(false);
@@ -543,6 +569,10 @@ pub fn pressed_db_available(hmm_path: &Path) -> HmmerResult<bool> {
 /// Profiles are returned in the same order as their corresponding `.h3m`
 /// records. Scans still need the `.h3m` HMMs for generic profile
 /// configuration, thresholds, alignment, and domain definition.
+/// Pass the source database path without a sidecar suffix. Reads the
+/// `.h3f`, `.h3p`, and `.h3m` files and validates matching model identities,
+/// record offsets, and trailing data. Returns I/O or format errors for
+/// missing, truncated, or inconsistent files.
 pub fn read_pressed_oprofiles(hmm_path: &Path) -> HmmerResult<Vec<OProfile>> {
     let paths = pressed_sidecar_paths(hmm_path);
     let mut h3f = std::fs::File::open(&paths[0]).map_err(HmmerError::Io)?;
@@ -623,6 +653,9 @@ pub fn read_pressed_oprofiles(hmm_path: &Path) -> HmmerResult<Vec<OProfile>> {
 
 /// Validate that hydrated pressed optimized profiles line up with `.h3m`
 /// HMM records in count and order before scan code indexes them in parallel.
+/// `hmms` and `oprofiles` must be in database record order. Returns a format
+/// error on a count, name, model-length, or alphabet-dimension mismatch;
+/// this does not compare every numerical scoring parameter.
 pub fn validate_pressed_oprofiles_match_hmms(
     hmms: &[Hmm],
     oprofiles: &[OProfile],
@@ -1038,6 +1071,10 @@ pub struct ProfileData {
 /// Reads name/acc/desc, annotation strings, the striped Viterbi (16-bit) and
 /// Forward (float) parameter blocks, and trailing cutoffs/metadata. Mirrors
 /// `p7_oprofile_ReadRest` in `hmmer/src/p7_hmmfile.c`. Returns `Ok(None)` at EOF.
+/// `r` must be positioned at a record boundary in a native-endian HMMER3/f
+/// sidecar. A clean EOF before the record returns `Ok(None)`; truncated
+/// records, invalid headers, or malformed payloads return errors. On
+/// success the reader is positioned immediately after the record.
 pub fn read_h3p_record<R: Read>(r: &mut R) -> HmmerResult<Option<ProfileData>> {
     let Some(magic) = read_record_magic_ne(r)? else {
         return Ok(None);
@@ -1185,6 +1222,10 @@ fn read_f32_vec4(bytes: &[u8], offset: &mut usize, field: &str) -> HmmerResult<[
 /// This intentionally does not replace scan's current `.h3m` path yet: scan
 /// still needs the generic profile/HMM for thresholding, alignment, and domain
 /// work. The constructor gives the acceleration payload a focused parity point.
+/// Both records must come from the same model and native-endian format.
+/// Returns a format error for mismatched identities, alphabet codes, or
+/// vector dimensions. The resulting profile retains the stored scoring
+/// configuration; reconfigure its target length before scoring a new target.
 pub fn oprofile_from_pressed_records(
     msv: &MsvFilterData,
     profile: &ProfileData,

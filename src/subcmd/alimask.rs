@@ -131,6 +131,12 @@ fn parse_fraction(s: &str) -> Result<f64, String> {
 /// Parses the command line, reads the input alignment, and writes a Stockholm output
 /// optionally augmented with a `#=GC MM` model mask line. Corresponds to `main()` in
 /// hmmer/src/alimask.c, with the Rust port focused on the simple mask-annotation flow.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     let wid_on_cmdline = args
         .iter()

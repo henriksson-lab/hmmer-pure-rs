@@ -222,6 +222,9 @@ pub fn fmt_width11_0(val: f64) -> String {
 }
 
 /// Format a `SystemTime` as HMMER's ctime-style footer date.
+/// Uses UTC calendar fields without a timezone suffix, not the local
+/// machine timezone. Times before the Unix epoch are formatted as the
+/// Unix epoch. The returned string has no trailing newline.
 pub fn format_hmmer_date(t: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
 

@@ -5,6 +5,7 @@
 
 use crate::alphabet::Alphabet;
 use crate::bg::Bg;
+use crate::errors::{HmmerError, HmmerResult};
 use crate::hmm::*;
 use crate::util::cmath::{c_log_f32_to_f32, c_log_f64, c_log_to_f32, ESL_CONST_LOG2};
 
@@ -51,12 +52,68 @@ pub const P7P_MOVE: usize = 1;
 pub const P7P_NXTRANS: usize = 2;
 
 // Search modes
+/// Plan7 local, multihit search: each domain may match part of the HMM,
+/// and a target sequence may contain multiple domains.
+/// `P7` refers to the Plan7 profile HMM architecture.
 pub const P7_LOCAL: i32 = 1;
+/// Plan7 glocal, multihit search: each domain spans the full HMM,
+/// and a target sequence may contain multiple domains. Target flanks are allowed.
+/// `P7` refers to the Plan7 profile HMM architecture.
 pub const P7_GLOCAL: i32 = 2;
+/// Plan7 local, unihit search: at most one domain per target sequence,
+/// matching any part of the HMM. Target flanks are allowed.
+/// `P7` refers to the Plan7 profile HMM architecture.
 pub const P7_UNILOCAL: i32 = 3;
+/// Plan7 glocal, unihit search: at most one domain per target sequence,
+/// spanning the full HMM. Target flanks are allowed.
+/// `P7` refers to the Plan7 profile HMM architecture.
 pub const P7_UNIGLOCAL: i32 = 4;
 
-/// Scoring profile derived from an HMM.
+fn check_distribution(probabilities: &[f32], label: &str) -> HmmerResult<()> {
+    let sum: f64 = probabilities.iter().map(|&p| p as f64).sum();
+    if probabilities
+        .iter()
+        .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+        || (sum - 1.0).abs() > 0.001
+    {
+        return Err(HmmerError::InvalidArg(format!(
+            "{label} must be finite probabilities summing to one"
+        )));
+    }
+    Ok(())
+}
+
+/// Alignment coverage and number of domains allowed per target.
+///
+/// Used by [`Profile::from_hmm`]; the existing integer `P7_*` modes remain
+/// available for low-level APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Match part of the model; allow multiple domains per target.
+    LocalMultihit,
+    /// Span the full model; allow multiple domains per target.
+    GlocalMultihit,
+    /// Match part of the model; allow at most one domain per target.
+    LocalUnihit,
+    /// Span the full model; allow at most one domain per target.
+    GlocalUnihit,
+}
+
+impl From<SearchMode> for i32 {
+    fn from(mode: SearchMode) -> Self {
+        match mode {
+            SearchMode::LocalMultihit => P7_LOCAL,
+            SearchMode::GlocalMultihit => P7_GLOCAL,
+            SearchMode::LocalUnihit => P7_UNILOCAL,
+            SearchMode::GlocalUnihit => P7_UNIGLOCAL,
+        }
+    }
+}
+
+/// Scoring profile derived from an HMM, with natural-log scores in nats.
+///
+/// Allocate with [`Profile::new`], then initialize with [`profile_config`].
+/// Target sequence length and HMM model length are separate parameters.
 #[derive(Debug, Clone)]
 pub struct Profile {
     /// Transition scores: `tsc[k * P7P_NTRANS + s]` for node k, transition s
@@ -68,10 +125,14 @@ pub struct Profile {
     /// Special state transitions `[NECJ][LOOP,MOVE]`
     pub xsc: [[f32; P7P_NXTRANS]; P7P_NXSTATES],
 
+    /// Search mode: one of the `P7_LOCAL`, `P7_GLOCAL`, or `P7_UNI*` constants.
     pub mode: i32,
-    pub l: i32,   // configured target length
-    pub m: usize, // model length (nodes)
-    pub nj: f32,  // expected # J uses
+    /// Configured target length in residues, excluding sentinels.
+    pub l: i32,
+    /// Number of model match nodes, independent of the target length.
+    pub m: usize,
+    /// Expected number of uses of the between-domain J state.
+    pub nj: f32,
 
     // Annotation (copied from HMM)
     pub name: String,
@@ -95,6 +156,76 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Allocate and configure a scoring profile with checked inputs.
+    ///
+    /// `target_length` counts residues, excluding sentinels, and must fit an
+    /// `i32`. `mode` selects model coverage and the permitted number of domains.
+    /// Checks the alphabet, table dimensions, core probability distributions,
+    /// background frequencies, and positive local match occupancy. Returns
+    /// [`HmmerError::InvalidArg`] for invalid model/background data or
+    /// [`HmmerError::Range`] for an unsupported length.
+    ///
+    /// Calibration is not required for constructing a profile. Use
+    /// [`crate::Searcher`] for calibrated database searches. This does not
+    /// change `bg`'s length model; low-level callers must set it separately.
+    pub fn from_hmm(
+        hmm: &Hmm,
+        bg: &Bg,
+        target_length: usize,
+        mode: SearchMode,
+    ) -> HmmerResult<Self> {
+        let length = i32::try_from(target_length)
+            .map_err(|_| HmmerError::Range("target length exceeds i32::MAX residues".into()))?;
+        if hmm.m == 0 || hmm.m > i32::MAX as usize {
+            return Err(HmmerError::Range(
+                "model length must be in 1..=i32::MAX match states".into(),
+            ));
+        }
+        if hmm.abc_type == crate::alphabet::AlphabetType::Unknown {
+            return Err(HmmerError::InvalidArg("model alphabet is unknown".into()));
+        }
+        let abc = Alphabet::new(hmm.abc_type);
+        if hmm.abc_k != abc.k || bg.abc_type != abc.abc_type || bg.k != abc.k {
+            return Err(HmmerError::InvalidArg(
+                "model and background alphabets must match".into(),
+            ));
+        }
+        if bg.f.len() != abc.k || bg.f.iter().any(|p| *p <= 0.0) {
+            return Err(HmmerError::InvalidArg(
+                "background must have one positive frequency per canonical residue".into(),
+            ));
+        }
+        check_distribution(&bg.f, "background frequencies")?;
+        if hmm.t.len() <= hmm.m || hmm.mat.len() <= hmm.m {
+            return Err(HmmerError::InvalidArg(
+                "model probability tables are too short".into(),
+            ));
+        }
+        for row in &hmm.mat[1..=hmm.m] {
+            if row.len() != abc.k {
+                return Err(HmmerError::InvalidArg(
+                    "model emission row has wrong alphabet size".into(),
+                ));
+            }
+            check_distribution(row, "match emissions")?;
+        }
+        for row in &hmm.t[..hmm.m] {
+            check_distribution(&row[MM..=MD], "match transitions")?;
+            check_distribution(&row[IM..=II], "insert transitions")?;
+            check_distribution(&row[DM..=DD], "delete transitions")?;
+        }
+        if matches!(mode, SearchMode::LocalMultihit | SearchMode::LocalUnihit)
+            && !hmm_calculate_occupancy(hmm).iter().any(|p| *p > 0.0)
+        {
+            return Err(HmmerError::InvalidArg(
+                "model has no reachable match states".into(),
+            ));
+        }
+        let mut profile = Self::new(hmm.m, &abc);
+        profile_config(hmm, bg, &mut profile, length, mode.into());
+        Ok(profile)
+    }
+
     /// Allocate a profile sized for an HMM of up to `alloc_m` nodes
     /// (port of `p7_profile_Create`).
     ///
@@ -135,36 +266,60 @@ impl Profile {
     /// Read transition score `tsc[k * P7P_NTRANS + s]` for node `k`,
     /// transition class `s` (e.g. `P7P_MM`, `P7P_BM`).
     #[inline]
+    ///
+    /// Returns a natural-log score (nats). `k` is a model table index; `s` must
+    /// be a `P7P_*` transition index below [`P7P_NTRANS`]. For B→Mk entry,
+    /// use `k - 1` with [`P7P_BM`]. Panics if the flattened index is out of bounds.
     pub fn tsc(&self, k: usize, s: usize) -> f32 {
         self.tsc[k * P7P_NTRANS + s]
     }
 
     /// Write transition score `tsc[k * P7P_NTRANS + s] = val`.
     #[inline]
+    ///
+    /// `val` is in nats; use negative infinity for an impossible transition.
+    /// `k` and `s` use the indexing described by [`Self::tsc`]. Panics if the
+    /// flattened index is outside the allocated transition table.
     pub fn set_tsc(&mut self, k: usize, s: usize, val: f32) {
         self.tsc[k * P7P_NTRANS + s] = val;
     }
 
     /// Read the match emission score at node `k` for residue code `x`.
     #[inline]
+    ///
+    /// `k` is a 1-based model node (`1..=self.m`); `x` is a digital residue
+    /// code from the profile's alphabet, below `self.abc_kp`. Returns a score
+    /// in nats, with negative infinity for an impossible emission. Panics if
+    /// an index exceeds the allocated score tables.
     pub fn msc(&self, k: usize, x: usize) -> f32 {
         self.rsc[x][k * P7P_NR + P7P_MSC]
     }
 
     /// Read the insert emission score at node `k` for residue code `x`.
     #[inline]
+    ///
+    /// `k` is a 1-based model node (`1..=self.m`); `x` is a digital residue
+    /// code from the profile's alphabet, below `self.abc_kp`. Returns a score
+    /// in nats, with negative infinity for an impossible emission. Panics if
+    /// an index exceeds the allocated score tables.
     pub fn isc(&self, k: usize, x: usize) -> f32 {
         self.rsc[x][k * P7P_NR + P7P_ISC]
     }
 
     /// True if the profile is in local (vs. glocal) alignment mode (port of
     /// `p7_profile_IsLocal`).
+    ///
+    /// Local alignment may begin/end inside the model; glocal alignment spans
+    /// its full length. This checks `mode`, not the current special-state scores.
     pub fn is_local(&self) -> bool {
         self.mode == P7_LOCAL || self.mode == P7_UNILOCAL
     }
 
     /// True if the profile is configured for multihit alignment (port of
     /// `p7_profile_IsMultihit`).
+    ///
+    /// Multihit mode permits multiple domains in one target sequence. This checks
+    /// `mode`; [`reconfig_unihit`] and [`reconfig_multihit`] do not update that field.
     pub fn is_multihit(&self) -> bool {
         self.mode == P7_LOCAL || self.mode == P7_GLOCAL
     }
@@ -177,6 +332,9 @@ impl Profile {
 /// in a path through the model. Used by [`profile_config`] to set the local
 /// entry distribution (B→Mk) so that match states are entered in proportion
 /// to their occupancy.
+///
+/// Returns `hmm.m + 1` probabilities, with index 0 unused. Requires a
+/// nonempty core HMM with probability tables; a zero-node model panics.
 pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
     let mut mocc = vec![0.0_f32; hmm.m + 1];
     mocc[0] = 0.0;
@@ -195,6 +353,9 @@ pub fn hmm_calculate_occupancy(hmm: &Hmm) -> Vec<f32> {
 /// This is the composition returned by C's `p7_hmm_CompositionKLD()` when its
 /// optional composition vector is requested. It intentionally uses match
 /// emissions only, not insert emissions.
+///
+/// Returns `hmm.abc_k` values in canonical alphabet order, normalized when
+/// the total match occupancy is positive. Requires a nonempty core HMM.
 pub fn hmm_average_match_composition(hmm: &Hmm) -> Vec<f32> {
     let occ = hmm_calculate_occupancy(hmm);
     let mut avg = vec![0.0_f32; hmm.abc_k];
@@ -251,6 +412,31 @@ fn f_expect_sc_vec(abc: &Alphabet, sc: &mut [f32], p: &[f32]) {
 /// uses left-wing retraction), sets E-state multihit/unihit transitions, then
 /// finalises the length distribution via [`reconfig_length`]. Annotation
 /// (name/acc/desc/rf/mm/cs/cons/cutoff/compo/evparam) is copied across.
+///
+/// # Arguments
+///
+/// - `hmm`: Core HMM with probability tables and at least one match node.
+/// - `bg`: Background residue frequencies for the same alphabet as `hmm`.
+/// - `gm`: Output profile, allocated with [`Profile::new`] for this alphabet
+///   and at least `hmm.m` nodes. Its scores and metadata are overwritten.
+/// - `l`: Expected target sequence length in residues (amino acids or
+///   nucleotides), excluding digital-sequence sentinels. Use the actual
+///   sequence length when scoring a known target; this is distinct from
+///   the model length `hmm.m`. Must be nonnegative.
+/// - `mode`: [`P7_LOCAL`] or [`P7_GLOCAL`] for multiple domains per target,
+///   or [`P7_UNILOCAL`] or [`P7_UNIGLOCAL`] for at most one domain.
+///   Local modes allow partial model matches; glocal modes span the model.
+///
+/// When constructing a profile before reading targets, choose an initial
+/// expected length, then call [`reconfig_length`] for each target. Set the
+/// background length separately with [`Bg::set_length`]; this function does
+/// not change `bg` or an already converted optimized profile.
+///
+/// # Panics
+///
+/// Panics if the output score buffers are too small or the HMM has no nodes.
+/// Alphabet compatibility and valid mode/length values are caller prerequisites
+/// and are not checked.
 pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
     let abc = Alphabet::new(hmm.abc_type);
 
@@ -377,6 +563,13 @@ pub fn profile_config(hmm: &Hmm, bg: &Bg, gm: &mut Profile, l: i32, mode: i32) {
 /// unannotated length budget without recomputing the rest of the profile.
 /// Designed to be cheap because the search pipeline calls it once per target.
 /// The null model length must be reset separately via `Bg::set_length`.
+///
+/// `l` is a nonnegative target length in residues, excluding sentinels,
+/// usually [`crate::sequence::Sequence::n`]. This updates `gm.l` and the
+/// probabilities of consuming unrelated residues before, between, and after
+/// matching domains. It does not change the core model length or emissions.
+/// The profile must already have been initialized by [`profile_config`].
+/// An optimized profile derived from `gm` requires its own length update.
 pub fn reconfig_length(gm: &mut Profile, l: i32) {
     let pmove = (2.0 + gm.nj) / (l as f32 + 2.0 + gm.nj);
     let ploop = 1.0 - pmove;
@@ -395,6 +588,11 @@ pub fn reconfig_length(gm: &mut Profile, l: i32) {
 /// Sets the E-state loop/move transitions to `log(0.5)` and `nj = 1`, then
 /// calls [`reconfig_length`] because the length model depends on `nj`. Used
 /// inside the domain-definition pipeline to flip in and out of unihit mode.
+///
+/// `gm` must already be configured; `l` is a nonnegative target sequence
+/// length in residues, excluding sentinels. Allows additional domains through E→J.
+/// This changes special-state scores and `nj`, but does not update `gm.mode`,
+/// the background model, or an optimized profile derived from `gm`.
 pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
     gm.xsc[P7P_E][P7P_MOVE] = -(ESL_CONST_LOG2 as f32);
     gm.xsc[P7P_E][P7P_LOOP] = -(ESL_CONST_LOG2 as f32);
@@ -407,6 +605,11 @@ pub fn reconfig_multihit(gm: &mut Profile, l: i32) {
 ///
 /// Sets E→C to 0 and E→J to `-inf` (so J is unreachable), zeroes `nj`,
 /// then refreshes the length model via [`reconfig_length`].
+///
+/// `gm` must already be configured; `l` is a nonnegative target sequence
+/// length in residues, excluding sentinels. Allows at most one domain through E→C.
+/// This changes special-state scores and `nj`, but does not update `gm.mode`,
+/// the background model, or an optimized profile derived from `gm`.
 pub fn reconfig_unihit(gm: &mut Profile, l: i32) {
     gm.xsc[P7P_E][P7P_MOVE] = 0.0;
     gm.xsc[P7P_E][P7P_LOOP] = f32::NEG_INFINITY;

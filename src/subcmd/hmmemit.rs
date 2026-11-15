@@ -122,6 +122,12 @@ fn parse_unit_interval(s: &str) -> Result<f32, String> {
 ///
 /// With `-c`/`-C`, writes one consensus record per HMM. Otherwise samples
 /// `-N` independent sequences from the core or configured profile model.
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> std::process::ExitCode {
     use clap::parser::ValueSource;
     use clap::CommandFactory;

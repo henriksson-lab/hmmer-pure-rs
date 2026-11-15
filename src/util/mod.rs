@@ -6,6 +6,14 @@ pub mod scorematrix;
 pub mod simd_env;
 pub mod vectorops;
 
+///
+/// Apply the `HMMER_NCPU` environment default to CLI arguments.
+///
+/// `args` includes the executable/subcommand name at index 0. If no `--cpu`
+/// or `--cpu=...` argument is present and `HMMER_NCPU` is valid Unicode,
+/// inserts `--cpu` and the environment value immediately after index 0
+/// (or at index 0 for an empty vector). Returns the updated arguments.
+/// The value is passed through unchanged; the CLI parser validates it later.
 pub fn apply_hmmer_ncpu_env_default(mut args: Vec<String>) -> Vec<String> {
     let cpu_on_cmdline = args
         .iter()

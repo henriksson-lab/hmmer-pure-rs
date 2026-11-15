@@ -727,6 +727,12 @@ fn trace_forward_engine_scale_event_q1e5(
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `l` is the target length in residues. The first residue is `dsq[1]`;
+/// `dsq[0]` is the boundary sentinel and the buffer must contain `1..=l`.
+/// Use a local-mode `om` configured for this target/window length. All
+/// residue codes must be within its alphabet and its emission/transition
+/// vectors must retain their converted dimensions.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
@@ -743,6 +749,13 @@ pub unsafe fn forward_parser(dsq: &[Dsq], l: usize, om: &OProfile) -> f32 {
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `dsq_offset` is a zero-based offset into the digital buffer; the first
+/// scored residue is `dsq[dsq_offset + 1]`, and `l` residues are scored.
+/// The buffer must contain positions through `dsq_offset + l`.
+/// Use a local-mode `om` configured for this target/window length. All
+/// residue codes must be within its alphabet and its emission/transition
+/// vectors must retain their converted dimensions.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_offset(
@@ -947,6 +960,15 @@ pub unsafe fn forward_parser_offset(
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `l` is the target length in residues. The first residue is `dsq[1]`;
+/// `dsq[0]` is the boundary sentinel and the buffer must contain `1..=l`.
+/// Use a local-mode `om` configured for this target/window length. All
+/// residue codes must be within its alphabet and its emission/transition
+/// vectors must retain their converted dimensions.
+/// Preallocate `pmx` with `ProbMx::new(l)` for specials only or
+/// `ProbMx::new_full(om.m, l)` for full DP storage; the kernel fills the
+/// selected storage without resizing it.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx(
@@ -966,6 +988,16 @@ pub unsafe fn forward_parser_pmx(
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `dsq_offset` is a zero-based offset into the digital buffer; the first
+/// scored residue is `dsq[dsq_offset + 1]`, and `l` residues are scored.
+/// The buffer must contain positions through `dsq_offset + l`.
+/// Use a local-mode `om` configured for this target/window length. All
+/// residue codes must be within its alphabet and its emission/transition
+/// vectors must retain their converted dimensions.
+/// Preallocate `pmx` with `ProbMx::new(l)` for specials only or
+/// `ProbMx::new_full(om.m, l)` for full DP storage; the kernel fills the
+/// selected storage without resizing it.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx_offset(
@@ -993,6 +1025,18 @@ pub unsafe fn forward_parser_pmx_offset(
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `dsq_offset` is a zero-based offset into the digital buffer; the first
+/// scored residue is `dsq[dsq_offset + 1]`, and `l` residues are scored.
+/// The buffer must contain positions through `dsq_offset + l`.
+/// Use a local-mode `om` configured for this target/window length. All
+/// residue codes must be within its alphabet and its emission/transition
+/// vectors must retain their converted dimensions.
+/// Preallocate `pmx` with `ProbMx::new(l)` for specials only or
+/// `ProbMx::new_full(om.m, l)` for full DP storage; the kernel fills the
+/// selected storage without resizing it.
+/// Scratch vectors may initially be empty; they are resized and overwritten
+/// and can be retained for subsequent calls.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn forward_parser_pmx_offset_with_scratch(

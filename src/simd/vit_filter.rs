@@ -11,13 +11,13 @@ use crate::util::cmath::ESL_CONST_LOG2;
 
 /// Result of Viterbi filter.
 pub enum VitResult {
-    /// Sequence passed, Viterbi score in nats
+    /// Computed Viterbi score in nats; the caller applies the filter threshold.
     Ok(f32),
     /// Score overflowed
     Overflow,
 }
 
-/// Calculates the Viterbi score, vewy vewy fast, in limited precision.
+/// Calculate an approximate Viterbi score using signed 16-bit precision.
 ///
 /// Striped SIMD Viterbi (Farrar) in reduced precision (signed 16-bit words).
 /// Computes an approximation of the Viterbi score for `dsq[1..=l]` against
@@ -30,6 +30,15 @@ pub enum VitResult {
 ///
 /// # Safety
 /// Requires SSE2.
+///
+/// `l` counts target residues, excluding sentinels. Read residues from
+/// `dsq[1..=l]`; index 0 is a sentinel/unused boundary, not a residue.
+/// Use codes from the same alphabet as `om`, and update the profile's length
+/// configuration for the target before scoring. Scores are returned in nats,
+/// prior to null-model subtraction and division by `ln(2)` for bits.
+/// The optimized profile must retain the vector dimensions produced by its
+/// constructor/conversion, and every residue code must index a stored
+/// emission row. The sequence slice must contain all requested positions.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cfg_attr(target_arch = "x86_64", target_feature(enable = "sse2"))]
 pub unsafe fn p7_viterbi_filter(dsq: &[Dsq], l: usize, om: &OProfile) -> VitResult {

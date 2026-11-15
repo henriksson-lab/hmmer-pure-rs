@@ -200,6 +200,12 @@ fn parse_open_unit_f64(s: &str) -> Result<f64, String> {
 /// Used to calibrate E-value parameters and to benchmark DP engines.
 /// Corresponds to `process_workunit()`/`main()` in hmmer/src/hmmsim.c, much
 /// abbreviated (no MPI master/worker, no multi-HMM batch).
+///
+/// `args` follows command-line conventions: include the program name as the
+/// first element, followed by options and positional arguments. This is a CLI
+/// entry point that reads/writes the selected files and standard streams.
+/// Argument parsing may terminate the process for help or invalid arguments;
+/// command errors may also exit the process instead of returning an error.
 pub fn run(args: Vec<String>) -> ExitCode {
     let args_raw = args.clone();
     let args = Args::parse_from(&args);

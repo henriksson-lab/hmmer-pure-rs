@@ -24,6 +24,9 @@ pub struct OptAccTDelta {
 
 impl OptAccTDelta {
     /// Precompute the per-transition delta factors from a profile.
+    ///
+    /// Recompute these factors if `gm` transitions or alignment mode change;
+    /// reusing factors from another profile can change the allowed alignments.
     pub fn from_profile(gm: &Profile) -> Self {
         let mut td = vec![[0.0_f32; P7P_NTRANS]; gm.m + 1];
         for (k, row) in td.iter_mut().enumerate().take(gm.m + 1) {
@@ -52,12 +55,25 @@ impl OptAccTDelta {
 /// previously computed posterior decoding matrix `pp` for profile `gm`.
 /// Returns the OA score: the expected number of correctly decoded positions
 /// in the target sequence (≤ L). Counterpart of `p7_GOptimalAccuracy`.
+///
+/// `pp` must contain linear posterior probabilities for `gm`, such as the
+/// output of [`crate::dp::generic_decoding::g_decoding`]. Allocate `ox` for
+/// `gm.m` nodes and `pp.l` residues before calling; this routine overwrites
+/// its active cells without growing it. The result is an expected residue
+/// count, not a log score or a score in bits.
 pub fn g_optimal_accuracy(gm: &Profile, pp: &Gmx, ox: &mut Gmx) -> f32 {
     let deltas = OptAccTDelta::from_profile(gm);
     g_optimal_accuracy_with_deltas(gm, pp, ox, &deltas)
 }
 
 /// OA fill with caller-provided precomputed transition deltas (avoids reallocation).
+///
+/// `pp` must contain linear posterior probabilities for `gm`, such as the
+/// output of [`crate::dp::generic_decoding::g_decoding`]. Allocate `ox` for
+/// `gm.m` nodes and `pp.l` residues before calling; this routine overwrites
+/// its active cells without growing it. The result is an expected residue
+/// count, not a log score or a score in bits.
+/// `deltas` must have been constructed from the current configuration of `gm`.
 pub fn g_optimal_accuracy_with_deltas(
     gm: &Profile,
     pp: &Gmx,
@@ -207,6 +223,10 @@ pub fn g_optimal_accuracy_with_deltas(
 /// Recovers the OA alignment from a filled OA matrix `ox` and the posterior
 /// matrix `pp`, returning a `Trace` annotated for posterior-probability
 /// labelling. Counterpart of `p7_GOATrace`.
+///
+/// Use the same `gm` and posterior matrix `pp` that produced `ox` through
+/// [`g_optimal_accuracy`]. Model-node and emitted-residue coordinates in the
+/// returned trace are 1-based; its posterior annotations are probabilities.
 pub fn g_oa_trace(gm: &Profile, pp: &Gmx, ox: &Gmx) -> Trace {
     let mut tr = Trace::new();
     let mut i = ox.l;
@@ -414,6 +434,10 @@ fn argmax_first(values: &[f32]) -> usize {
 /// switch fall-through: M emits `MMX(i,k)`, I emits `IMX(i,k)`; the special
 /// states N/C/J contribute their `XMX` posterior only on a self-loop
 /// (`sprv == scur`), otherwise (and for every other state) the result is 0.0.
+///
+/// `scur` is the current trace state and `sprv` the preceding state. `i` is
+/// a 1-based residue coordinate and `k` a 1-based model-node coordinate for
+/// M/I states. `pp` must hold linear posterior probabilities.
 pub fn get_postprob(pp: &Gmx, scur: State, sprv: State, k: usize, i: usize) -> f32 {
     match scur {
         State::M => pp.mmx(i, k),

@@ -315,6 +315,9 @@ impl Pipeline {
     /// Configure the pipeline for a new query/target model.
     /// Port of `p7_pli_NewModel()`: copies the model's E-value calibration
     /// parameters into the pipeline so subsequent filter p-values use them.
+    /// Use a calibrated profile and call this whenever switching models.
+    /// This does not reset accumulated target/filter counters or load annotated
+    /// bit-score cutoffs; use [`Self::new_model_thresholds`] for those.
     pub fn new_model(&mut self, gm: &Profile) {
         self.evparam = gm.evparam;
     }
@@ -326,6 +329,9 @@ impl Pipeline {
         self.use_bit_cutoffs != BitCutoff::None || (!self.inc_by_e && self.inc_t.is_some())
     }
 
+    /// Return the ascending sort key for a target with `score` in bits and
+    /// `lnp` equal to the natural logarithm of its P-value. Depending on the
+    /// configured ranking mode, the key is either `-score` or `lnp`.
     pub fn hit_sortkey(&self, score: f32, lnp: f64) -> f64 {
         if self.score_sort_active() {
             -(score as f64)
@@ -334,6 +340,12 @@ impl Pipeline {
         }
     }
 
+    /// Test a target against the current reporting threshold.
+    ///
+    /// `score` is its corrected bit score; `lnp` is its natural-log P-value
+    /// (or the already adjusted significance value in long-target mode).
+    /// For ordinary searches, P-values are multiplied by the current target
+    /// database size before comparison with the E-value threshold.
     pub fn target_reportable(&self, score: f32, lnp: f64) -> bool {
         if self.by_e {
             if self.long_target {
@@ -420,6 +432,9 @@ impl Pipeline {
     /// Convenience wrapper: run the pipeline without requiring mutable profiles.
     /// Clones the profile and oprofile internally (~200KB per call).
     /// For high-throughput use, prefer `run()` with `&mut` profiles.
+    /// Arguments and the return value follow [`Self::run`], including its model
+    /// and alphabet prerequisites. Results are appended to `th`, and pipeline
+    /// counters still accumulate; only the two input profiles are cloned.
     pub fn run_cloned(
         &mut self,
         gm: &Profile,
@@ -438,6 +453,22 @@ impl Pipeline {
     /// Uses SIMD MSV filter for the first stage, then SIMD Viterbi and Forward.
     /// Reconfigures profile/oprofile length model per sequence (matching C).
     /// `om` is the SIMD-optimized profile, `hmm` is needed for domain definition.
+    ///
+    /// # Caller contract
+    ///
+    /// Call [`Self::new_model`] for this model first. `gm`, `om`, and `hmm`
+    /// must describe the same calibrated model, and `bg` and `sq` must use
+    /// its alphabet. `sq.n` counts residues, excluding digital sentinels;
+    /// `sq.dsq[1..=sq.n]` contains the target residues.
+    ///
+    /// The profiles are updated for `sq.n` internally; callers do not need to
+    /// choose a target length in advance. Pipeline counters accumulate across
+    /// calls, and accepted hits are appended to `th`.
+    ///
+    /// Returns `true` when a candidate hit was added, or `false` for an empty
+    /// target, a filtered target, or a comparison that did not produce a
+    /// stored hit. Final reporting/inclusion flags and counts can be
+    /// applied with [`TopHits::threshold`].
     pub fn run(
         &mut self,
         gm: &mut Profile,
@@ -983,6 +1014,9 @@ impl Default for Pipeline {
 }
 
 /// Calculate MSV p-value from raw score.
+/// `msv_sc` and `null_sc` are raw natural-log scores (nats), not bits.
+/// `evparam` is a calibrated model's six-element E-value parameter array.
+/// The returned upper-tail probability is on the linear scale, not log scale.
 pub fn msv_pvalue(msv_sc: f32, null_sc: f32, evparam: &[f32; 6]) -> f64 {
     let score = nats_to_bits_from_scores(msv_sc, null_sc);
     let mu = evparam[crate::hmm::P7_MMU] as f64;

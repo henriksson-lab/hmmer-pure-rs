@@ -89,6 +89,10 @@ impl ProbMx {
     /// Allocate a parser-mode `ProbMx` (specials + per-row scale only, no DP rows).
     /// Counterpart of `p7_omx_Create(allocM, 0, L)` in C — used by `*Parser()`
     /// kernels that only keep special-state scores.
+    ///
+    /// `l` counts target residues, excluding sentinel/boundary row 0, which
+    /// is included automatically. Parser storage cannot support core-state
+    /// posterior decoding or traceback; use [`Self::new_full`] for those tasks.
     pub fn new(l: usize) -> Self {
         let rows = l.checked_add(1).expect("ProbMx row count overflow");
         let xcells = rows
@@ -114,6 +118,10 @@ impl ProbMx {
     /// Allocate a full-matrix `ProbMx` (specials + scale + striped DP rows).
     /// Counterpart of `p7_omx_Create(M, L, L)` — sized for posterior decoding,
     /// optimal accuracy, or null2 work.
+    ///
+    /// `m` is the number of model match states; `l` is the number of target
+    /// residues. Boundary row and column 0 and SIMD padding are included
+    /// automatically. Shape arithmetic overflow panics.
     pub fn new_full(m: usize, l: usize) -> Self {
         let (rows, row_width, q, striped_row_width, striped_cells) = checked_probmx_shape(m, l);
         let xcells = rows
@@ -139,6 +147,10 @@ impl ProbMx {
 
     /// Reuse this matrix as parser-only storage (specials + scales, no DP rows).
     /// Analogue of `p7_omx_Reuse` + a parser-shape `p7_omx_GrowTo` in C.
+    ///
+    /// `l` counts target residues, excluding sentinel/boundary row 0, which
+    /// is included automatically. Parser storage cannot support core-state
+    /// posterior decoding or traceback; use [`Self::new_full`] for those tasks.
     pub fn resize_parser(&mut self, l: usize) {
         let rows = l.checked_add(1).expect("ProbMx row count overflow");
         let xcells = rows
@@ -164,6 +176,10 @@ impl ProbMx {
     /// Analogue of `p7_omx_Reuse` + `p7_omx_GrowTo(M, L, L)`. Hot Forward/
     /// Backward paths overwrite every active DP row; the same-size reuse
     /// fast-path avoids a full memset but always zeros the row-0 invariant.
+    ///
+    /// `m` is the number of model match states; `l` is the number of target
+    /// residues. Boundary row and column 0 and SIMD padding are included
+    /// automatically. Shape arithmetic overflow panics.
     pub fn resize_full(&mut self, m: usize, l: usize) {
         let (rows, row_width, q, striped_row_width, striped_cells) = checked_probmx_shape(m, l);
         let xcells = rows
@@ -296,6 +312,15 @@ impl ProbMx {
     /// # Safety
     /// `dp_simd` must hold exactly `q * 3` aligned vectors, and row `i` must
     /// be allocated.
+    ///
+    /// `q` must equal this matrix's stripe count. `dp_simd` stores three SIMD
+    /// vectors per stripe in M/D/I order; `i` selects the target row, including
+    /// boundary row 0. `_m` is unused.
+    ///
+    /// # Safety
+    /// Full striped storage for row `i` must be allocated and aligned, and
+    /// `dp_simd` must contain at least `3 * q` initialized vectors. The target
+    /// row must hold `q * 12` floats. Requires SSE2 on x86_64 or NEON on aarch64.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub unsafe fn write_simd_row(
         &mut self,
@@ -359,6 +384,10 @@ impl ProbMx {
         feature = "tracehash",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    ///
+    /// `i` is a row index in `0..=self.l`. `state` is 0 for M, 1 for D,
+    /// and 2 for I in the striped layout. Full DP storage is required; values
+    /// are returned or summed in the units currently stored in the matrix.
     pub fn striped_row_state_sum(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
@@ -380,6 +409,10 @@ impl ProbMx {
         feature = "tracehash",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    ///
+    /// `i` is a row index in `0..=self.l`. `state` is 0 for M, 1 for D,
+    /// and 2 for I in the striped layout. Full DP storage is required; values
+    /// are returned or summed in the units currently stored in the matrix.
     pub fn striped_row_state_sum_all_lanes(&self, i: usize, state: usize) -> f32 {
         let mut sum = 0.0_f32;
         let row_base = self.striped_dp_offset + i * self.striped_row_width;
@@ -398,6 +431,11 @@ impl ProbMx {
         feature = "tracehash",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    ///
+    /// `i` is a row index in `0..=self.l`. `state` is 0 for M, 1 for D,
+    /// and 2 for I in the striped layout. Full DP storage is required; values
+    /// are returned or summed in the units currently stored in the matrix.
+    /// `qi` is a zero-based stripe index smaller than [`Self::q_count`].
     pub fn striped_row_state_vector(&self, i: usize, state: usize, qi: usize) -> [f32; 4] {
         let off = self.striped_dp_offset
             + i * self.striped_row_width
@@ -417,6 +455,12 @@ impl ProbMx {
         feature = "tracehash",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    ///
+    /// `i` is a row index in `0..=self.l`. `state` is 0 for M, 1 for D,
+    /// and 2 for I in the striped layout. Full DP storage is required; values
+    /// are returned or summed in the units currently stored in the matrix.
+    /// `q_start..q_end` is a half-open stripe range, clipped to the available
+    /// stripe count; an empty or reversed range sums to zero.
     pub fn striped_row_state_q_range_sum(
         &self,
         i: usize,
@@ -447,6 +491,14 @@ impl ProbMx {
 /// per-position match-occupancy `mocc[i] = 1 - njcp` arrays. Uses per-row
 /// scale factors from `fwd.row_scale` and the `[n_loop, j_loop, c_loop]`
 /// transition floats supplied in `njc_loop`.
+///
+/// `m` is the model length in nodes and `l` the target length in residues.
+/// `fwd` and `bck` must come from the same configured profile and sequence,
+/// with compatible row-scaling information. `njc_loop` holds linear
+/// transition probabilities `[N_loop, J_loop, C_loop]`, not log scores.
+/// Outputs have length `l + 1`: entry 0 is zero; entries `1..=l` are
+/// cumulative expected domain starts, cumulative expected domain ends,
+/// and per-residue domain occupancy, respectively.
 pub fn p_domain_decoding(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -464,6 +516,14 @@ pub fn p_domain_decoding(
 /// In-place variant of `p_domain_decoding` that reuses caller-allocated
 /// `btot`, `etot`, `mocc` buffers — same algorithm and outputs as
 /// `p7_DomainDecoding()`.
+///
+/// `m` is the model length in nodes and `l` the target length in residues.
+/// `fwd` and `bck` must come from the same configured profile and sequence,
+/// with compatible row-scaling information. `njc_loop` holds linear
+/// transition probabilities `[N_loop, J_loop, C_loop]`, not log scores.
+/// Outputs have length `l + 1`: entry 0 is zero; entries `1..=l` are
+/// cumulative expected domain starts, cumulative expected domain ends,
+/// and per-residue domain occupancy, respectively.
 pub fn p_domain_decoding_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -569,6 +629,13 @@ pub fn p_domain_decoding_reuse(
 /// the SIMD Backward and the true values. Conceptually ports
 /// `p7_Null2_ByExpectation()` + the trailing correction integration done in
 /// `p7_domaindef`.
+///
+/// `ienv..=jenv` are inclusive, 1-based coordinates into `dsq`, which must
+/// contain that interval. `m` counts model nodes and `k` canonical symbols.
+/// The null2 distribution is estimated from all rows of `fwd`/`bck`; the
+/// coordinates select where to sum its correction, not which rows to fit.
+/// `rsc` contains generic-profile emission log odds in nats; `njc_loop`
+/// contains linear N/J/C loop probabilities. The result is in nats.
 pub fn p_null2_from_pmx(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -621,6 +688,12 @@ pub fn match_odds_from_rsc(rsc: &[Vec<f32>], k: usize, m: usize) -> Vec<f32> {
 /// scales reuses `scaleproduct` unchanged. D-state posteriors are zeroed
 /// (D is not a residue assignment). Dispatches to a striped fast path when
 /// both input matrices have striped DP storage.
+///
+/// Both inputs must contain full DP storage for the same sequence and
+/// profile. `m` counts model nodes and `njc_loop` contains linear N/J/C
+/// loop probabilities in that order. Allocate `pp` for `m` nodes and
+/// `fwd.l` residues before calling. Its active cells are overwritten
+/// with linear posterior probabilities, not log scores.
 pub fn p_decoding_to_gmx(fwd: &ProbMx, bck: &ProbMx, m: usize, njc_loop: [f32; 3], pp: &mut Gmx) {
     if !fwd.striped_dp.is_empty() && !bck.striped_dp.is_empty() {
         p_decoding_to_gmx_striped(fwd, bck, m, njc_loop, pp);
@@ -788,6 +861,14 @@ fn p_decoding_to_gmx_striped(
 /// and produces null2 odds `null2[x] = (sum_k exp_m[k] * match_odds[x,k]) +
 /// insert_total + xfactor` for each canonical residue `x`. Dispatches to a
 /// striped-DP fast path when available.
+///
+/// `m` counts model nodes; `k` is the number of canonical alphabet symbols.
+/// `match_odds` must contain `k * (m + 1)` linear emission odds, indexed as
+/// `match_odds[x * (m + 1) + node]` for `node = 1..=m`. The output has
+/// `k` canonical-symbol entries in alphabet-code order, each a linear odds
+/// ratio rather than a log correction.
+/// Use full Forward/Backward matrices for the same nonempty sequence and
+/// profile, and linear N/J/C loop probabilities in `njc_loop`.
 pub fn p_null2_odds_from_pmx(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -886,6 +967,15 @@ pub fn p_null2_odds_from_pmx(
 /// In-place variant of `p_null2_odds_from_pmx` that reuses caller-allocated
 /// `null2`, `exp_m`, `exp_i` scratch buffers. Dispatches to the striped fast
 /// path when both inputs have striped DP storage.
+///
+/// `m` counts model nodes; `k` is the number of canonical alphabet symbols.
+/// `match_odds` must contain `k * (m + 1)` linear emission odds, indexed as
+/// `match_odds[x * (m + 1) + node]` for `node = 1..=m`. The output has
+/// `k` canonical-symbol entries in alphabet-code order, each a linear odds
+/// ratio rather than a log correction.
+/// Use full Forward/Backward matrices for the same nonempty sequence and
+/// profile, and linear N/J/C loop probabilities in `njc_loop`.
+/// Output and scratch vectors may start empty; they are resized as needed.
 pub fn p_null2_odds_from_pmx_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -913,6 +1003,12 @@ pub fn p_null2_odds_from_pmx_reuse(
 /// matrix to accumulate `exp_m`/`exp_i` over rows 1..L (special handling for
 /// row 1 to mirror the C memcpy seeding), normalizes by `1/L`, and forms
 /// `null2[x] = sum_q (exp_m[qi] * rfv[x][qi] + exp_i[qi]) + xfactor`.
+///
+/// `k` is the number of canonical symbols. `rfv` is the matching optimized
+/// profile's striped Forward emission-odds table; its striping must match
+/// the input matrices. The output `null2` contains `k` linear odds ratios
+/// in alphabet-code order. Output and scratch vectors may initially be empty.
+/// Missing striped DP storage causes an early return without updating output.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn p_null2_odds_from_posteriors_reuse(
     pp: &ProbMx,
@@ -1017,6 +1113,12 @@ pub fn p_null2_odds_from_posteriors_reuse(
 /// but accumulates `exp_m`/`exp_i` and special-state expectations row-by-row
 /// in-place. Has SSE and scalar-fallback bodies. Uses `scaleproduct` rather
 /// than `exp(scale)`, matching the SSE convention used elsewhere here.
+///
+/// `k` is the number of canonical symbols. `rfv` is the matching optimized
+/// profile's striped Forward emission-odds table; its striping must match
+/// the input matrices. The output `null2` contains `k` linear odds ratios
+/// in alphabet-code order. Output and scratch vectors may initially be empty.
+/// Missing striped DP storage causes an early return without updating output.
 pub fn p_null2_odds_from_omx_expectation_reuse(
     fwd: &ProbMx,
     bck: &ProbMx,
@@ -1207,6 +1309,14 @@ pub fn p_null2_odds_from_omx_expectation_reuse(
 
 /// Compute null2 odds from an already-built generic posterior matrix `pp`.
 /// Convenience wrapper around `p_null2_odds_from_gmx_reuse`.
+///
+/// `m` counts model nodes; `k` is the number of canonical alphabet symbols.
+/// `match_odds` must contain `k * (m + 1)` linear emission odds, indexed as
+/// `match_odds[x * (m + 1) + node]` for `node = 1..=m`. The output has
+/// `k` canonical-symbol entries in alphabet-code order, each a linear odds
+/// ratio rather than a log correction.
+/// `pp` must contain linear posterior probabilities for a nonempty target,
+/// with `m` matching its model dimension.
 pub fn p_null2_odds_from_gmx(pp: &Gmx, m: usize, k: usize, match_odds: &[f32]) -> Vec<f32> {
     let mut null2 = Vec::new();
     let mut exp_m = Vec::new();
@@ -1221,6 +1331,15 @@ pub fn p_null2_odds_from_gmx(pp: &Gmx, m: usize, k: usize, match_odds: &[f32]) -
 /// Accumulates the M and I posteriors with striped indexing (so the result
 /// is bit-identical to the striped paths), then forms the same final
 /// `null2[x] = sum_k exp_m[k] * match_odds[x, k] + insert_total + xfactor`.
+///
+/// `m` counts model nodes; `k` is the number of canonical alphabet symbols.
+/// `match_odds` must contain `k * (m + 1)` linear emission odds, indexed as
+/// `match_odds[x * (m + 1) + node]` for `node = 1..=m`. The output has
+/// `k` canonical-symbol entries in alphabet-code order, each a linear odds
+/// ratio rather than a log correction.
+/// `pp` must contain linear posterior probabilities for a nonempty target,
+/// with `m` matching its model dimension.
+/// Output and scratch vectors may start empty; they are resized as needed.
 pub fn p_null2_odds_from_gmx_reuse(
     pp: &Gmx,
     m: usize,
